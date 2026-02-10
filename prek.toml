@@ -15,11 +15,11 @@ id = "eslint"
 name = "eslint"
 language = "system"
 entry = "bun eslint --fix"
-types_or = ["ts", "tsx", "js", "jsx"]
+types_or = ["ts", "tsx", "javascript", "jsx"]
 
 [[repos.hooks]]
 id = "prettier"
 name = "prettier"
 language = "system"
 entry = "bun prettier --write --ignore-unknown"
-types_or = ["ts", "tsx", "js", "jsx", "json", "css", "markdown", "yaml"]
+types_or = ["ts", "tsx", "javascript", "jsx", "json", "css", "markdown", "yaml"]

@@ -8,6 +8,7 @@ To install dependencies:
 ```bash
 mise install
 bun install
+prek install
 ```
 
 To run:
