@@ -26,7 +26,7 @@ graph TB
     tmpproxy["temp metadata proxy\n(127.0.0.1:random)"]
     app["Normal process\n(agent, tests, etc)"]
     elevated["Elevated process\n(script, migration, etc)"]
-    
+
     app -->|"GCE_METADATA_HOST\n(automatic)"| proxy
     elevated -->|"GCE_METADATA_HOST\n(overridden)"| tmpproxy
     withprod --> tmpproxy
@@ -38,8 +38,6 @@ graph TB
   proxy -->|"GET /token"| socket
   withprod -->|"GET /token?level=prod"| socket
 ```
-
-
 
 **Key security property:** Credentials never enter Docker. The Unix socket is the only channel, and the host daemon controls what tokens are issued.
 The container only gets downscoped credentials that are only valid for a certain TTL, not the user's root credentials (which would be dangerous if intercepted or exfiltrated).
@@ -77,7 +75,7 @@ WIF is a natural "Phase 2" enhancement if stronger audit trails or attribute con
 The following components (except for the prerequisites) can be implemented as sub-commands of `gcp-authcalator`.
 We'll distribute this as one single-file executable using `bun` to make deployment easy.
 Arguments for the necessary GCP configuration (like the project id, and which service account to impersonate for the default downscoped credentials, or what role/service account to escalate to via PAM for elevated credentials) should be configurable.
-The configuration options will be widely shared for consistency. 
+The configuration options will be widely shared for consistency.
 Accept them as CLI, or from a minimal toml file (the CLI takes precedence over the config file).
 Follow modern patterns for these settings, and ensure that all values are validated accordingly.
 
@@ -91,9 +89,7 @@ Follow modern patterns for these settings, and ensure that all values are valida
 
 A small HTTP server using the `google-auth-library` library. Runs on the host machine.
 
-
 **API (over Unix socket):**
-
 
 | Endpoint                | Behavior                                                                 |
 | ----------------------- | ------------------------------------------------------------------------ |
@@ -101,7 +97,6 @@ A small HTTP server using the `google-auth-library` library. Runs on the host ma
 | `GET /token?level=prod` | Shows host-side confirmation, then returns token for engineer's identity |
 | `GET /identity`         | Returns the authenticated user's email                                   |
 | `GET /health`           | Health check                                                             |
-
 
 **Token generation** uses `[iamcredentials.generateAccessToken](https://cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/generateAccessToken)` for dev tokens (1-hour TTL). For prod tokens, it uses the engineer's own ADC (which stays on the host).
 
