@@ -6,3 +6,4 @@
 - Use the latest versions of all dependencies and tools, this should be a modern project with no baggage.
 - Fix all warnings when you see them
 - Ask the user for clarifications if anything is unclear. DO NOT MAKE ASSUMPTIONS!
+- Save the plan you're working on as markdown in specs/
