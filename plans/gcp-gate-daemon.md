@@ -92,14 +92,14 @@ Factory function `createAuditModule(logDir?)` returns `{ writeAuditLog }`.
 
 Pure function `handleRequest(req, deps)` → `Response`. Routes:
 
-| Route | Handler |
-|-------|---------|
-| `GET /token` | Mint dev token via `deps.mintDevToken()`, return `{ access_token, expires_in, token_type }` |
-| `GET /token?level=prod` | Get email → confirm → mint prod token or 403 |
-| `GET /identity` | Return `{ email }` |
-| `GET /health` | Return `{ status: "ok", uptime_seconds }` |
-| Non-GET | 405 |
-| Unknown path | 404 |
+| Route                   | Handler                                                                                     |
+| ----------------------- | ------------------------------------------------------------------------------------------- |
+| `GET /token`            | Mint dev token via `deps.mintDevToken()`, return `{ access_token, expires_in, token_type }` |
+| `GET /token?level=prod` | Get email → confirm → mint prod token or 403                                                |
+| `GET /identity`         | Return `{ email }`                                                                          |
+| `GET /health`           | Return `{ status: "ok", uptime_seconds }`                                                   |
+| Non-GET                 | 405                                                                                         |
+| Unknown path            | 404                                                                                         |
 
 All responses are JSON with `Content-Type: application/json`. Audit entries written for all token requests (granted, denied, error).
 
@@ -128,14 +128,14 @@ Make `main()` async, `await runGate(config)` in the switch block. The server kee
 
 ## Test Strategy
 
-| File | Approach | Key coverage |
-|------|----------|-------------|
-| `handlers.test.ts` | Mock `GateDeps`, test pure request→response | All endpoints, error cases, audit log writes |
-| `auth.test.ts` | Inject mock GCP clients | Token minting, caching (5-min margin), email lookup |
-| `confirm.test.ts` | Inject mock spawner | zenity approve/deny/timeout, fallback to terminal |
-| `audit.test.ts` | Use temp directory | File creation, JSON lines format, append behavior |
-| `server.test.ts` | Start real server on temp socket | Full request cycle, startup/shutdown, stale socket cleanup |
-| `gate.test.ts` | Mock `startGateServer` | Config validation, delegation to server |
+| File               | Approach                                    | Key coverage                                               |
+| ------------------ | ------------------------------------------- | ---------------------------------------------------------- |
+| `handlers.test.ts` | Mock `GateDeps`, test pure request→response | All endpoints, error cases, audit log writes               |
+| `auth.test.ts`     | Inject mock GCP clients                     | Token minting, caching (5-min margin), email lookup        |
+| `confirm.test.ts`  | Inject mock spawner                         | zenity approve/deny/timeout, fallback to terminal          |
+| `audit.test.ts`    | Use temp directory                          | File creation, JSON lines format, append behavior          |
+| `server.test.ts`   | Start real server on temp socket            | Full request cycle, startup/shutdown, stale socket cleanup |
+| `gate.test.ts`     | Mock `startGateServer`                      | Config validation, delegation to server                    |
 
 ## Implementation Order
 
