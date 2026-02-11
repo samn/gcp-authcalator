@@ -36,6 +36,19 @@ jobs:
       - name: TypeScript
         run: bunx tsc --noEmit
 
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jdx/mise-action@v2
+
+      - run: bun install --frozen-lockfile
+
+      - name: Tests
+        run: bun test
+
   prek:
     name: Pre-commit hooks
     runs-on: ubuntu-latest
