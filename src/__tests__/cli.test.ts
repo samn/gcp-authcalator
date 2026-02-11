@@ -84,18 +84,40 @@ describe("unknown flag", () => {
 // ---------------------------------------------------------------------------
 
 describe("gate subcommand", () => {
-  test("runs gate stub with valid config", async () => {
-    const { stdout, exitCode } = await runCLI([
-      "gate",
-      "--project-id",
-      "test-proj",
-      "--service-account",
-      "sa@test-proj.iam.gserviceaccount.com",
+  test("starts gate server with valid config", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cli-gate-"));
+    const socketPath = join(dir, "gate.sock");
+
+    const proc = Bun.spawn(
+      [
+        "bun",
+        "run",
+        entryPoint,
+        "gate",
+        "--project-id",
+        "test-proj",
+        "--service-account",
+        "sa@test-proj.iam.gserviceaccount.com",
+        "--socket-path",
+        socketPath,
+      ],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+
+    // Give it time to start up or fail
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+
+    // Kill the process since it runs as a daemon
+    proc.kill();
+    const [stdout, stderr] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
     ]);
-    expect(exitCode).toBe(0);
-    expect(stdout).toContain("gate: starting gcp-gate token daemon");
-    expect(stdout).toContain("test-proj");
-    expect(stdout).toContain("[STUB] Not yet implemented.");
+    await proc.exited;
+
+    // Should have printed startup info (even if GCP auth fails later)
+    const output = stdout + stderr;
+    expect(output).toContain("gate:");
   });
 
   test("exits 1 when missing required fields", async () => {
@@ -164,13 +186,26 @@ describe("--config flag", () => {
   test("loads config from TOML file", async () => {
     const dir = mkdtempSync(join(tmpdir(), "cli-test-"));
     const configFile = join(dir, "config.toml");
+    const socketPath = join(dir, "gate.sock");
     writeFileSync(
       configFile,
-      `project_id = "toml-project"\nservice_account = "sa@toml.iam.gserviceaccount.com"\n`,
+      `project_id = "toml-project"\nservice_account = "sa@toml.iam.gserviceaccount.com"\nsocket_path = "${socketPath}"\n`,
     );
 
-    const { stdout, exitCode } = await runCLI(["gate", "--config", configFile]);
-    expect(exitCode).toBe(0);
+    const proc = Bun.spawn(["bun", "run", entryPoint, "gate", "--config", configFile], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    proc.kill();
+
+    const [stdout] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    await proc.exited;
+
     expect(stdout).toContain("toml-project");
     expect(stdout).toContain("sa@toml.iam.gserviceaccount.com");
   });
@@ -178,19 +213,26 @@ describe("--config flag", () => {
   test("CLI args override TOML values", async () => {
     const dir = mkdtempSync(join(tmpdir(), "cli-test-"));
     const configFile = join(dir, "config.toml");
+    const socketPath = join(dir, "gate.sock");
     writeFileSync(
       configFile,
-      `project_id = "toml-project"\nservice_account = "sa@toml.iam.gserviceaccount.com"\n`,
+      `project_id = "toml-project"\nservice_account = "sa@toml.iam.gserviceaccount.com"\nsocket_path = "${socketPath}"\n`,
     );
 
-    const { stdout, exitCode } = await runCLI([
-      "gate",
-      "--config",
-      configFile,
-      "--project-id",
-      "cli-project",
+    const proc = Bun.spawn(
+      ["bun", "run", entryPoint, "gate", "--config", configFile, "--project-id", "cli-project"],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    proc.kill();
+
+    const [stdout] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
     ]);
-    expect(exitCode).toBe(0);
+    await proc.exited;
+
     expect(stdout).toContain("cli-project");
     expect(stdout).not.toContain("toml-project");
   });

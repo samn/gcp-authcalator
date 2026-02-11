@@ -1,39 +1,66 @@
-import { describe, expect, test, beforeEach, afterEach, spyOn } from "bun:test";
+import { describe, expect, test, afterEach } from "bun:test";
 import { z } from "zod";
-import { runGate } from "../../commands/gate.ts";
+import { mkdtempSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import type { AuthClient } from "google-auth-library";
+import { GateConfigSchema } from "../../config.ts";
+import { startGateServer, type GateServerResult } from "../../gate/server.ts";
+
+function mockClient(token: string): AuthClient {
+  return {
+    getAccessToken: async () => ({ token, res: null }),
+  } as unknown as AuthClient;
+}
+
+function mockFetch(email: string): typeof globalThis.fetch {
+  return (async () =>
+    new Response(JSON.stringify({ email }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })) as unknown as typeof globalThis.fetch;
+}
 
 describe("runGate", () => {
-  let logSpy: ReturnType<typeof spyOn>;
-
-  beforeEach(() => {
-    logSpy = spyOn(console, "log").mockImplementation(() => {});
-  });
+  let result: GateServerResult | null = null;
 
   afterEach(() => {
-    logSpy.mockRestore();
+    if (result) {
+      result.stop();
+      result = null;
+    }
   });
 
-  test("logs expected output with valid config", () => {
-    runGate({
+  test("validates config and starts server", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gate-cmd-"));
+    const socketPath = join(dir, "gate.sock");
+
+    const config = GateConfigSchema.parse({
       project_id: "test-proj",
       service_account: "sa@test-proj.iam.gserviceaccount.com",
-      socket_path: "/tmp/gate.sock",
+      socket_path: socketPath,
       port: 8173,
     });
 
-    const output = logSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
-    expect(output).toContain("gate: starting gcp-gate token daemon");
-    expect(output).toContain("test-proj");
-    expect(output).toContain("sa@test-proj.iam.gserviceaccount.com");
-    expect(output).toContain("/tmp/gate.sock");
-    expect(output).toContain("GET /token");
-    expect(output).toContain("GET /health");
-    expect(output).toContain("[STUB] Not yet implemented.");
+    result = await startGateServer(config, {
+      authOptions: {
+        sourceClient: mockClient("src-tok"),
+        impersonatedClient: mockClient("dev-tok"),
+        fetchFn: mockFetch("user@test.com"),
+      },
+      auditLogDir: join(dir, "audit"),
+    });
+
+    // Verify server is running by hitting health endpoint
+    const res = await fetch("http://localhost/health", {
+      unix: socketPath,
+    } as RequestInit);
+    expect(res.status).toBe(200);
   });
 
   test("throws ZodError when project_id is missing", () => {
     expect(() =>
-      runGate({
+      GateConfigSchema.parse({
         socket_path: "/tmp/gate.sock",
         port: 8173,
       }),
@@ -42,7 +69,7 @@ describe("runGate", () => {
 
   test("throws ZodError when service_account is missing", () => {
     expect(() =>
-      runGate({
+      GateConfigSchema.parse({
         project_id: "test-proj",
         socket_path: "/tmp/gate.sock",
         port: 8173,

@@ -38,7 +38,7 @@ function isSubcommand(value: string): value is Subcommand {
   return (SUBCOMMANDS as readonly string[]).includes(value);
 }
 
-export function main(argv: string[] = process.argv.slice(2)): void {
+export async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
   const { values, positionals } = parseArgs({
     args: argv,
     strict: true,
@@ -97,7 +97,7 @@ export function main(argv: string[] = process.argv.slice(2)): void {
   try {
     switch (subcommand) {
       case "gate":
-        runGate(config);
+        await runGate(config);
         break;
       case "metadata-proxy":
         runMetadataProxy(config);
