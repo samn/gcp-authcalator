@@ -74,8 +74,12 @@ export function startMetadataProxyServer(
     console.log(`  port:        ${server.port}`);
     console.log(`  socket path: ${config.socket_path}`);
     console.log("  endpoints:");
-    console.log("    GET /                                                        → detection ping");
-    console.log("    GET /computeMetadata/v1/instance/service-accounts/default/token → access token");
+    console.log(
+      "    GET /                                                        → detection ping",
+    );
+    console.log(
+      "    GET /computeMetadata/v1/instance/service-accounts/default/token → access token",
+    );
     console.log("    GET /computeMetadata/v1/project/project-id                    → project ID");
     console.log("    GET /computeMetadata/v1/instance/service-accounts/default/email → SA email");
   }

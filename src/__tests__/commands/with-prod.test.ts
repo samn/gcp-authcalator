@@ -53,17 +53,14 @@ describe("runWithProd", () => {
 
   test("happy path: fetches token, spawns command with correct env vars, propagates exit code", async () => {
     const mockFetchFn = (async () =>
-      new Response(
-        JSON.stringify({ access_token: "prod-token-abc", expires_in: 1800 }),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      )) as unknown as typeof globalThis.fetch;
+      new Response(JSON.stringify({ access_token: "prod-token-abc", expires_in: 1800 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })) as unknown as typeof globalThis.fetch;
 
     let capturedCmd: string[] = [];
     let capturedEnv: Record<string, string | undefined> = {};
-    const mockSpawnFn = (
-      cmd: string[],
-      opts: { env: Record<string, string | undefined> },
-    ) => {
+    const mockSpawnFn = (cmd: string[], opts: { env: Record<string, string | undefined> }) => {
       capturedCmd = cmd;
       capturedEnv = opts.env;
       return {
@@ -129,12 +126,12 @@ describe("runWithProd", () => {
 
   test("propagates non-zero exit code from child process", async () => {
     const mockFetchFn = (async () =>
-      new Response(
-        JSON.stringify({ access_token: "tok", expires_in: 3600 }),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      )) as unknown as typeof globalThis.fetch;
+      new Response(JSON.stringify({ access_token: "tok", expires_in: 3600 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })) as unknown as typeof globalThis.fetch;
 
-    const mockSpawnFn = (cmd: string[]) => {
+    const mockSpawnFn = (_cmd: string[]) => {
       return {
         exited: Promise.resolve(42),
         kill: () => {},
