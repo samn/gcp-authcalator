@@ -159,18 +159,16 @@ describe("metadata-proxy subcommand", () => {
 });
 
 describe("with-prod subcommand", () => {
-  test("runs with-prod stub with valid config and command", async () => {
-    const { stdout, exitCode } = await runCLI([
+  test("exits 1 when token fetch fails (no gate socket)", async () => {
+    const { stderr, exitCode } = await runCLI([
       "with-prod",
       "--project-id",
       "test-proj",
-      "python",
-      "script.py",
+      "echo",
+      "hello",
     ]);
-    expect(exitCode).toBe(0);
-    expect(stdout).toContain("with-prod: wrapping command with prod credentials");
-    expect(stdout).toContain("python script.py");
-    expect(stdout).toContain("[STUB] Not yet implemented.");
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("failed to acquire prod token");
   });
 
   test("exits 1 when no wrapped command provided", async () => {

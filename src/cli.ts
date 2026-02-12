@@ -104,7 +104,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
         break;
       case "with-prod": {
         const wrappedCommand = positionals.slice(1);
-        runWithProd(config, wrappedCommand);
+        await runWithProd(config, wrappedCommand);
         break;
       }
     }
