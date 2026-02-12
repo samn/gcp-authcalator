@@ -15,7 +15,5 @@ Before committing code, always run the full verification suite:
 
 1. `bun run format` — auto-fix formatting with Prettier
 2. `bun run lint` — run ESLint (also auto-fixes via prek)
-3. `bunx tsc --noEmit` — ensure no type errors
+3. `bun run typecheck` — ensure no type errors
 4. `bun test` — ensure all tests pass
-
-These checks mirror what CI runs (`prek run --all-files` in CI triggers ESLint and Prettier, plus there are separate CI jobs for typecheck and test). The pre-commit hooks are managed by `prek` (configured in `prek.toml`), which runs ESLint with `--fix` and Prettier with `--write` on staged files. If `prek` is available locally, you can run `prek run --all-files` to execute all hooks.

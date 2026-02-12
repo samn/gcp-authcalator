@@ -23,3 +23,12 @@ name = "prettier"
 language = "system"
 entry = "bun prettier --write --ignore-unknown"
 types_or = ["ts", "tsx", "javascript", "jsx", "json", "css", "markdown", "yaml"]
+
+
+[[repos.hooks]]
+id = "tsc compile"
+name = "tsc compile"
+language = "system"
+entry = "bun run typecheck"
+pass_filenames = false
+types_or = ["ts", "tsx"]
