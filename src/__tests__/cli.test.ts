@@ -128,19 +128,27 @@ describe("gate subcommand", () => {
 });
 
 describe("metadata-proxy subcommand", () => {
-  test("runs metadata-proxy stub with valid config", async () => {
-    const { stdout, exitCode } = await runCLI([
-      "metadata-proxy",
-      "--project-id",
-      "test-proj",
-      "--port",
-      "9090",
+  test("starts metadata-proxy server with valid config", async () => {
+    const proc = Bun.spawn(
+      ["bun", "run", entryPoint, "metadata-proxy", "--project-id", "test-proj", "--port", "19200"],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+
+    // Give it time to start up
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+
+    // Kill the process since it runs as a daemon
+    proc.kill();
+    const [stdout, stderr] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
     ]);
-    expect(exitCode).toBe(0);
-    expect(stdout).toContain("metadata-proxy: starting GCE metadata server emulator");
-    expect(stdout).toContain("test-proj");
-    expect(stdout).toContain("9090");
-    expect(stdout).toContain("[STUB] Not yet implemented.");
+    await proc.exited;
+
+    const output = stdout + stderr;
+    expect(output).toContain("metadata-proxy:");
+    expect(output).toContain("test-proj");
+    expect(output).toContain("19200");
   });
 
   test("exits 1 when missing project_id", async () => {

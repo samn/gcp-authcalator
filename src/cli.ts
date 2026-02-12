@@ -100,7 +100,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
         await runGate(config);
         break;
       case "metadata-proxy":
-        runMetadataProxy(config);
+        await runMetadataProxy(config);
         break;
       case "with-prod": {
         const wrappedCommand = positionals.slice(1);
