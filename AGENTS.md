@@ -1,4 +1,5 @@
 - Use `mise` to manage the toolchain for this project to ensure a consistent development environment. Pin versions.
+- Install precommit checks when setting up a new environment (after installing tools with `mise`) by running `prek install`
 - Use `bun` to test and run this project
 - Make sure that all types compile without warnings.
 - Write tests for all functionality that you create. The tests should be robust and reliable.

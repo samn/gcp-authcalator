@@ -71,7 +71,15 @@ async function tryTerminalPrompt(email: string): Promise<boolean> {
     process.stdin.resume();
     process.stdin.setEncoding("utf-8");
 
+    const timeout = setTimeout(() => {
+      process.stdin.pause();
+      process.stdin.removeListener("data", onData);
+      console.log("\nconfirm: timed out waiting for response, denying prod access");
+      resolve(false);
+    }, 60_000);
+
     const onData = (data: string) => {
+      clearTimeout(timeout);
       process.stdin.pause();
       process.stdin.removeListener("data", onData);
       const answer = data.toString().trim().toLowerCase();
@@ -79,13 +87,5 @@ async function tryTerminalPrompt(email: string): Promise<boolean> {
     };
 
     process.stdin.on("data", onData);
-
-    // Timeout after 60 seconds
-    setTimeout(() => {
-      process.stdin.pause();
-      process.stdin.removeListener("data", onData);
-      console.log("\nconfirm: timed out waiting for response, denying prod access");
-      resolve(false);
-    }, 60_000);
   });
 }
