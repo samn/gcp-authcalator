@@ -1,9 +1,10 @@
-import { describe, expect, test, afterEach } from "bun:test";
+import { describe, expect, test, afterEach, spyOn } from "bun:test";
 import {
   startMetadataProxyServer,
   type MetadataProxyServerResult,
 } from "../../metadata-proxy/server.ts";
 import type { MetadataProxyConfig } from "../../config.ts";
+import type { TokenProvider } from "../../metadata-proxy/types.ts";
 
 /** Port counter to avoid collisions between tests. */
 let nextPort = 19100;
@@ -148,6 +149,82 @@ describe("startMetadataProxyServer", () => {
       expect(true).toBe(false);
     } catch {
       // Expected: connection refused
+    }
+  });
+
+  test("uses custom tokenProvider instead of gate client", async () => {
+    const port = nextPort++;
+    const config = makeConfig(port);
+
+    const customProvider: TokenProvider = {
+      getToken: async () => ({
+        access_token: "custom-provider-token",
+        expires_at: new Date(Date.now() + 3600_000),
+      }),
+    };
+
+    result = startMetadataProxyServer(config, { tokenProvider: customProvider });
+
+    const res = await fetch(
+      `http://127.0.0.1:${port}/computeMetadata/v1/instance/service-accounts/default/token`,
+      { headers: { "Metadata-Flavor": "Google" } },
+    );
+    expect(res.status).toBe(200);
+
+    const body = (await res.json()) as { access_token: string };
+    expect(body.access_token).toBe("custom-provider-token");
+  });
+
+  test("port 0 assigns a random port", async () => {
+    const config: MetadataProxyConfig = {
+      project_id: "test-project",
+      service_account: "sa@test-project.iam.gserviceaccount.com",
+      socket_path: "/tmp/test-gate.sock",
+      port: 0,
+    };
+
+    const customProvider: TokenProvider = {
+      getToken: async () => ({
+        access_token: "tok",
+        expires_at: new Date(Date.now() + 3600_000),
+      }),
+    };
+
+    result = startMetadataProxyServer(config, {
+      tokenProvider: customProvider,
+      quiet: true,
+    });
+
+    // server.port should be a real port, not 0
+    expect(result.server.port).toBeGreaterThan(0);
+
+    const res = await fetch(`http://127.0.0.1:${result.server.port}/`);
+    expect(res.status).toBe(200);
+  });
+
+  test("quiet: true suppresses startup logs", async () => {
+    const port = nextPort++;
+    const config = makeConfig(port);
+    const logSpy = spyOn(console, "log").mockImplementation(() => {});
+
+    try {
+      const customProvider: TokenProvider = {
+        getToken: async () => ({
+          access_token: "tok",
+          expires_at: new Date(Date.now() + 3600_000),
+        }),
+      };
+
+      result = startMetadataProxyServer(config, {
+        tokenProvider: customProvider,
+        quiet: true,
+      });
+
+      // No startup logs should have been emitted
+      const calls = logSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
+      expect(calls).not.toContain("metadata-proxy: starting");
+    } finally {
+      logSpy.mockRestore();
     }
   });
 });
