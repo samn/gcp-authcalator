@@ -71,6 +71,7 @@ export async function runWithProd(
       tokenProvider,
       installSignalHandlers: false,
       quiet: true,
+      allowedAncestorPid: process.pid,
     },
   );
 
@@ -82,8 +83,8 @@ export async function runWithProd(
     env: {
       ...process.env,
       GCE_METADATA_HOST: metadataHost,
-      CLOUDSDK_AUTH_ACCESS_TOKEN: tokenResult.access_token,
-      CPL_GS_BEARER: tokenResult.access_token,
+      CLOUDSDK_AUTH_ACCESS_TOKEN: undefined,
+      CPL_GS_BEARER: undefined,
     },
     stdin: "inherit",
     stdout: "inherit",
