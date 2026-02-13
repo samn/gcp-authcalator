@@ -8,19 +8,29 @@
 
 import { readFileSync, readdirSync, readlinkSync } from "node:fs";
 
+/** Abstraction over filesystem calls so tests can provide fake /proc data. */
+export interface ProcFS {
+  readFileSync(path: string): string;
+  readdirSync(path: string): string[];
+  readlinkSync(path: string): string;
+}
+
+const defaultProcFS: ProcFS = {
+  readFileSync: (path) => readFileSync(path, "utf-8"),
+  readdirSync: (path) => readdirSync(path),
+  readlinkSync: (path) => readlinkSync(path),
+};
+
 /**
  * Given a local TCP port, find the PID that owns the socket.
  *
- * 1. Parse /proc/net/tcp to find the socket inode for the given local port
+ * 1. Parse /proc/net/tcp and /proc/net/tcp6 to find the socket inode for the given local port
  * 2. Scan /proc/{pid}/fd/ symlinks to find which PID holds that inode
  */
-export function getOwnerPid(localPort: number): number | null {
-  // Step 1: Find the socket inode from /proc/net/tcp
-  const inode = findSocketInode(localPort);
+export function getOwnerPid(localPort: number, fs: ProcFS = defaultProcFS): number | null {
+  const inode = findSocketInode(localPort, fs);
   if (inode === null) return null;
-
-  // Step 2: Find the PID owning that inode
-  return findPidByInode(inode);
+  return findPidByInode(inode, fs);
 }
 
 /**
@@ -29,7 +39,11 @@ export function getOwnerPid(localPort: number): number | null {
  *
  * Returns true if pid == ancestorPid or if any ancestor of pid == ancestorPid.
  */
-export function isDescendantOf(pid: number, ancestorPid: number): boolean {
+export function isDescendantOf(
+  pid: number,
+  ancestorPid: number,
+  fs: ProcFS = defaultProcFS,
+): boolean {
   let current = pid;
   // Limit iterations to prevent infinite loops on broken /proc
   const maxDepth = 256;
@@ -38,7 +52,7 @@ export function isDescendantOf(pid: number, ancestorPid: number): boolean {
     if (current === ancestorPid) return true;
     if (current <= 1) return false;
 
-    const ppid = getParentPid(current);
+    const ppid = getParentPid(current, fs);
     if (ppid === null || ppid === current) return false;
     current = ppid;
   }
@@ -47,26 +61,41 @@ export function isDescendantOf(pid: number, ancestorPid: number): boolean {
 }
 
 /**
- * Parse /proc/net/tcp to find the inode of the socket bound to the given
- * local port on 127.0.0.1.
+ * Parse /proc/net/tcp and /proc/net/tcp6 to find the inode of the socket
+ * bound to the given local port on 127.0.0.1.
  *
  * /proc/net/tcp format (whitespace-delimited):
  *   sl local_address rem_address st tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode
  *
  * local_address is hex IP:hex port (e.g., "0100007F:1F90" = 127.0.0.1:8080)
+ *
+ * /proc/net/tcp6 uses 128-bit addresses. 127.0.0.1 appears as the
+ * IPv4-mapped IPv6 address: 0000000000000000FFFF00000100007F
  */
-function findSocketInode(localPort: number): number | null {
+function findSocketInode(localPort: number, fs: ProcFS): number | null {
+  const portHex = localPort.toString(16).toUpperCase().padStart(4, "0");
+
+  // Try /proc/net/tcp first (IPv4), then /proc/net/tcp6 (IPv6 / IPv4-mapped)
+  const targets: [string, string][] = [
+    ["/proc/net/tcp", `0100007F:${portHex}`],
+    ["/proc/net/tcp6", `0000000000000000FFFF00000100007F:${portHex}`],
+  ];
+
+  for (const [path, localAddrTarget] of targets) {
+    const inode = findInodeInFile(path, localAddrTarget, fs);
+    if (inode !== null) return inode;
+  }
+
+  return null;
+}
+
+function findInodeInFile(path: string, localAddrTarget: string, fs: ProcFS): number | null {
   let data: string;
   try {
-    data = readFileSync("/proc/net/tcp", "utf-8");
+    data = fs.readFileSync(path);
   } catch {
     return null;
   }
-
-  // Port as 4-digit uppercase hex
-  const portHex = localPort.toString(16).toUpperCase().padStart(4, "0");
-  // 127.0.0.1 in little-endian hex
-  const localAddrTarget = `0100007F:${portHex}`;
 
   const lines = data.split("\n");
   // Skip header line
@@ -90,12 +119,12 @@ function findSocketInode(localPort: number): number | null {
  * Scan /proc/{pid}/fd/ to find which PID owns a socket with the given inode.
  * Socket fd symlinks look like: socket:[12345]
  */
-function findPidByInode(inode: number): number | null {
+function findPidByInode(inode: number, fs: ProcFS): number | null {
   const target = `socket:[${inode}]`;
   let entries: string[];
 
   try {
-    entries = readdirSync("/proc");
+    entries = fs.readdirSync("/proc");
   } catch {
     return null;
   }
@@ -107,7 +136,7 @@ function findPidByInode(inode: number): number | null {
 
     let fds: string[];
     try {
-      fds = readdirSync(`/proc/${pid}/fd`);
+      fds = fs.readdirSync(`/proc/${pid}/fd`);
     } catch {
       // Permission denied or process gone — skip
       continue;
@@ -115,7 +144,7 @@ function findPidByInode(inode: number): number | null {
 
     for (const fd of fds) {
       try {
-        const link = readlinkSync(`/proc/${pid}/fd/${fd}`);
+        const link = fs.readlinkSync(`/proc/${pid}/fd/${fd}`);
         if (link === target) return pid;
       } catch {
         continue;
@@ -129,9 +158,9 @@ function findPidByInode(inode: number): number | null {
 /**
  * Read the PPid field from /proc/<pid>/status.
  */
-function getParentPid(pid: number): number | null {
+function getParentPid(pid: number, fs: ProcFS): number | null {
   try {
-    const data = readFileSync(`/proc/${pid}/status`, "utf-8");
+    const data = fs.readFileSync(`/proc/${pid}/status`);
     const match = data.match(/^PPid:\s*(\d+)/m);
     if (!match?.[1]) return null;
     return parseInt(match[1], 10);
