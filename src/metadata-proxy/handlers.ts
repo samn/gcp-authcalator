@@ -49,13 +49,18 @@ export async function handleRequest(req: Request, deps: MetadataProxyDeps): Prom
       return textResponse("Missing Metadata-Flavor:Google header.", 403);
     }
 
-    switch (url.pathname) {
+    // Normalize trailing slashes for path matching
+    const pathname = url.pathname.replace(/\/+$/, "") || "/";
+
+    switch (pathname) {
       case "/computeMetadata/v1/instance/service-accounts/default/token":
         return handleToken(deps);
       case "/computeMetadata/v1/project/project-id":
         return handleProjectId(deps);
       case "/computeMetadata/v1/instance/service-accounts/default/email":
         return handleEmail(deps);
+      case "/computeMetadata/v1/instance/service-accounts/default":
+        return handleServiceAccountInfo(url, deps);
       default:
         return textResponse("Not found", 404);
     }
@@ -91,4 +96,29 @@ function handleEmail(deps: MetadataProxyDeps): Response {
     return textResponse("Not found", 404);
   }
   return textResponse(deps.serviceAccountEmail);
+}
+
+/**
+ * Handles GET /computeMetadata/v1/instance/service-accounts/default/
+ *
+ * With `?recursive=true`, returns a JSON object with the service account's
+ * email, aliases, and scopes (mirrors real GCE metadata behavior).
+ * Sensitive entries like `token` and `identity` are excluded.
+ *
+ * Without `recursive=true`, returns a text directory listing of available
+ * sub-endpoints.
+ */
+function handleServiceAccountInfo(url: URL, deps: MetadataProxyDeps): Response {
+  const recursive = url.searchParams.get("recursive") === "true";
+
+  if (recursive) {
+    return jsonResponse({
+      aliases: ["default"],
+      email: deps.serviceAccountEmail ?? "default",
+      scopes: ["https://www.googleapis.com/auth/cloud-platform"],
+    });
+  }
+
+  // Non-recursive: return a text directory listing (like the real metadata server)
+  return textResponse("aliases\nemail\nscopes\ntoken\n");
 }

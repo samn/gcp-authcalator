@@ -165,6 +165,65 @@ describe("GET /computeMetadata/v1/instance/service-accounts/default/email", () =
 });
 
 // ---------------------------------------------------------------------------
+// GET /computeMetadata/v1/instance/service-accounts/default/ (recursive)
+// ---------------------------------------------------------------------------
+
+describe("GET /computeMetadata/v1/instance/service-accounts/default/", () => {
+  test("returns JSON service account info with recursive=true", async () => {
+    const deps = makeDeps({ serviceAccountEmail: "sa@project.iam.gserviceaccount.com" });
+    const res = await handleRequest(
+      metadataRequest("/computeMetadata/v1/instance/service-accounts/default/?recursive=true"),
+      deps,
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toBe("application/json");
+    expect(res.headers.get("Metadata-Flavor")).toBe("Google");
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.email).toBe("sa@project.iam.gserviceaccount.com");
+    expect(body.aliases).toEqual(["default"]);
+    expect(body.scopes).toEqual(["https://www.googleapis.com/auth/cloud-platform"]);
+  });
+
+  test("does not include token in recursive response", async () => {
+    const res = await handleRequest(
+      metadataRequest("/computeMetadata/v1/instance/service-accounts/default/?recursive=true"),
+      makeDeps(),
+    );
+
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body).not.toHaveProperty("token");
+    expect(body).not.toHaveProperty("identity");
+  });
+
+  test("returns text directory listing without recursive param", async () => {
+    const res = await handleRequest(
+      metadataRequest("/computeMetadata/v1/instance/service-accounts/default/"),
+      makeDeps(),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toBe("text/plain");
+    const body = await res.text();
+    expect(body).toContain("email");
+    expect(body).toContain("token");
+    expect(body).toContain("scopes");
+    expect(body).toContain("aliases");
+  });
+
+  test("handles path without trailing slash", async () => {
+    const res = await handleRequest(
+      metadataRequest("/computeMetadata/v1/instance/service-accounts/default?recursive=true"),
+      makeDeps(),
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.email).toBe("sa@test-project.iam.gserviceaccount.com");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Non-GET methods
 // ---------------------------------------------------------------------------
 
