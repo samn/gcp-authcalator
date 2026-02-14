@@ -5,12 +5,14 @@ type SpawnFn = (cmd: string[], opts?: { stdin?: "pipe" | "inherit" }) => Subproc
 export interface ConfirmOptions {
   /** Override Bun.spawn for testing. */
   spawn?: SpawnFn;
+  /** Override process.platform for testing. */
+  platform?: string;
 }
 
 /**
  * Create a confirmation module for prod token access.
  *
- * Primary: zenity GUI dialog with 60s timeout.
+ * Primary: platform-specific GUI dialog (osascript on macOS, zenity on Linux).
  * Fallback: terminal prompt on stdin (if TTY).
  * Default: deny if no interactive method is available.
  */
@@ -18,14 +20,16 @@ export function createConfirmModule(options: ConfirmOptions = {}): {
   confirmProdAccess: (email: string) => Promise<boolean>;
 } {
   const spawnFn = options.spawn ?? (Bun.spawn as unknown as SpawnFn);
+  const platform = options.platform ?? process.platform;
 
   async function confirmProdAccess(email: string): Promise<boolean> {
-    // Try zenity first
+    const tryGui = platform === "darwin" ? tryOsascript : tryZenity;
+
     try {
-      const result = await tryZenity(email, spawnFn);
+      const result = await tryGui(email, spawnFn);
       if (result !== null) return result;
     } catch {
-      // zenity not available, fall through to terminal
+      // GUI not available, fall through to terminal
     }
 
     // Fallback to terminal prompt
@@ -53,6 +57,27 @@ async function tryZenity(email: string, spawnFn: SpawnFn): Promise<boolean | nul
 
   // Unexpected exit code — treat as "zenity not available"
   // (e.g., exit 127 = command not found on some systems)
+  if (exitCode === 127) return null;
+  return false;
+}
+
+async function tryOsascript(email: string, spawnFn: SpawnFn): Promise<boolean | null> {
+  // Escape backslashes and double quotes to prevent AppleScript injection
+  const escaped = email.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+
+  const proc = spawnFn([
+    "osascript",
+    "-e",
+    `set r to display dialog "Grant prod-level GCP access to ${escaped}?" buttons {"Deny", "Allow"} default button "Deny" with icon caution giving up after 60`,
+    "-e",
+    'if button returned of r is not "Allow" or gave up of r is true then error "denied"',
+  ]);
+
+  const exitCode = await proc.exited;
+
+  // Exit 0 = Allow clicked, exit 1 = Deny/timeout/escape, exit 127 = not found
+  if (exitCode === 0) return true;
+  if (exitCode === 1) return false;
   if (exitCode === 127) return null;
   return false;
 }
