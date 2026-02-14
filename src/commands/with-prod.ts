@@ -71,6 +71,7 @@ export async function runWithProd(
       tokenProvider,
       installSignalHandlers: false,
       quiet: true,
+      allowedAncestorPid: process.pid,
     },
   );
 
@@ -78,13 +79,11 @@ export async function runWithProd(
 
   // Step 3: Spawn wrapped command with metadata env vars
   const spawnFn = options.spawnFn ?? (Bun.spawn as unknown as SpawnFn);
+  const { CLOUDSDK_AUTH_ACCESS_TOKEN: _, CPL_GS_BEARER: __, ...parentEnv } = process.env;
+  const env = { ...parentEnv, GCE_METADATA_HOST: metadataHost };
+
   const child = spawnFn(wrappedCommand, {
-    env: {
-      ...process.env,
-      GCE_METADATA_HOST: metadataHost,
-      CLOUDSDK_AUTH_ACCESS_TOKEN: tokenResult.access_token,
-      CPL_GS_BEARER: tokenResult.access_token,
-    },
+    env,
     stdin: "inherit",
     stdout: "inherit",
     stderr: "inherit",

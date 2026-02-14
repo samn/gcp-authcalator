@@ -87,10 +87,10 @@ describe("runWithProd", () => {
     // Verify the command was passed through
     expect(capturedCmd).toEqual(["echo", "hello"]);
 
-    // Verify env vars are set
+    // Verify metadata proxy env var is set, raw tokens are NOT exposed
     expect(capturedEnv.GCE_METADATA_HOST).toMatch(/^127\.0\.0\.1:\d+$/);
-    expect(capturedEnv.CLOUDSDK_AUTH_ACCESS_TOKEN).toBe("prod-token-abc");
-    expect(capturedEnv.CPL_GS_BEARER).toBe("prod-token-abc");
+    expect("CLOUDSDK_AUTH_ACCESS_TOKEN" in capturedEnv).toBe(false);
+    expect("CPL_GS_BEARER" in capturedEnv).toBe(false);
 
     // Verify exit code propagated (0)
     expect(exitSpy).toHaveBeenCalledWith(0);

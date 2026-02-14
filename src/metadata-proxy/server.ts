@@ -2,6 +2,7 @@ import type { MetadataProxyConfig } from "../config.ts";
 import type { MetadataProxyDeps, TokenProvider } from "./types.ts";
 import { createGateClient, type GateClientOptions } from "./gate-client.ts";
 import { handleRequest } from "./handlers.ts";
+import { getOwnerPid, isDescendantOf } from "./pid-validator.ts";
 
 export interface MetadataProxyServerResult {
   server: ReturnType<typeof Bun.serve>;
@@ -16,6 +17,8 @@ export interface StartMetadataProxyServerOptions {
   installSignalHandlers?: boolean;
   /** Suppress startup logging (default: false). */
   quiet?: boolean;
+  /** If set, only processes that are descendants of this PID may request tokens. */
+  allowedAncestorPid?: number;
 }
 
 /**
@@ -40,10 +43,22 @@ export function startMetadataProxyServer(
     startTime: new Date(),
   };
 
+  const ancestorPid = options.allowedAncestorPid;
+
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: config.port,
-    fetch(req) {
+    fetch(req, server) {
+      if (ancestorPid !== undefined) {
+        const addr = server.requestIP(req);
+        if (!addr) {
+          return new Response("Forbidden", { status: 403 });
+        }
+        const ownerPid = getOwnerPid(addr.port);
+        if (ownerPid === null || !isDescendantOf(ownerPid, ancestorPid)) {
+          return new Response("Forbidden", { status: 403 });
+        }
+      }
       return handleRequest(req, deps);
     },
   });
