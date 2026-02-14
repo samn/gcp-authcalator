@@ -1,4 +1,4 @@
-import { unlinkSync, existsSync } from "node:fs";
+import { unlinkSync, existsSync, chmodSync } from "node:fs";
 import type { GateConfig } from "../config.ts";
 import type { GateDeps } from "./types.ts";
 import { createAuthModule, type AuthModuleOptions } from "./auth.ts";
@@ -57,6 +57,11 @@ export async function startGateServer(
       return handleRequest(req, deps);
     },
   });
+
+  // Restrict socket to owner-only access (rw-------).
+  // This is the primary security boundary — without it any local user can
+  // connect and request tokens.
+  chmodSync(config.socket_path, 0o600);
 
   function stop() {
     try {

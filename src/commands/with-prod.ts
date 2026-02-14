@@ -79,7 +79,15 @@ export async function runWithProd(
 
   // Step 3: Spawn wrapped command with metadata env vars
   const spawnFn = options.spawnFn ?? (Bun.spawn as unknown as SpawnFn);
-  const { CLOUDSDK_AUTH_ACCESS_TOKEN: _, CPL_GS_BEARER: __, ...parentEnv } = process.env;
+  const {
+    CLOUDSDK_AUTH_ACCESS_TOKEN: _drop1,
+    CPL_GS_BEARER: _drop2,
+    GOOGLE_APPLICATION_CREDENTIALS: _drop3,
+    GOOGLE_OAUTH_ACCESS_TOKEN: _drop4,
+    CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: _drop5,
+    CLOUDSDK_CORE_ACCOUNT: _drop6,
+    ...parentEnv
+  } = process.env;
   const env = { ...parentEnv, GCE_METADATA_HOST: metadataHost };
 
   const child = spawnFn(wrappedCommand, {

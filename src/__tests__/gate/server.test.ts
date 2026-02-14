@@ -1,5 +1,5 @@
 import { describe, expect, test, afterEach } from "bun:test";
-import { mkdtempSync, existsSync, writeFileSync } from "node:fs";
+import { mkdtempSync, existsSync, writeFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { startGateServer, type GateServerResult } from "../../gate/server.ts";
@@ -149,6 +149,26 @@ describe("startGateServer", () => {
     // Server should have started successfully despite stale file
     const res = await fetchUnix(socketPath, "/health");
     expect(res.status).toBe(200);
+  });
+
+  test("sets socket permissions to 0600 (owner-only)", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "gate-srv-"));
+    const socketPath = join(tempDir, "gate.sock");
+    const config = makeConfig(socketPath);
+
+    result = await startGateServer(config, {
+      authOptions: {
+        sourceClient: mockClient("source-tok"),
+        impersonatedClient: mockClient("dev-tok"),
+        fetchFn: mockFetch("test@example.com"),
+      },
+      auditLogDir: join(tempDir, "audit"),
+    });
+
+    const stats = statSync(socketPath);
+    // mode includes file-type bits; mask with 0o777 to get permission bits only
+    const permissions = stats.mode & 0o777;
+    expect(permissions).toBe(0o600);
   });
 
   test("stop() cleans up socket file", async () => {

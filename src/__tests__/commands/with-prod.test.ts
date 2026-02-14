@@ -101,6 +101,63 @@ describe("runWithProd", () => {
     expect(logOutput).toContain("prod token acquired");
   });
 
+  test("strips all credential-related env vars from child process", async () => {
+    // Inject credential env vars that should be stripped
+    const originalEnv = { ...process.env };
+    process.env.CLOUDSDK_AUTH_ACCESS_TOKEN = "leaked-token";
+    process.env.CPL_GS_BEARER = "leaked-bearer";
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = "/path/to/key.json";
+    process.env.GOOGLE_OAUTH_ACCESS_TOKEN = "leaked-oauth";
+    process.env.CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE = "/path/to/creds";
+    process.env.CLOUDSDK_CORE_ACCOUNT = "sneaky@example.com";
+
+    const mockFetchFn = (async () =>
+      new Response(JSON.stringify({ access_token: "prod-tok", expires_in: 1800 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })) as unknown as typeof globalThis.fetch;
+
+    let capturedEnv: Record<string, string | undefined> = {};
+    const mockSpawnFn = (_cmd: string[], opts: { env: Record<string, string | undefined> }) => {
+      capturedEnv = opts.env;
+      return {
+        exited: Promise.resolve(0),
+        kill: () => {},
+      } as unknown as Subprocess;
+    };
+
+    try {
+      await runWithProd(
+        {
+          project_id: "my-proj",
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+        },
+        ["echo", "test"],
+        {
+          fetchOptions: { fetchFn: mockFetchFn },
+          spawnFn: mockSpawnFn,
+        },
+      );
+    } catch {
+      // process.exit mock throws
+    }
+
+    // Verify ALL credential env vars are stripped
+    expect("CLOUDSDK_AUTH_ACCESS_TOKEN" in capturedEnv).toBe(false);
+    expect("CPL_GS_BEARER" in capturedEnv).toBe(false);
+    expect("GOOGLE_APPLICATION_CREDENTIALS" in capturedEnv).toBe(false);
+    expect("GOOGLE_OAUTH_ACCESS_TOKEN" in capturedEnv).toBe(false);
+    expect("CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE" in capturedEnv).toBe(false);
+    expect("CLOUDSDK_CORE_ACCOUNT" in capturedEnv).toBe(false);
+
+    // Verify metadata proxy env var IS set
+    expect(capturedEnv.GCE_METADATA_HOST).toMatch(/^127\.0\.0\.1:\d+$/);
+
+    // Restore original env
+    process.env = originalEnv;
+  });
+
   test("exits 1 with error message when token fetch fails", async () => {
     const mockFetchFn = (async () =>
       new Response("denied", { status: 403 })) as unknown as typeof globalThis.fetch;
