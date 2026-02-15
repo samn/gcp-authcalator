@@ -9,6 +9,13 @@
 - Ask the user for clarifications if anything is unclear. DO NOT MAKE ASSUMPTIONS!
 - Save the plan you're working on as markdown in plans/
 
+## Changelog
+
+All user-facing changes must be documented in `CHANGELOG.md` following the
+[Keep a Changelog](https://keepachangelog.com/) format. Add entries under the
+`[Unreleased]` section as you make changes. Categories: Added, Changed,
+Deprecated, Removed, Fixed, Security.
+
 ## Pre-commit checks
 
 Before committing code, always run the full verification suite:

@@ -27,20 +27,29 @@ async function runCLI(
 // ---------------------------------------------------------------------------
 
 describe("--help", () => {
-  test("prints usage and exits 0", async () => {
+  test("prints usage with version and exits 0", async () => {
     const { stdout, exitCode } = await runCLI(["--help"]);
     expect(exitCode).toBe(0);
-    expect(stdout).toContain("gcp-authcalator");
+    expect(stdout).toMatch(/gcp-authcalator v\d+\.\d+\.\d+/);
     expect(stdout).toContain("Commands:");
     expect(stdout).toContain("gate");
     expect(stdout).toContain("metadata-proxy");
     expect(stdout).toContain("with-prod");
+    expect(stdout).toContain("version");
   });
 });
 
 describe("--version", () => {
   test("prints version and exits 0", async () => {
     const { stdout, exitCode } = await runCLI(["--version"]);
+    expect(exitCode).toBe(0);
+    expect(stdout.trim()).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+});
+
+describe("version subcommand", () => {
+  test("prints version and exits 0", async () => {
+    const { stdout, exitCode } = await runCLI(["version"]);
     expect(exitCode).toBe(0);
     expect(stdout.trim()).toMatch(/^\d+\.\d+\.\d+$/);
   });
