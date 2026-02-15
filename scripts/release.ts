@@ -4,7 +4,7 @@
  * Release script for gcp-authcalator.
  *
  * Reads the version from package.json, validates the changelog has an entry,
- * creates a release commit, tags it, and pushes both to the remote.
+ * tags the current commit, and pushes both to the remote.
  *
  * Usage: bun run release
  */
@@ -44,7 +44,7 @@ async function main() {
   if (!changelog.includes(`[${VERSION}]`)) {
     console.error(
       `error: CHANGELOG.md has no entry for [${VERSION}]`,
-      "\n  Move [Unreleased] entries to a new section: ## [${VERSION}] - YYYY-MM-DD",
+      `\n  Move [Unreleased] entries to a new section: ## [${VERSION}] - YYYY-MM-DD`,
     );
     process.exit(1);
   }
@@ -56,27 +56,14 @@ async function main() {
     process.exit(1);
   }
 
-  // 5. Create the release commit
-  const { exitCode: commitExit } = await run([
-    "git",
-    "commit",
-    "--allow-empty",
-    "-m",
-    `release: ${TAG}`,
-  ]);
-  if (commitExit !== 0) {
-    console.error("error: failed to create release commit");
-    process.exit(1);
-  }
-
-  // 6. Create the tag
+  // 5. Create the tag
   const { exitCode: tagExit } = await run(["git", "tag", TAG]);
   if (tagExit !== 0) {
     console.error(`error: failed to create tag '${TAG}'`);
     process.exit(1);
   }
 
-  // 7. Push commit and tag
+  // 6. Push commit and tag
   console.log("Pushing commit and tag...");
   const { exitCode: pushExit } = await run(["git", "push"]);
   if (pushExit !== 0) {
