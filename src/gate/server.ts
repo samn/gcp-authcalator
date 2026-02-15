@@ -1,4 +1,4 @@
-import { unlinkSync, existsSync, chmodSync } from "node:fs";
+import { unlinkSync, existsSync, chmodSync, lstatSync } from "node:fs";
 import type { GateConfig } from "../config.ts";
 import type { GateDeps } from "./types.ts";
 import { createAuthModule, type AuthModuleOptions } from "./auth.ts";
@@ -42,13 +42,48 @@ export async function startGateServer(
     startTime: new Date(),
   };
 
-  // Remove stale socket from a previous crash
+  // Remove stale socket from a previous crash — with ownership verification
   if (existsSync(config.socket_path)) {
-    try {
-      unlinkSync(config.socket_path);
-    } catch {
-      // Ignore — may already be gone
+    const stat = lstatSync(config.socket_path);
+
+    // Refuse to follow symlinks (prevents attacker-placed symlink pointing
+    // to a file they want deleted).
+    if (stat.isSymbolicLink()) {
+      throw new Error(`gate: socket path is a symlink — refusing to remove: ${config.socket_path}`);
     }
+
+    // Only remove actual Unix sockets, never regular files or directories.
+    if (!stat.isSocket()) {
+      throw new Error(
+        `gate: socket path exists but is not a socket — refusing to remove: ${config.socket_path}`,
+      );
+    }
+
+    // Verify the socket is owned by the current user.
+    if (stat.uid !== process.getuid!()) {
+      throw new Error(
+        `gate: socket is owned by uid ${stat.uid}, not current user (${process.getuid!()}) — refusing to remove: ${config.socket_path}`,
+      );
+    }
+
+    // Check whether another gate instance is still alive on this socket.
+    try {
+      const probe = await fetch("http://localhost/health", {
+        unix: config.socket_path,
+        signal: AbortSignal.timeout(1000),
+      } as RequestInit);
+      if (probe.ok) {
+        throw new Error(`gate: another instance is already running on ${config.socket_path}`);
+      }
+    } catch (e: unknown) {
+      // Re-throw our own "already running" error.
+      if (e instanceof Error && e.message.startsWith("gate:")) {
+        throw e;
+      }
+      // Connection refused / timeout = stale socket, safe to remove.
+    }
+
+    unlinkSync(config.socket_path);
   }
 
   const server = Bun.serve({
@@ -63,6 +98,10 @@ export async function startGateServer(
   // connect and request tokens.
   chmodSync(config.socket_path, 0o600);
 
+  // Capture the inode so stop() only removes the socket we created,
+  // not one created by a replacement instance.
+  const socketIno = lstatSync(config.socket_path).ino;
+
   function stop() {
     try {
       server.stop(true);
@@ -71,7 +110,10 @@ export async function startGateServer(
     }
     try {
       if (existsSync(config.socket_path)) {
-        unlinkSync(config.socket_path);
+        const current = lstatSync(config.socket_path);
+        if (current.ino === socketIno && !current.isSymbolicLink()) {
+          unlinkSync(config.socket_path);
+        }
       }
     } catch {
       // Ignore cleanup errors

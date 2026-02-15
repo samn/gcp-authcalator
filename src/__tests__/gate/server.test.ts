@@ -1,5 +1,5 @@
 import { describe, expect, test, afterEach } from "bun:test";
-import { mkdtempSync, existsSync, writeFileSync, statSync } from "node:fs";
+import { mkdtempSync, existsSync, writeFileSync, statSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { startGateServer, type GateServerResult } from "../../gate/server.ts";
@@ -128,27 +128,100 @@ describe("startGateServer", () => {
     expect(res.status).toBe(404);
   });
 
-  test("removes stale socket file on startup", async () => {
+  test("removes stale socket on startup", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "gate-srv-"));
     const socketPath = join(tempDir, "gate.sock");
     const config = makeConfig(socketPath);
 
-    // Create a stale socket file
-    writeFileSync(socketPath, "stale");
-    expect(existsSync(socketPath)).toBe(true);
-
-    result = await startGateServer(config, {
+    const serverOpts = {
       authOptions: {
         sourceClient: mockClient("source-tok"),
         impersonatedClient: mockClient("dev-tok"),
         fetchFn: mockFetch("test@example.com"),
       },
       auditLogDir: join(tempDir, "audit"),
-    });
+    };
 
-    // Server should have started successfully despite stale file
+    // Start then stop a server to leave a real stale socket behind.
+    const first = await startGateServer(config, serverOpts);
+    first.stop();
+
+    // The stop() above deletes the socket, so re-create a stale one
+    // by starting and hard-killing (just stop the server, leave the file).
+    const second = await startGateServer(config, serverOpts);
+    second.server.stop(true); // stop server but don't clean up socket
+    expect(existsSync(socketPath)).toBe(true);
+
+    // Now starting a new server should succeed by removing the stale socket.
+    result = await startGateServer(config, serverOpts);
     const res = await fetchUnix(socketPath, "/health");
     expect(res.status).toBe(200);
+  });
+
+  test("refuses to start when socket path is a regular file", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "gate-srv-"));
+    const socketPath = join(tempDir, "gate.sock");
+    const config = makeConfig(socketPath);
+
+    writeFileSync(socketPath, "not-a-socket");
+
+    await expect(
+      startGateServer(config, {
+        authOptions: {
+          sourceClient: mockClient("source-tok"),
+          impersonatedClient: mockClient("dev-tok"),
+          fetchFn: mockFetch("test@example.com"),
+        },
+        auditLogDir: join(tempDir, "audit"),
+      }),
+    ).rejects.toThrow("not a socket");
+  });
+
+  test("refuses to start when socket path is a symlink", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "gate-srv-"));
+    const socketPath = join(tempDir, "gate.sock");
+    const target = join(tempDir, "target");
+    const config = makeConfig(socketPath);
+
+    writeFileSync(target, "target-file");
+    symlinkSync(target, socketPath);
+
+    await expect(
+      startGateServer(config, {
+        authOptions: {
+          sourceClient: mockClient("source-tok"),
+          impersonatedClient: mockClient("dev-tok"),
+          fetchFn: mockFetch("test@example.com"),
+        },
+        auditLogDir: join(tempDir, "audit"),
+      }),
+    ).rejects.toThrow("symlink");
+
+    // Target file must not have been deleted
+    expect(existsSync(target)).toBe(true);
+  });
+
+  test("refuses to start when another instance is running", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "gate-srv-"));
+    const socketPath = join(tempDir, "gate.sock");
+    const config = makeConfig(socketPath);
+
+    const serverOpts = {
+      authOptions: {
+        sourceClient: mockClient("source-tok"),
+        impersonatedClient: mockClient("dev-tok"),
+        fetchFn: mockFetch("test@example.com"),
+      },
+      auditLogDir: join(tempDir, "audit"),
+    };
+
+    // Start a running instance
+    result = await startGateServer(config, serverOpts);
+
+    // Trying to start a second instance on the same socket should fail
+    await expect(startGateServer(config, serverOpts)).rejects.toThrow(
+      "another instance is already running",
+    );
   });
 
   test("sets socket permissions to 0600 (owner-only)", async () => {
