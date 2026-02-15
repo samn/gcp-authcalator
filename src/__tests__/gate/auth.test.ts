@@ -11,8 +11,9 @@ const TEST_CONFIG: GateConfig = {
 };
 
 /** Create a mock AuthClient that returns the given token. */
-function mockClient(token: string | null): AuthClient {
+function mockClient(token: string | null, expiryDate?: number): AuthClient {
   return {
+    credentials: { expiry_date: expiryDate ?? Date.now() + 3600_000 },
     getAccessToken: async () => ({ token, res: null }),
   } as unknown as AuthClient;
 }
@@ -43,6 +44,7 @@ describe("createAuthModule", () => {
     test("caches the token on subsequent calls", async () => {
       let callCount = 0;
       const client = {
+        credentials: { expiry_date: Date.now() + 3600_000 },
         getAccessToken: async () => {
           callCount++;
           return { token: `token-${callCount}`, res: null };
@@ -60,6 +62,36 @@ describe("createAuthModule", () => {
       expect(first.access_token).toBe("token-1");
       expect(second.access_token).toBe("token-1");
       expect(callCount).toBe(1);
+    });
+
+    test("uses expiry_date from client credentials", async () => {
+      const expectedExpiry = Date.now() + 1800_000; // 30 minutes from now
+      const { mintDevToken } = createAuthModule(TEST_CONFIG, {
+        sourceClient: mockClient("source-token"),
+        impersonatedClient: mockClient("dev-token", expectedExpiry),
+      });
+
+      const result = await mintDevToken();
+      expect(result.expires_at.getTime()).toBe(expectedExpiry);
+    });
+
+    test("falls back to default lifetime when credentials lack expiry_date", async () => {
+      const before = Date.now();
+      const client = {
+        credentials: {},
+        getAccessToken: async () => ({ token: "dev-token", res: null }),
+      } as unknown as AuthClient;
+
+      const { mintDevToken } = createAuthModule(TEST_CONFIG, {
+        sourceClient: mockClient("source"),
+        impersonatedClient: client,
+      });
+
+      const result = await mintDevToken();
+      const after = Date.now();
+      // Should fall back to ~1 hour from now
+      expect(result.expires_at.getTime()).toBeGreaterThanOrEqual(before + 3600_000);
+      expect(result.expires_at.getTime()).toBeLessThanOrEqual(after + 3600_000);
     });
 
     test("throws when no token is returned", async () => {
@@ -84,9 +116,21 @@ describe("createAuthModule", () => {
       expect(result.expires_at).toBeInstanceOf(Date);
     });
 
+    test("uses expiry_date from client credentials", async () => {
+      const expectedExpiry = Date.now() + 1800_000;
+      const { mintProdToken } = createAuthModule(TEST_CONFIG, {
+        sourceClient: mockClient("prod-token", expectedExpiry),
+        impersonatedClient: mockClient("dev-token"),
+      });
+
+      const result = await mintProdToken();
+      expect(result.expires_at.getTime()).toBe(expectedExpiry);
+    });
+
     test("does not cache — returns fresh token each time", async () => {
       let callCount = 0;
       const client = {
+        credentials: { expiry_date: Date.now() + 3600_000 },
         getAccessToken: async () => {
           callCount++;
           return { token: `prod-${callCount}`, res: null };
