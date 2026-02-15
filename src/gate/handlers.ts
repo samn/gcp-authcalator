@@ -82,11 +82,26 @@ async function handleProdToken(deps: GateDeps): Promise<Response> {
     level: "prod",
   };
 
+  // Rate-limit check before showing any confirmation dialog
+  const gate = deps.prodRateLimiter.acquire();
+  if (!gate.allowed) {
+    deps.writeAuditLog({
+      ...auditBase,
+      timestamp: new Date().toISOString(),
+      result: "rate_limited",
+      error: gate.reason,
+    });
+
+    return jsonResponse({ error: gate.reason }, 429);
+  }
+
   try {
     const email = await deps.getIdentityEmail();
 
     const approved = await deps.confirmProdAccess(email);
     if (!approved) {
+      deps.prodRateLimiter.release("denied");
+
       deps.writeAuditLog({
         ...auditBase,
         timestamp: new Date().toISOString(),
@@ -99,6 +114,8 @@ async function handleProdToken(deps: GateDeps): Promise<Response> {
 
     const cached = await deps.mintProdToken();
     const expiresIn = Math.floor((cached.expires_at.getTime() - Date.now()) / 1000);
+
+    deps.prodRateLimiter.release("granted");
 
     const body: TokenResponse = {
       access_token: cached.access_token,
@@ -115,6 +132,8 @@ async function handleProdToken(deps: GateDeps): Promise<Response> {
 
     return jsonResponse(body);
   } catch (err) {
+    deps.prodRateLimiter.release("error");
+
     const message = err instanceof Error ? err.message : "Unknown error";
 
     deps.writeAuditLog({

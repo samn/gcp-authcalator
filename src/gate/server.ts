@@ -4,6 +4,7 @@ import type { GateDeps } from "./types.ts";
 import { createAuthModule, type AuthModuleOptions } from "./auth.ts";
 import { createConfirmModule, type ConfirmOptions } from "./confirm.ts";
 import { createAuditModule } from "./audit.ts";
+import { createProdRateLimiter } from "./rate-limit.ts";
 import { handleRequest } from "./handlers.ts";
 
 export interface GateServerResult {
@@ -32,6 +33,7 @@ export async function startGateServer(
   const auth = createAuthModule(config, options.authOptions);
   const confirm = createConfirmModule(options.confirmOptions);
   const audit = createAuditModule(options.auditLogDir);
+  const prodRateLimiter = createProdRateLimiter();
 
   const deps: GateDeps = {
     mintDevToken: auth.mintDevToken,
@@ -39,6 +41,7 @@ export async function startGateServer(
     getIdentityEmail: auth.getIdentityEmail,
     confirmProdAccess: confirm.confirmProdAccess,
     writeAuditLog: audit.writeAuditLog,
+    prodRateLimiter,
     startTime: new Date(),
   };
 
