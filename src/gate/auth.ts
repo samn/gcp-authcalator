@@ -72,6 +72,13 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
     return cached.expires_at.getTime() - Date.now() > CACHE_MARGIN_MS;
   }
 
+  /** Extract expiry from the client's credentials, falling back to DEFAULT_LIFETIME. */
+  function expiryFromCredentials(client: AuthClient): Date {
+    const expMs = client.credentials?.expiry_date;
+    if (expMs) return new Date(expMs);
+    return new Date(Date.now() + DEFAULT_LIFETIME * 1000);
+  }
+
   async function mintDevToken(): Promise<CachedToken> {
     if (isCacheValid(devTokenCache)) {
       return devTokenCache;
@@ -86,7 +93,7 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
 
     devTokenCache = {
       access_token: token,
-      expires_at: new Date(Date.now() + DEFAULT_LIFETIME * 1000),
+      expires_at: expiryFromCredentials(client),
     };
     return devTokenCache;
   }
@@ -103,7 +110,7 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
 
     return {
       access_token: token,
-      expires_at: new Date(Date.now() + DEFAULT_LIFETIME * 1000),
+      expires_at: expiryFromCredentials(client),
     };
   }
 
