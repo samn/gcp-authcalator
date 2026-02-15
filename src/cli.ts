@@ -4,10 +4,11 @@ import { loadConfig, mapCliArgs } from "./config.ts";
 import { runGate } from "./commands/gate.ts";
 import { runMetadataProxy } from "./commands/metadata-proxy.ts";
 import { runWithProd } from "./commands/with-prod.ts";
+import packageJson from "../package.json";
 
-const VERSION = "0.0.1";
+const VERSION = packageJson.version;
 
-const USAGE = `gcp-authcalator — GCP auth escalator for development environments
+const USAGE = `gcp-authcalator v${VERSION} — GCP auth escalator for development environments
 
 Usage:
   gcp-authcalator <command> [options]
@@ -16,6 +17,7 @@ Commands:
   gate              Start the host-side token daemon
   metadata-proxy    Start the GCE metadata server emulator
   with-prod         Wrap a command with prod credentials
+  version           Show version
 
 Options:
   --project-id <id>        GCP project ID
@@ -31,7 +33,7 @@ Examples:
   gcp-authcalator metadata-proxy --config config.toml
   gcp-authcalator with-prod -- python some/script.py`;
 
-const SUBCOMMANDS = ["gate", "metadata-proxy", "with-prod"] as const;
+const SUBCOMMANDS = ["gate", "metadata-proxy", "with-prod", "version"] as const;
 type Subcommand = (typeof SUBCOMMANDS)[number];
 
 function isSubcommand(value: string): value is Subcommand {
@@ -76,6 +78,11 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     console.error(`error: unknown subcommand '${subcommand}'`);
     console.error(`available commands: ${SUBCOMMANDS.join(", ")}`);
     process.exit(1);
+  }
+
+  if (subcommand === "version") {
+    console.log(VERSION);
+    process.exit(0);
   }
 
   const cliValues = mapCliArgs(values);

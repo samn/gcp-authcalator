@@ -6,6 +6,10 @@ out
 dist
 *.tgz
 
+# compiled binaries
+gcp-authcalator
+gcp-authcalator-*
+
 # code coverage
 coverage
 *.lcov
