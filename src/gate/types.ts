@@ -2,6 +2,8 @@
 // Shared interfaces for the gcp-gate token daemon
 // ---------------------------------------------------------------------------
 
+import type { ProdRateLimiter } from "./rate-limit.ts";
+
 /** A cached GCP access token with its expiry time. */
 export interface CachedToken {
   access_token: string;
@@ -36,7 +38,7 @@ export interface AuditEntry {
   timestamp: string;
   endpoint: string;
   level: "dev" | "prod";
-  result: "granted" | "denied" | "error";
+  result: "granted" | "denied" | "error" | "rate_limited";
   email?: string;
   error?: string;
 }
@@ -51,5 +53,6 @@ export interface GateDeps {
   getIdentityEmail: () => Promise<string>;
   confirmProdAccess: (email: string) => Promise<boolean>;
   writeAuditLog: (entry: AuditEntry) => void;
+  prodRateLimiter: ProdRateLimiter;
   startTime: Date;
 }

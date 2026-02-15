@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { handleRequest } from "../../gate/handlers.ts";
 import type { GateDeps, AuditEntry, CachedToken } from "../../gate/types.ts";
+import { createProdRateLimiter } from "../../gate/rate-limit.ts";
+import type { ProdRateLimiter } from "../../gate/rate-limit.ts";
 
 function makeDeps(overrides: Partial<GateDeps> = {}): GateDeps {
   const token: CachedToken = {
@@ -17,8 +19,17 @@ function makeDeps(overrides: Partial<GateDeps> = {}): GateDeps {
     getIdentityEmail: async () => "user@example.com",
     confirmProdAccess: async () => true,
     writeAuditLog: () => {},
+    prodRateLimiter: createProdRateLimiter(),
     startTime: new Date(Date.now() - 60_000),
     ...overrides,
+  };
+}
+
+/** A rate limiter that always blocks. */
+function blockedRateLimiter(reason = "rate limited"): ProdRateLimiter {
+  return {
+    acquire: () => ({ allowed: false, reason }),
+    release: () => {},
   };
 }
 
@@ -192,6 +203,100 @@ describe("GET /token?level=prod", () => {
     expect(res.status).toBe(500);
     expect(logs).toHaveLength(1);
     expect(logs[0]!.result).toBe("error");
+  });
+
+  test("returns 429 when rate limited", async () => {
+    const logs: AuditEntry[] = [];
+    const deps = makeDeps({
+      prodRateLimiter: blockedRateLimiter("too many attempts"),
+      writeAuditLog: (e) => logs.push(e),
+    });
+
+    const res = await handleRequest(makeRequest("/token?level=prod"), deps);
+
+    expect(res.status).toBe(429);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toContain("too many attempts");
+  });
+
+  test("writes rate_limited audit entry when blocked", async () => {
+    const logs: AuditEntry[] = [];
+    const deps = makeDeps({
+      prodRateLimiter: blockedRateLimiter("dialog pending"),
+      writeAuditLog: (e) => logs.push(e),
+    });
+
+    await handleRequest(makeRequest("/token?level=prod"), deps);
+
+    expect(logs).toHaveLength(1);
+    expect(logs[0]!.level).toBe("prod");
+    expect(logs[0]!.result).toBe("rate_limited");
+    expect(logs[0]!.error).toContain("dialog pending");
+  });
+
+  test("does not call confirmProdAccess when rate limited", async () => {
+    let confirmCalled = false;
+    const deps = makeDeps({
+      prodRateLimiter: blockedRateLimiter(),
+      confirmProdAccess: async () => {
+        confirmCalled = true;
+        return true;
+      },
+    });
+
+    await handleRequest(makeRequest("/token?level=prod"), deps);
+
+    expect(confirmCalled).toBe(false);
+  });
+
+  test("releases rate limiter on granted", async () => {
+    const releases: string[] = [];
+    const deps = makeDeps({
+      confirmProdAccess: async () => true,
+      prodRateLimiter: {
+        acquire: () => ({ allowed: true }),
+        release: (r) => {
+          releases.push(r);
+        },
+      },
+    });
+
+    await handleRequest(makeRequest("/token?level=prod"), deps);
+    expect(releases).toEqual(["granted"]);
+  });
+
+  test("releases rate limiter on denied", async () => {
+    const releases: string[] = [];
+    const deps = makeDeps({
+      confirmProdAccess: async () => false,
+      prodRateLimiter: {
+        acquire: () => ({ allowed: true }),
+        release: (r) => {
+          releases.push(r);
+        },
+      },
+    });
+
+    await handleRequest(makeRequest("/token?level=prod"), deps);
+    expect(releases).toEqual(["denied"]);
+  });
+
+  test("releases rate limiter on error", async () => {
+    const releases: string[] = [];
+    const deps = makeDeps({
+      getIdentityEmail: async () => {
+        throw new Error("boom");
+      },
+      prodRateLimiter: {
+        acquire: () => ({ allowed: true }),
+        release: (r) => {
+          releases.push(r);
+        },
+      },
+    });
+
+    await handleRequest(makeRequest("/token?level=prod"), deps);
+    expect(releases).toEqual(["error"]);
   });
 });
 
