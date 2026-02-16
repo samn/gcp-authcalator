@@ -63,6 +63,8 @@ export async function handleRequest(req: Request, deps: MetadataProxyDeps): Prom
         return handleEmail(deps);
       case "/computeMetadata/v1/instance/service-accounts/default":
         return handleServiceAccountInfo(url, deps);
+      case "/computeMetadata/v1/instance/service-accounts":
+        return handleServiceAccounts(url, deps);
       default:
         console.debug(`Unknown path: ${pathname}`);
         return textResponse("Not found", 404);
@@ -113,6 +115,32 @@ function handleEmail(deps: MetadataProxyDeps): Response {
     return textResponse("Not found", 404);
   }
   return textResponse(deps.serviceAccountEmail);
+}
+
+/**
+ * Handles GET /computeMetadata/v1/instance/service-accounts/
+ *
+ * With `?recursive=true`, returns a JSON object keyed by service account name
+ * containing email, aliases, and scopes (mirrors real GCE metadata behavior).
+ *
+ * Without `recursive=true`, returns a text directory listing of available
+ * service accounts. Since we proxy to a single service account via the
+ * gateway, this always returns just "default".
+ */
+function handleServiceAccounts(url: URL, deps: MetadataProxyDeps): Response {
+  const recursive = url.searchParams.get("recursive") === "true";
+
+  if (recursive) {
+    return jsonResponse({
+      default: {
+        aliases: ["default"],
+        email: deps.serviceAccountEmail ?? "default",
+        scopes: ["https://www.googleapis.com/auth/cloud-platform"],
+      },
+    });
+  }
+
+  return textResponse("default/\n");
 }
 
 /**

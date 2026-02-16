@@ -103,6 +103,7 @@ export function startMetadataProxyServer(
       "    GET /computeMetadata/v1/project/numeric-project-id            → numeric project ID",
     );
     console.log("    GET /computeMetadata/v1/instance/service-accounts/default/email → SA email");
+    console.log("    GET /computeMetadata/v1/instance/service-accounts               → SA listing");
   }
 
   return { server, stop };
