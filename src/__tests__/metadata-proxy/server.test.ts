@@ -9,12 +9,28 @@ import type { TokenProvider } from "../../metadata-proxy/types.ts";
 /** Port counter to avoid collisions between tests. */
 let nextPort = 19100;
 
-function mockGateFetch(token: string, expiresIn = 3600): typeof globalThis.fetch {
-  return (async () =>
-    new Response(
-      JSON.stringify({ access_token: token, expires_in: expiresIn, token_type: "Bearer" }),
-      { status: 200, headers: { "Content-Type": "application/json" } },
-    )) as unknown as typeof globalThis.fetch;
+function mockGateFetch(
+  token: string,
+  expiresIn = 3600,
+  projectNumber = "123456789012",
+): typeof globalThis.fetch {
+  return ((input: string | URL | Request) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    if (url.includes("/project-number")) {
+      return Promise.resolve(
+        new Response(JSON.stringify({ project_number: projectNumber }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    }
+    return Promise.resolve(
+      new Response(
+        JSON.stringify({ access_token: token, expires_in: expiresIn, token_type: "Bearer" }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+  }) as unknown as typeof globalThis.fetch;
 }
 
 function makeConfig(port: number): MetadataProxyConfig {
@@ -99,6 +115,44 @@ describe("startMetadataProxyServer", () => {
     expect(res.status).toBe(200);
     const body = await res.text();
     expect(body).toBe("sa@test-project.iam.gserviceaccount.com");
+  });
+
+  test("serves numeric-project-id endpoint via gate client", async () => {
+    const port = nextPort++;
+    const config = makeConfig(port);
+
+    result = startMetadataProxyServer(config, {
+      gateClientOptions: { fetchFn: mockGateFetch("tok", 3600, "999888777666") },
+    });
+
+    const res = await fetch(
+      `http://127.0.0.1:${port}/computeMetadata/v1/project/numeric-project-id`,
+      { headers: { "Metadata-Flavor": "Google" } },
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toBe("text/plain");
+    const body = await res.text();
+    expect(body).toBe("999888777666");
+  });
+
+  test("numeric-project-id returns 404 when using custom tokenProvider", async () => {
+    const port = nextPort++;
+    const config = makeConfig(port);
+
+    const customProvider: TokenProvider = {
+      getToken: async () => ({
+        access_token: "custom-token",
+        expires_at: new Date(Date.now() + 3600_000),
+      }),
+    };
+
+    result = startMetadataProxyServer(config, { tokenProvider: customProvider });
+
+    const res = await fetch(
+      `http://127.0.0.1:${port}/computeMetadata/v1/project/numeric-project-id`,
+      { headers: { "Metadata-Flavor": "Google" } },
+    );
+    expect(res.status).toBe(404);
   });
 
   test("returns 404 for unknown paths", async () => {

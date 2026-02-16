@@ -1,4 +1,4 @@
-import type { GateDeps, TokenResponse, AuditEntry } from "./types.ts";
+import type { GateDeps, TokenResponse, ProjectNumberResponse, AuditEntry } from "./types.ts";
 
 const JSON_HEADERS = { "Content-Type": "application/json" };
 
@@ -22,6 +22,8 @@ export async function handleRequest(req: Request, deps: GateDeps): Promise<Respo
       return handleToken(url, deps);
     case "/identity":
       return handleIdentity(deps);
+    case "/project-number":
+      return handleProjectNumber(deps);
     case "/health":
       return handleHealth(deps);
     default:
@@ -143,6 +145,17 @@ async function handleProdToken(deps: GateDeps): Promise<Response> {
       error: message,
     });
 
+    return jsonResponse({ error: message }, 500);
+  }
+}
+
+async function handleProjectNumber(deps: GateDeps): Promise<Response> {
+  try {
+    const projectNumber = await deps.getProjectNumber();
+    const body: ProjectNumberResponse = { project_number: projectNumber };
+    return jsonResponse(body);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
     return jsonResponse({ error: message }, 500);
   }
 }

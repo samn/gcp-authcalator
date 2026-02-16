@@ -22,6 +22,11 @@ export interface IdentityResponse {
   email: string;
 }
 
+/** JSON response for project number requests. */
+export interface ProjectNumberResponse {
+  project_number: string;
+}
+
 /** JSON response for health checks. */
 export interface HealthResponse {
   status: "ok";
@@ -51,6 +56,7 @@ export interface GateDeps {
   mintDevToken: () => Promise<CachedToken>;
   mintProdToken: () => Promise<CachedToken>;
   getIdentityEmail: () => Promise<string>;
+  getProjectNumber: () => Promise<string>;
   confirmProdAccess: (email: string) => Promise<boolean>;
   writeAuditLog: (entry: AuditEntry) => void;
   prodRateLimiter: ProdRateLimiter;

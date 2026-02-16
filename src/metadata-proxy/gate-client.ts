@@ -1,5 +1,5 @@
 import { existsSync, lstatSync } from "node:fs";
-import type { CachedToken, TokenProvider } from "./types.ts";
+import type { CachedToken, GateClient } from "./types.ts";
 
 /** Minimum remaining lifetime before we re-fetch a cached token (5 minutes). */
 const CACHE_MARGIN_MS = 5 * 60 * 1000;
@@ -60,19 +60,18 @@ export async function checkGateSocket(
 }
 
 /**
- * Create a token provider that fetches from the gcp-gate daemon over a Unix socket.
+ * Create a gate client that fetches tokens and project metadata from the
+ * gcp-gate daemon over a Unix socket.
  *
- * - Caches the token in memory
- * - Re-fetches when remaining lifetime < 5 minutes
+ * - Caches tokens in memory; re-fetches when remaining lifetime < 5 minutes
+ * - Caches the numeric project ID permanently (immutable value)
  * - Accepts an optional fetchFn for test injection
  */
-export function createGateClient(
-  socketPath: string,
-  options: GateClientOptions = {},
-): TokenProvider {
+export function createGateClient(socketPath: string, options: GateClientOptions = {}): GateClient {
   const fetchFn = options.fetchFn ?? globalThis.fetch;
 
-  let cache: CachedToken | null = null;
+  let tokenCache: CachedToken | null = null;
+  let numericProjectIdCache: string | null = null;
 
   function isCacheValid(cached: CachedToken | null): cached is CachedToken {
     if (!cached) return false;
@@ -80,8 +79,8 @@ export function createGateClient(
   }
 
   async function getToken(): Promise<CachedToken> {
-    if (isCacheValid(cache)) {
-      return cache;
+    if (isCacheValid(tokenCache)) {
+      return tokenCache;
     }
 
     const res = await fetchFn("http://localhost/token", {
@@ -101,13 +100,37 @@ export function createGateClient(
 
     const expiresIn = body.expires_in ?? 3600;
 
-    cache = {
+    tokenCache = {
       access_token: body.access_token,
       expires_at: new Date(Date.now() + expiresIn * 1000),
     };
 
-    return cache;
+    return tokenCache;
   }
 
-  return { getToken };
+  async function getNumericProjectId(): Promise<string> {
+    if (numericProjectIdCache) {
+      return numericProjectIdCache;
+    }
+
+    const res = await fetchFn("http://localhost/project-number", {
+      unix: socketPath,
+    } as RequestInit);
+
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`gcp-gate returned ${res.status}: ${text}`);
+    }
+
+    const body = (await res.json()) as { project_number?: string };
+
+    if (!body.project_number) {
+      throw new Error("gcp-gate returned no project_number");
+    }
+
+    numericProjectIdCache = body.project_number;
+    return numericProjectIdCache;
+  }
+
+  return { getToken, getNumericProjectId };
 }

@@ -24,6 +24,29 @@ function mockFetchError(status: number, body: string): typeof globalThis.fetch {
   return (async () => new Response(body, { status })) as unknown as typeof globalThis.fetch;
 }
 
+function mockProjectNumberFetch(projectNumber: string): {
+  fetchFn: typeof globalThis.fetch;
+  callCount: () => number;
+} {
+  let count = 0;
+  const fetchFn = (async (input: string | URL | Request) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    count++;
+    if (url.includes("/project-number")) {
+      return new Response(JSON.stringify({ project_number: projectNumber }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response(
+      JSON.stringify({ access_token: "tok", expires_in: 3600, token_type: "Bearer" }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  }) as unknown as typeof globalThis.fetch;
+
+  return { fetchFn, callCount: () => count };
+}
+
 describe("createGateClient", () => {
   test("fetches token from gate daemon", async () => {
     const { fetchFn } = mockFetch("test-token-abc");
@@ -109,6 +132,47 @@ describe("createGateClient", () => {
     const expectedMax = Date.now() + 3700 * 1000;
     expect(result.expires_at.getTime()).toBeGreaterThan(expectedMin);
     expect(result.expires_at.getTime()).toBeLessThan(expectedMax);
+  });
+});
+
+describe("createGateClient — getNumericProjectId", () => {
+  test("fetches numeric project ID from gate daemon", async () => {
+    const { fetchFn } = mockProjectNumberFetch("987654321098");
+    const client = createGateClient("/tmp/test.sock", { fetchFn });
+
+    const result = await client.getNumericProjectId();
+    expect(result).toBe("987654321098");
+  });
+
+  test("caches numeric project ID on subsequent calls", async () => {
+    const { fetchFn, callCount } = mockProjectNumberFetch("111222333444");
+    const client = createGateClient("/tmp/test.sock", { fetchFn });
+
+    const first = await client.getNumericProjectId();
+    const second = await client.getNumericProjectId();
+
+    expect(first).toBe("111222333444");
+    expect(second).toBe("111222333444");
+    expect(callCount()).toBe(1);
+  });
+
+  test("throws on non-OK response", async () => {
+    const fetchFn = mockFetchError(500, '{"error":"CRM API failed"}');
+    const client = createGateClient("/tmp/test.sock", { fetchFn });
+
+    await expect(client.getNumericProjectId()).rejects.toThrow("gcp-gate returned 500");
+  });
+
+  test("throws when response has no project_number", async () => {
+    const fetchFn = (async () =>
+      new Response(JSON.stringify({ something_else: "value" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })) as unknown as typeof globalThis.fetch;
+
+    const client = createGateClient("/tmp/test.sock", { fetchFn });
+
+    await expect(client.getNumericProjectId()).rejects.toThrow("no project_number");
   });
 });
 
