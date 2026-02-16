@@ -1,5 +1,8 @@
-import { describe, expect, test } from "bun:test";
-import { createGateClient } from "../../metadata-proxy/gate-client.ts";
+import { describe, expect, test, beforeEach, afterEach } from "bun:test";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { createGateClient, checkGateSocket } from "../../metadata-proxy/gate-client.ts";
 
 function mockFetch(
   token: string,
@@ -106,5 +109,81 @@ describe("createGateClient", () => {
     const expectedMax = Date.now() + 3700 * 1000;
     expect(result.expires_at.getTime()).toBeGreaterThan(expectedMin);
     expect(result.expires_at.getTime()).toBeLessThan(expectedMax);
+  });
+});
+
+describe("checkGateSocket", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "gate-client-test-"));
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("throws when socket path does not exist", async () => {
+    await expect(checkGateSocket("/tmp/nonexistent-socket.sock")).rejects.toThrow(
+      /socket not found/,
+    );
+  });
+
+  test("throws when path exists but is not a socket", async () => {
+    const filePath = join(tmpDir, "not-a-socket");
+    writeFileSync(filePath, "");
+
+    await expect(checkGateSocket(filePath)).rejects.toThrow(/not a Unix socket/);
+  });
+
+  test("throws when socket exists but daemon is not responding", async () => {
+    // Create a real Unix socket that nothing is listening on
+    const socketPath = join(tmpDir, "dead.sock");
+    const tempServer = Bun.serve({
+      unix: socketPath,
+      fetch() {
+        return new Response("ok");
+      },
+    });
+    tempServer.stop(true);
+
+    // The socket file still exists but nobody is listening
+    await expect(checkGateSocket(socketPath)).rejects.toThrow(/not responding/);
+  });
+
+  test("throws when health check returns non-OK status", async () => {
+    // Create a real socket with a server that returns 500
+    const socketPath = join(tmpDir, "unhealthy.sock");
+    const tempServer = Bun.serve({
+      unix: socketPath,
+      fetch() {
+        return new Response("internal error", { status: 500 });
+      },
+    });
+
+    try {
+      await expect(checkGateSocket(socketPath)).rejects.toThrow(/health check failed/);
+    } finally {
+      tempServer.stop(true);
+    }
+  });
+
+  test("succeeds when socket exists and health check passes", async () => {
+    const socketPath = join(tmpDir, "healthy.sock");
+    const tempServer = Bun.serve({
+      unix: socketPath,
+      fetch() {
+        return new Response(JSON.stringify({ status: "ok" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    });
+
+    try {
+      await expect(checkGateSocket(socketPath)).resolves.toBeUndefined();
+    } finally {
+      tempServer.stop(true);
+    }
   });
 });

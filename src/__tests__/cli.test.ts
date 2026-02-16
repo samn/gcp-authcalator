@@ -138,26 +138,67 @@ describe("gate subcommand", () => {
 
 describe("metadata-proxy subcommand", () => {
   test("starts metadata-proxy server with valid config", async () => {
-    const proc = Bun.spawn(
-      ["bun", "run", entryPoint, "metadata-proxy", "--project-id", "test-proj", "--port", "19200"],
-      { stdout: "pipe", stderr: "pipe" },
-    );
+    // Start a fake gate daemon so the connectivity check passes
+    const dir = mkdtempSync(join(tmpdir(), "cli-mp-"));
+    const socketPath = join(dir, "gate.sock");
+    const fakeGate = Bun.serve({
+      unix: socketPath,
+      fetch() {
+        return new Response(JSON.stringify({ status: "ok" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    });
 
-    // Give it time to start up
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    try {
+      const proc = Bun.spawn(
+        [
+          "bun",
+          "run",
+          entryPoint,
+          "metadata-proxy",
+          "--project-id",
+          "test-proj",
+          "--port",
+          "19200",
+          "--socket-path",
+          socketPath,
+        ],
+        { stdout: "pipe", stderr: "pipe" },
+      );
 
-    // Kill the process since it runs as a daemon
-    proc.kill();
-    const [stdout, stderr] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
+      // Give it time to start up
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+
+      // Kill the process since it runs as a daemon
+      proc.kill();
+      const [stdout, stderr] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ]);
+      await proc.exited;
+
+      const output = stdout + stderr;
+      expect(output).toContain("metadata-proxy:");
+      expect(output).toContain("test-proj");
+      expect(output).toContain("19200");
+    } finally {
+      fakeGate.stop(true);
+    }
+  });
+
+  test("exits 1 when gate socket is missing", async () => {
+    const { stderr, exitCode } = await runCLI([
+      "metadata-proxy",
+      "--project-id",
+      "test-proj",
+      "--socket-path",
+      "/tmp/nonexistent-cli-test.sock",
     ]);
-    await proc.exited;
-
-    const output = stdout + stderr;
-    expect(output).toContain("metadata-proxy:");
-    expect(output).toContain("test-proj");
-    expect(output).toContain("19200");
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("socket not found");
+    expect(stderr).toContain("gcp-authcalator gate");
   });
 
   test("exits 1 when missing project_id", async () => {
