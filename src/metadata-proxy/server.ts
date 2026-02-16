@@ -33,11 +33,14 @@ export function startMetadataProxyServer(
   config: MetadataProxyConfig,
   options: StartMetadataProxyServerOptions = {},
 ): MetadataProxyServerResult {
-  const provider =
-    options.tokenProvider ?? createGateClient(config.socket_path, options.gateClientOptions);
+  const gateClient = options.tokenProvider
+    ? null
+    : createGateClient(config.socket_path, options.gateClientOptions);
+  const provider: TokenProvider = options.tokenProvider ?? gateClient!;
 
   const deps: MetadataProxyDeps = {
     getToken: provider.getToken,
+    getNumericProjectId: gateClient?.getNumericProjectId,
     projectId: config.project_id,
     serviceAccountEmail: config.service_account,
     startTime: new Date(),
@@ -96,6 +99,9 @@ export function startMetadataProxyServer(
       "    GET /computeMetadata/v1/instance/service-accounts/default/token → access token",
     );
     console.log("    GET /computeMetadata/v1/project/project-id                    → project ID");
+    console.log(
+      "    GET /computeMetadata/v1/project/numeric-project-id            → numeric project ID",
+    );
     console.log("    GET /computeMetadata/v1/instance/service-accounts/default/email → SA email");
   }
 

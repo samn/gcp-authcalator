@@ -1,5 +1,5 @@
-import type { MetadataProxyDeps } from "./types.ts";
 import type { TokenResponse } from "../gate/types.ts";
+import type { MetadataProxyDeps } from "./types.ts";
 
 const METADATA_FLAVOR_HEADER = "Metadata-Flavor";
 const METADATA_FLAVOR_VALUE = "Google";
@@ -57,11 +57,14 @@ export async function handleRequest(req: Request, deps: MetadataProxyDeps): Prom
         return handleToken(deps);
       case "/computeMetadata/v1/project/project-id":
         return handleProjectId(deps);
+      case "/computeMetadata/v1/project/numeric-project-id":
+        return handleNumericProjectId(deps);
       case "/computeMetadata/v1/instance/service-accounts/default/email":
         return handleEmail(deps);
       case "/computeMetadata/v1/instance/service-accounts/default":
         return handleServiceAccountInfo(url, deps);
       default:
+        console.debug(`Unknown path: ${pathname}`);
         return textResponse("Not found", 404);
     }
   }
@@ -89,6 +92,20 @@ async function handleToken(deps: MetadataProxyDeps): Promise<Response> {
 
 function handleProjectId(deps: MetadataProxyDeps): Response {
   return textResponse(deps.projectId);
+}
+
+async function handleNumericProjectId(deps: MetadataProxyDeps): Promise<Response> {
+  if (!deps.getNumericProjectId) {
+    return textResponse("Not found", 404);
+  }
+
+  try {
+    const numericId = await deps.getNumericProjectId();
+    return textResponse(numericId);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    return jsonResponse({ error: message }, 500);
+  }
 }
 
 function handleEmail(deps: MetadataProxyDeps): Response {

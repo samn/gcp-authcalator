@@ -11,12 +11,18 @@ export interface TokenProvider {
   getToken: () => Promise<CachedToken>;
 }
 
+/** Provides both tokens and project metadata from the gcp-gate daemon. */
+export interface GateClient extends TokenProvider {
+  getNumericProjectId: () => Promise<string>;
+}
+
 /**
  * Dependency injection interface for metadata-proxy request handlers.
  * Allows handlers to be tested without a real gate daemon.
  */
 export interface MetadataProxyDeps {
   getToken: () => Promise<CachedToken>;
+  getNumericProjectId?: () => Promise<string>;
   projectId: string;
   serviceAccountEmail: string | undefined;
   startTime: Date;

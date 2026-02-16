@@ -27,6 +27,20 @@ function mockFetch(email: string): typeof globalThis.fetch {
     })) as unknown as typeof globalThis.fetch;
 }
 
+/** Create a URL-aware mock fetch that handles both tokeninfo and CRM API calls. */
+function mockCrmFetch(projectNumber: string): typeof globalThis.fetch {
+  return (async (input: string | URL | Request) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    if (url.includes("cloudresourcemanager.googleapis.com")) {
+      return new Response(JSON.stringify({ name: `projects/${projectNumber}` }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("Not found", { status: 404 });
+  }) as unknown as typeof globalThis.fetch;
+}
+
 describe("createAuthModule", () => {
   describe("mintDevToken", () => {
     test("returns a token from the impersonated client", async () => {
@@ -221,6 +235,80 @@ describe("createAuthModule", () => {
       });
 
       await expect(getIdentityEmail()).rejects.toThrow("no email in tokeninfo");
+    });
+  });
+
+  describe("getProjectNumber", () => {
+    test("returns numeric project ID from CRM API", async () => {
+      const { getProjectNumber } = createAuthModule(TEST_CONFIG, {
+        sourceClient: mockClient("source-token"),
+        impersonatedClient: mockClient("dev-token"),
+        fetchFn: mockCrmFetch("123456789012"),
+      });
+
+      const number = await getProjectNumber();
+      expect(number).toBe("123456789012");
+    });
+
+    test("caches project number on subsequent calls", async () => {
+      let fetchCount = 0;
+      const fetchFn = (async () => {
+        fetchCount++;
+        return new Response(JSON.stringify({ name: "projects/111222333" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }) as unknown as typeof globalThis.fetch;
+
+      const { getProjectNumber } = createAuthModule(TEST_CONFIG, {
+        sourceClient: mockClient("source"),
+        impersonatedClient: mockClient("dev"),
+        fetchFn,
+      });
+
+      await getProjectNumber();
+      await getProjectNumber();
+
+      expect(fetchCount).toBe(1);
+    });
+
+    test("throws when CRM API returns error", async () => {
+      const fetchFn = (async () =>
+        new Response("Forbidden", { status: 403 })) as unknown as typeof globalThis.fetch;
+
+      const { getProjectNumber } = createAuthModule(TEST_CONFIG, {
+        sourceClient: mockClient("source"),
+        impersonatedClient: mockClient("dev"),
+        fetchFn,
+      });
+
+      await expect(getProjectNumber()).rejects.toThrow("CRM API returned 403");
+    });
+
+    test("throws when CRM API response has no name", async () => {
+      const fetchFn = (async () =>
+        new Response(JSON.stringify({ projectId: "test-project" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })) as unknown as typeof globalThis.fetch;
+
+      const { getProjectNumber } = createAuthModule(TEST_CONFIG, {
+        sourceClient: mockClient("source"),
+        impersonatedClient: mockClient("dev"),
+        fetchFn,
+      });
+
+      await expect(getProjectNumber()).rejects.toThrow("no name in CRM API response");
+    });
+
+    test("throws when source client has no token", async () => {
+      const { getProjectNumber } = createAuthModule(TEST_CONFIG, {
+        sourceClient: mockClient(null),
+        impersonatedClient: mockClient("dev"),
+        fetchFn: mockCrmFetch("123"),
+      });
+
+      await expect(getProjectNumber()).rejects.toThrow("no access token available");
     });
   });
 });

@@ -39,6 +39,7 @@ export async function startGateServer(
     mintDevToken: auth.mintDevToken,
     mintProdToken: auth.mintProdToken,
     getIdentityEmail: auth.getIdentityEmail,
+    getProjectNumber: auth.getProjectNumber,
     confirmProdAccess: confirm.confirmProdAccess,
     writeAuditLog: audit.writeAuditLog,
     prodRateLimiter,
@@ -140,6 +141,7 @@ export async function startGateServer(
   console.log("    GET /token            → dev-scoped access token");
   console.log("    GET /token?level=prod → prod token (with confirmation)");
   console.log("    GET /identity         → authenticated user email");
+  console.log("    GET /project-number   → numeric project ID");
   console.log("    GET /health           → health check");
 
   return { server, stop };

@@ -136,6 +136,53 @@ describe("GET /computeMetadata/v1/project/project-id", () => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /computeMetadata/v1/project/numeric-project-id
+// ---------------------------------------------------------------------------
+
+describe("GET /computeMetadata/v1/project/numeric-project-id", () => {
+  test("returns numeric project ID as plain text", async () => {
+    const deps = makeDeps({ getNumericProjectId: async () => "123456789012" });
+    const res = await handleRequest(
+      metadataRequest("/computeMetadata/v1/project/numeric-project-id"),
+      deps,
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toBe("text/plain");
+    expect(res.headers.get("Metadata-Flavor")).toBe("Google");
+    const body = await res.text();
+    expect(body).toBe("123456789012");
+  });
+
+  test("returns 404 when getNumericProjectId is not configured", async () => {
+    const deps = makeDeps({ getNumericProjectId: undefined });
+    const res = await handleRequest(
+      metadataRequest("/computeMetadata/v1/project/numeric-project-id"),
+      deps,
+    );
+
+    expect(res.status).toBe(404);
+  });
+
+  test("returns 500 when numeric project ID lookup fails", async () => {
+    const deps = makeDeps({
+      getNumericProjectId: async () => {
+        throw new Error("CRM API unreachable");
+      },
+    });
+
+    const res = await handleRequest(
+      metadataRequest("/computeMetadata/v1/project/numeric-project-id"),
+      deps,
+    );
+
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("CRM API unreachable");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // GET /computeMetadata/v1/instance/service-accounts/default/email
 // ---------------------------------------------------------------------------
 

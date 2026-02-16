@@ -17,6 +17,7 @@ function makeDeps(overrides: Partial<GateDeps> = {}): GateDeps {
       expires_at: new Date(Date.now() + 3600 * 1000),
     }),
     getIdentityEmail: async () => "user@example.com",
+    getProjectNumber: async () => "123456789012",
     confirmProdAccess: async () => true,
     writeAuditLog: () => {},
     prodRateLimiter: createProdRateLimiter(),
@@ -84,6 +85,39 @@ describe("GET /identity", () => {
     expect(res.status).toBe(500);
     const body = (await res.json()) as Record<string, unknown>;
     expect(body.error).toBe("ADC not configured");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /project-number
+// ---------------------------------------------------------------------------
+
+describe("GET /project-number", () => {
+  test("returns project number from provider", async () => {
+    const deps = makeDeps({ getProjectNumber: async () => "987654321098" });
+    const res = await handleRequest(makeRequest("/project-number"), deps);
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.project_number).toBe("987654321098");
+  });
+
+  test("returns JSON content type", async () => {
+    const res = await handleRequest(makeRequest("/project-number"), makeDeps());
+    expect(res.headers.get("Content-Type")).toBe("application/json");
+  });
+
+  test("returns 500 when project number lookup fails", async () => {
+    const deps = makeDeps({
+      getProjectNumber: async () => {
+        throw new Error("CRM API unreachable");
+      },
+    });
+    const res = await handleRequest(makeRequest("/project-number"), deps);
+
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("CRM API unreachable");
   });
 });
 
