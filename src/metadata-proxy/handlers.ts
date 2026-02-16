@@ -50,7 +50,16 @@ export async function handleRequest(req: Request, deps: MetadataProxyDeps): Prom
     }
 
     // Normalize trailing slashes for path matching
-    const pathname = url.pathname.replace(/\/+$/, "") || "/";
+    let pathname = url.pathname.replace(/\/+$/, "") || "/";
+
+    // Alias email-based service account paths to "default" so that gcloud
+    // (which resolves accounts by email, not by the "default" alias) hits
+    // the same handlers as the default path.
+    const saBase = "/computeMetadata/v1/instance/service-accounts/";
+    if (deps.serviceAccountEmail && pathname.startsWith(saBase + deps.serviceAccountEmail)) {
+      pathname =
+        saBase + "default" + pathname.slice(saBase.length + deps.serviceAccountEmail.length);
+    }
 
     switch (pathname) {
       case "/computeMetadata/v1/instance/service-accounts/default/token":
@@ -140,23 +149,36 @@ function handleEmail(deps: MetadataProxyDeps): Response {
  * containing email, aliases, and scopes (mirrors real GCE metadata behavior).
  *
  * Without `recursive=true`, returns a text directory listing of available
- * service accounts. Since we proxy to a single service account via the
- * gateway, this always returns just "default".
+ * service accounts.
+ *
+ * On a real GCE VM the listing includes both `default/` and the email-keyed
+ * entry.  gcloud's `Metadata().Accounts()` filters out `default` and only
+ * recognises real email addresses, so we must include the email here for
+ * gcloud to discover the account as a GCE credential.
  */
 function handleServiceAccounts(url: URL, deps: MetadataProxyDeps): Response {
   const recursive = url.searchParams.get("recursive") === "true";
+  const email = deps.serviceAccountEmail;
+
+  const saInfo = {
+    aliases: ["default"],
+    email: email ?? "default",
+    scopes: ["https://www.googleapis.com/auth/cloud-platform"],
+  };
 
   if (recursive) {
-    return jsonResponse({
-      default: {
-        aliases: ["default"],
-        email: deps.serviceAccountEmail ?? "default",
-        scopes: ["https://www.googleapis.com/auth/cloud-platform"],
-      },
-    });
+    const body: Record<string, typeof saInfo> = { default: saInfo };
+    if (email) {
+      body[email] = saInfo;
+    }
+    return jsonResponse(body);
   }
 
-  return textResponse("default/\n");
+  let listing = "default/\n";
+  if (email) {
+    listing += `${email}/\n`;
+  }
+  return textResponse(listing);
 }
 
 /**
