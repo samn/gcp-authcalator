@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 export const ConfigSchema = z.object({
   project_id: z.string().min(1).optional(),
   service_account: z.string().email().optional(),
-  socket_path: z.string().min(1).default("/run/gcp-gate.sock"),
+  socket_path: z.string().min(1).default("/tmp/gcp-authcalator.sock"),
   port: z.coerce.number().int().min(1).max(65535).default(8173),
 });
 
