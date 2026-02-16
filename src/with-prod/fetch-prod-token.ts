@@ -6,37 +6,58 @@ export interface FetchProdTokenOptions {
 export interface ProdTokenResult {
   access_token: string;
   expires_in: number;
+  /** Engineer's email address (from gcp-gate /identity endpoint). */
+  email: string;
 }
 
 /**
- * One-shot fetch of a prod-level token from the gcp-gate daemon.
+ * One-shot fetch of a prod-level token and engineer identity from gcp-gate.
  *
- * Hits `/token?level=prod` on the Unix socket — this triggers a host-side
- * confirmation prompt before the token is issued.
+ * 1. Hits `/token?level=prod` on the Unix socket (triggers host-side confirmation).
+ * 2. Hits `/identity` to retrieve the engineer's email address.
+ *
+ * The email is needed so the temporary metadata proxy can advertise a real
+ * service-account email — gcloud ignores the "default" alias and only
+ * recognises email-keyed accounts.
  */
 export async function fetchProdToken(
   socketPath: string,
   options: FetchProdTokenOptions = {},
 ): Promise<ProdTokenResult> {
   const fetchFn = options.fetchFn ?? globalThis.fetch;
+  const unixOpts = { unix: socketPath } as RequestInit;
 
-  const res = await fetchFn("http://localhost/token?level=prod", {
-    unix: socketPath,
-  } as RequestInit);
+  // Fetch prod token (may trigger host-side confirmation dialog)
+  const tokenRes = await fetchFn("http://localhost/token?level=prod", unixOpts);
 
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`gcp-gate returned ${res.status}: ${text}`);
+  if (!tokenRes.ok) {
+    const text = await tokenRes.text();
+    throw new Error(`gcp-gate returned ${tokenRes.status}: ${text}`);
   }
 
-  const body = (await res.json()) as { access_token?: string; expires_in?: number };
+  const tokenBody = (await tokenRes.json()) as { access_token?: string; expires_in?: number };
 
-  if (!body.access_token) {
+  if (!tokenBody.access_token) {
     throw new Error("gcp-gate returned no access_token");
   }
 
+  // Fetch engineer identity
+  const identityRes = await fetchFn("http://localhost/identity", unixOpts);
+
+  if (!identityRes.ok) {
+    const text = await identityRes.text();
+    throw new Error(`gcp-gate /identity returned ${identityRes.status}: ${text}`);
+  }
+
+  const identityBody = (await identityRes.json()) as { email?: string };
+
+  if (!identityBody.email) {
+    throw new Error("gcp-gate /identity returned no email");
+  }
+
   return {
-    access_token: body.access_token,
-    expires_in: body.expires_in ?? 3600,
+    access_token: tokenBody.access_token,
+    expires_in: tokenBody.expires_in ?? 3600,
+    email: identityBody.email,
   };
 }

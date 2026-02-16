@@ -52,13 +52,22 @@ export async function handleRequest(req: Request, deps: MetadataProxyDeps): Prom
     // Normalize trailing slashes for path matching
     let pathname = url.pathname.replace(/\/+$/, "") || "/";
 
-    // Alias email-based service account paths to "default" so that gcloud
-    // (which resolves accounts by email, not by the "default" alias) hits
-    // the same handlers as the default path.
+    // Alias any email-based service account path to "default".
+    //
+    // This proxy serves a single set of credentials, so all service-account
+    // paths are equivalent.  gcloud (and Python google-auth) resolve accounts
+    // by email, not by the "default" alias.  The email they use may come from
+    // the proxy's own listing, a cached value from a prior metadata-server
+    // interaction, or internal library state.  Rather than requiring an exact
+    // match, we rewrite any non-"default" identifier to "default" so the
+    // request always reaches the right handler.
     const saBase = "/computeMetadata/v1/instance/service-accounts/";
-    if (deps.serviceAccountEmail && pathname.startsWith(saBase + deps.serviceAccountEmail)) {
-      pathname =
-        saBase + "default" + pathname.slice(saBase.length + deps.serviceAccountEmail.length);
+    if (pathname.startsWith(saBase)) {
+      const rest = pathname.slice(saBase.length);
+      if (rest && !rest.startsWith("default")) {
+        const slashIdx = rest.indexOf("/");
+        pathname = slashIdx >= 0 ? saBase + "default" + rest.slice(slashIdx) : saBase + "default";
+      }
     }
 
     switch (pathname) {

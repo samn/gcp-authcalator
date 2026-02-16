@@ -474,7 +474,7 @@ describe("email-based service account paths", () => {
     expect(body).toContain("token");
   });
 
-  test("does not alias when email does not match configured serviceAccountEmail", async () => {
+  test("aliases any unknown email to default (single-account proxy)", async () => {
     const res = await handleRequest(
       metadataRequest(
         "/computeMetadata/v1/instance/service-accounts/other@project.iam.gserviceaccount.com/token",
@@ -482,17 +482,34 @@ describe("email-based service account paths", () => {
       makeDeps(),
     );
 
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.access_token).toBe("test-access-token");
   });
 
-  test("does not alias when serviceAccountEmail is undefined", async () => {
+  test("aliases unknown email even when serviceAccountEmail is undefined", async () => {
     const deps = makeDeps({ serviceAccountEmail: undefined });
     const res = await handleRequest(
       metadataRequest(`/computeMetadata/v1/instance/service-accounts/${email}/token`),
       deps,
     );
 
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.access_token).toBe("test-access-token");
+  });
+
+  test("aliases unknown email for recursive info endpoint", async () => {
+    const res = await handleRequest(
+      metadataRequest(
+        "/computeMetadata/v1/instance/service-accounts/cached-dev-sa@project.iam.gserviceaccount.com/?recursive=true",
+      ),
+      makeDeps(),
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.email).toBe("sa@test-project.iam.gserviceaccount.com");
   });
 });
 

@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import type { Config } from "../config.ts";
 import { WithProdConfigSchema } from "../config.ts";
 import { fetchProdToken, type FetchProdTokenOptions } from "../with-prod/fetch-prod-token.ts";
@@ -25,10 +28,11 @@ export interface WithProdOptions {
 /**
  * Wrap a shell command with prod-level GCP credentials.
  *
- * 1. Fetches a prod token from gcp-gate (triggers host-side confirmation)
+ * 1. Fetches a prod token + engineer identity from gcp-gate
  * 2. Starts a temporary metadata proxy serving that token
- * 3. Execs the wrapped command with env vars pointing at the proxy
- * 4. Forwards signals to child, propagates exit code
+ * 3. Creates an isolated CLOUDSDK_CONFIG so gcloud doesn't reuse cached creds
+ * 4. Execs the wrapped command with env vars pointing at the proxy
+ * 5. Forwards signals to child, propagates exit code, cleans up
  */
 export async function runWithProd(
   config: Config,
@@ -43,7 +47,7 @@ export async function runWithProd(
 
   const wpConfig = WithProdConfigSchema.parse(config);
 
-  // Step 1: Fetch prod token from gcp-gate
+  // Step 1: Fetch prod token + identity from gcp-gate
   console.log("with-prod: requesting prod-level token from gcp-gate...");
   let tokenResult;
   try {
@@ -54,16 +58,17 @@ export async function runWithProd(
     );
     process.exit(1);
   }
-  console.log("with-prod: prod token acquired");
+  console.log(`with-prod: prod token acquired for ${tokenResult.email}`);
 
-  // Step 2: Start temporary metadata proxy
+  // Step 2: Start temporary metadata proxy with the engineer's email so
+  // gcloud can discover the account (it ignores the "default" alias).
   const expiresAt = new Date(Date.now() + tokenResult.expires_in * 1000);
   const tokenProvider = createStaticTokenProvider(tokenResult.access_token, expiresAt);
 
   const { server, stop } = startMetadataProxyServer(
     {
       project_id: wpConfig.project_id,
-      service_account: undefined,
+      service_account: tokenResult.email,
       socket_path: wpConfig.socket_path,
       port: 0,
     },
@@ -77,35 +82,54 @@ export async function runWithProd(
 
   const metadataHost = `127.0.0.1:${server.port}`;
 
-  // Step 3: Spawn wrapped command with metadata env vars
-  const spawnFn = options.spawnFn ?? (Bun.spawn as unknown as SpawnFn);
-  const {
-    CLOUDSDK_AUTH_ACCESS_TOKEN: _drop1,
-    CPL_GS_BEARER: _drop2,
-    GOOGLE_APPLICATION_CREDENTIALS: _drop3,
-    GOOGLE_OAUTH_ACCESS_TOKEN: _drop4,
-    CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: _drop5,
-    CLOUDSDK_CORE_ACCOUNT: _drop6,
-    ...parentEnv
-  } = process.env;
-  const env = { ...parentEnv, GCE_METADATA_HOST: metadataHost, GCE_METADATA_IP: metadataHost };
+  let gcloudConfigDir: string | undefined;
+  let exitCode: number | undefined;
+  try {
+    // Step 3: Create an isolated gcloud config directory so the child process
+    // doesn't reuse cached tokens from the main metadata proxy.
+    gcloudConfigDir = mkdtempSync(join(tmpdir(), "gcp-authcalator-gcloud-"));
 
-  const child = spawnFn(wrappedCommand, {
-    env,
-    stdin: "inherit",
-    stdout: "inherit",
-    stderr: "inherit",
-  });
+    // Step 4: Spawn wrapped command with metadata env vars
+    const spawnFn = options.spawnFn ?? (Bun.spawn as unknown as SpawnFn);
+    const {
+      CLOUDSDK_AUTH_ACCESS_TOKEN: _drop1,
+      CPL_GS_BEARER: _drop2,
+      GOOGLE_APPLICATION_CREDENTIALS: _drop3,
+      GOOGLE_OAUTH_ACCESS_TOKEN: _drop4,
+      CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: _drop5,
+      CLOUDSDK_CORE_ACCOUNT: _drop6,
+      CLOUDSDK_CONFIG: _drop7,
+      ...parentEnv
+    } = process.env;
+    const env = {
+      ...parentEnv,
+      GCE_METADATA_HOST: metadataHost,
+      GCE_METADATA_IP: metadataHost,
+      CLOUDSDK_CONFIG: gcloudConfigDir,
+    };
 
-  // Step 4: Forward signals to child
-  const forwardSignal = (signal: NodeJS.Signals) => {
-    child.kill(signal === "SIGINT" ? 2 : 15);
-  };
-  process.on("SIGTERM", () => forwardSignal("SIGTERM"));
-  process.on("SIGINT", () => forwardSignal("SIGINT"));
+    const child = spawnFn(wrappedCommand, {
+      env,
+      stdin: "inherit",
+      stdout: "inherit",
+      stderr: "inherit",
+    });
 
-  // Step 5: Wait for child, clean up, propagate exit code
-  const exitCode = await child.exited;
-  stop();
+    // Step 5: Forward signals to child
+    const forwardSignal = (signal: NodeJS.Signals) => {
+      child.kill(signal === "SIGINT" ? 2 : 15);
+    };
+    process.on("SIGTERM", () => forwardSignal("SIGTERM"));
+    process.on("SIGINT", () => forwardSignal("SIGINT"));
+
+    // Step 6: Wait for child
+    exitCode = (await child.exited) ?? undefined;
+  } finally {
+    stop();
+    if (gcloudConfigDir) {
+      rmSync(gcloudConfigDir, { recursive: true, force: true });
+    }
+  }
+
   process.exit(exitCode ?? 1);
 }
