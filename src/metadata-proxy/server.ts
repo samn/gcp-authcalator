@@ -41,6 +41,7 @@ export function startMetadataProxyServer(
   const deps: MetadataProxyDeps = {
     getToken: provider.getToken,
     getNumericProjectId: gateClient?.getNumericProjectId,
+    getUniverseDomain: gateClient?.getUniverseDomain,
     projectId: config.project_id,
     serviceAccountEmail: config.service_account,
     startTime: new Date(),
@@ -104,6 +105,9 @@ export function startMetadataProxyServer(
     );
     console.log("    GET /computeMetadata/v1/instance/service-accounts/default/email → SA email");
     console.log("    GET /computeMetadata/v1/instance/service-accounts               → SA listing");
+    console.log(
+      "    GET /computeMetadata/v1/universe/universe-domain                → universe domain",
+    );
   }
 
   return { server, stop };

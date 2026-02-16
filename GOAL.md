@@ -97,6 +97,7 @@ A small HTTP server using the `google-auth-library` library. Runs on the host ma
 | `GET /token?level=prod` | Shows host-side confirmation, then returns token for engineer's identity |
 | `GET /identity`         | Returns the authenticated user's email                                   |
 | `GET /project-number`   | Returns the numeric project ID (resolved via Cloud Resource Manager API) |
+| `GET /universe-domain`  | Returns the GCP universe domain (resolved via GoogleAuth)                |
 | `GET /health`           | Health check                                                             |
 
 **Token generation** uses `[iamcredentials.generateAccessToken](https://cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/generateAccessToken)` for dev tokens (1-hour TTL). For prod tokens, it uses the engineer's own ADC (which stays on the host).
@@ -125,6 +126,9 @@ GET /computeMetadata/v1/project/numeric-project-id
 
 GET /computeMetadata/v1/instance/service-accounts/
   → directory listing of available service accounts (returns "default")
+
+GET /computeMetadata/v1/universe/universe-domain
+  → universe domain (e.g. "googleapis.com", resolved via gcp-gate)
 
 GET /  (metadata server detection ping)
   → 200 OK with Metadata-Flavor: Google header

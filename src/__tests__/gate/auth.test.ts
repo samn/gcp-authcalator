@@ -11,10 +11,15 @@ const TEST_CONFIG: GateConfig = {
 };
 
 /** Create a mock AuthClient that returns the given token. */
-function mockClient(token: string | null, expiryDate?: number): AuthClient {
+function mockClient(
+  token: string | null,
+  expiryDate?: number,
+  universeDomain = "googleapis.com",
+): AuthClient {
   return {
     credentials: { expiry_date: expiryDate ?? Date.now() + 3600_000 },
     getAccessToken: async () => ({ token, res: null }),
+    universeDomain,
   } as unknown as AuthClient;
 }
 
@@ -235,6 +240,41 @@ describe("createAuthModule", () => {
       });
 
       await expect(getIdentityEmail()).rejects.toThrow("no email in tokeninfo");
+    });
+  });
+
+  describe("getUniverseDomain", () => {
+    test("returns universe domain from source client", async () => {
+      const { getUniverseDomain } = createAuthModule(TEST_CONFIG, {
+        sourceClient: mockClient("source-token"),
+        impersonatedClient: mockClient("dev-token"),
+      });
+
+      const domain = await getUniverseDomain();
+      expect(domain).toBe("googleapis.com");
+    });
+
+    test("returns custom universe domain from source client", async () => {
+      const { getUniverseDomain } = createAuthModule(TEST_CONFIG, {
+        sourceClient: mockClient("source-token", undefined, "custom.example.com"),
+        impersonatedClient: mockClient("dev-token"),
+      });
+
+      const domain = await getUniverseDomain();
+      expect(domain).toBe("custom.example.com");
+    });
+
+    test("caches universe domain on subsequent calls", async () => {
+      const { getUniverseDomain } = createAuthModule(TEST_CONFIG, {
+        sourceClient: mockClient("source-token"),
+        impersonatedClient: mockClient("dev-token"),
+      });
+
+      const first = await getUniverseDomain();
+      const second = await getUniverseDomain();
+
+      expect(first).toBe("googleapis.com");
+      expect(second).toBe("googleapis.com");
     });
   });
 

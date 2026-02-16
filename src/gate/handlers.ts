@@ -1,4 +1,10 @@
-import type { GateDeps, TokenResponse, ProjectNumberResponse, AuditEntry } from "./types.ts";
+import type {
+  GateDeps,
+  TokenResponse,
+  ProjectNumberResponse,
+  UniverseDomainResponse,
+  AuditEntry,
+} from "./types.ts";
 
 const JSON_HEADERS = { "Content-Type": "application/json" };
 
@@ -24,6 +30,8 @@ export async function handleRequest(req: Request, deps: GateDeps): Promise<Respo
       return handleIdentity(deps);
     case "/project-number":
       return handleProjectNumber(deps);
+    case "/universe-domain":
+      return handleUniverseDomain(deps);
     case "/health":
       return handleHealth(deps);
     default:
@@ -153,6 +161,17 @@ async function handleProjectNumber(deps: GateDeps): Promise<Response> {
   try {
     const projectNumber = await deps.getProjectNumber();
     const body: ProjectNumberResponse = { project_number: projectNumber };
+    return jsonResponse(body);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    return jsonResponse({ error: message }, 500);
+  }
+}
+
+async function handleUniverseDomain(deps: GateDeps): Promise<Response> {
+  try {
+    const universeDomain = await deps.getUniverseDomain();
+    const body: UniverseDomainResponse = { universe_domain: universeDomain };
     return jsonResponse(body);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";

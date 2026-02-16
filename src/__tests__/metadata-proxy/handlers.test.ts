@@ -183,6 +183,53 @@ describe("GET /computeMetadata/v1/project/numeric-project-id", () => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /computeMetadata/v1/universe/universe-domain
+// ---------------------------------------------------------------------------
+
+describe("GET /computeMetadata/v1/universe/universe-domain", () => {
+  test("returns universe domain as plain text", async () => {
+    const deps = makeDeps({ getUniverseDomain: async () => "googleapis.com" });
+    const res = await handleRequest(
+      metadataRequest("/computeMetadata/v1/universe/universe-domain"),
+      deps,
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toBe("text/plain");
+    expect(res.headers.get("Metadata-Flavor")).toBe("Google");
+    const body = await res.text();
+    expect(body).toBe("googleapis.com");
+  });
+
+  test("returns 404 when getUniverseDomain is not configured", async () => {
+    const deps = makeDeps({ getUniverseDomain: undefined });
+    const res = await handleRequest(
+      metadataRequest("/computeMetadata/v1/universe/universe-domain"),
+      deps,
+    );
+
+    expect(res.status).toBe(404);
+  });
+
+  test("returns 500 when universe domain lookup fails", async () => {
+    const deps = makeDeps({
+      getUniverseDomain: async () => {
+        throw new Error("gate unreachable");
+      },
+    });
+
+    const res = await handleRequest(
+      metadataRequest("/computeMetadata/v1/universe/universe-domain"),
+      deps,
+    );
+
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("gate unreachable");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // GET /computeMetadata/v1/instance/service-accounts/default/email
 // ---------------------------------------------------------------------------
 
