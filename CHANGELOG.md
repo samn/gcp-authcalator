@@ -7,10 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-02-15
-
-### Added
-
 - `gate` command: host-side token daemon with desktop confirmation dialogs
 - `metadata-proxy` command: GCE metadata server emulator for containers
 - `with-prod` command: wrap commands with production credentials
