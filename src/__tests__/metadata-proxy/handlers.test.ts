@@ -322,7 +322,7 @@ describe("GET /computeMetadata/v1/instance/service-accounts/default/", () => {
 // ---------------------------------------------------------------------------
 
 describe("GET /computeMetadata/v1/instance/service-accounts/", () => {
-  test("returns text listing with 'default/' for non-recursive request", async () => {
+  test("returns text listing with 'default/' and email for non-recursive request", async () => {
     const res = await handleRequest(
       metadataRequest("/computeMetadata/v1/instance/service-accounts/"),
       makeDeps(),
@@ -332,11 +332,24 @@ describe("GET /computeMetadata/v1/instance/service-accounts/", () => {
     expect(res.headers.get("Content-Type")).toBe("text/plain");
     expect(res.headers.get("Metadata-Flavor")).toBe("Google");
     const body = await res.text();
+    expect(body).toBe("default/\nsa@test-project.iam.gserviceaccount.com/\n");
+  });
+
+  test("returns only 'default/' when serviceAccountEmail is undefined", async () => {
+    const deps = makeDeps({ serviceAccountEmail: undefined });
+    const res = await handleRequest(
+      metadataRequest("/computeMetadata/v1/instance/service-accounts/"),
+      deps,
+    );
+
+    expect(res.status).toBe(200);
+    const body = await res.text();
     expect(body).toBe("default/\n");
   });
 
   test("returns JSON with service account info for recursive=true", async () => {
-    const deps = makeDeps({ serviceAccountEmail: "sa@project.iam.gserviceaccount.com" });
+    const email = "sa@project.iam.gserviceaccount.com";
+    const deps = makeDeps({ serviceAccountEmail: email });
     const res = await handleRequest(
       metadataRequest("/computeMetadata/v1/instance/service-accounts/?recursive=true"),
       deps,
@@ -345,22 +358,28 @@ describe("GET /computeMetadata/v1/instance/service-accounts/", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("Content-Type")).toBe("application/json");
     expect(res.headers.get("Metadata-Flavor")).toBe("Google");
-    const body = (await res.json()) as { default: Record<string, unknown> };
+    const body = (await res.json()) as Record<string, Record<string, unknown>>;
     expect(body.default).toBeDefined();
-    expect(body.default.email).toBe("sa@project.iam.gserviceaccount.com");
-    expect(body.default.aliases).toEqual(["default"]);
-    expect(body.default.scopes).toEqual(["https://www.googleapis.com/auth/cloud-platform"]);
+    expect(body.default!.email).toBe(email);
+    expect(body.default!.aliases).toEqual(["default"]);
+    expect(body.default!.scopes).toEqual(["https://www.googleapis.com/auth/cloud-platform"]);
+    // Email-keyed entry must also exist (required by gcloud Accounts() discovery)
+    expect(body[email]).toBeDefined();
+    expect(body[email]!.email).toBe(email);
   });
 
   test("uses configured serviceAccountEmail in recursive response", async () => {
-    const deps = makeDeps({ serviceAccountEmail: "custom@my-project.iam.gserviceaccount.com" });
+    const email = "custom@my-project.iam.gserviceaccount.com";
+    const deps = makeDeps({ serviceAccountEmail: email });
     const res = await handleRequest(
       metadataRequest("/computeMetadata/v1/instance/service-accounts/?recursive=true"),
       deps,
     );
 
-    const body = (await res.json()) as { default: Record<string, unknown> };
-    expect(body.default.email).toBe("custom@my-project.iam.gserviceaccount.com");
+    const body = (await res.json()) as Record<string, Record<string, unknown>>;
+    expect(body.default!.email).toBe(email);
+    expect(body[email]).toBeDefined();
+    expect(body[email]!.email).toBe(email);
   });
 
   test("falls back to 'default' when serviceAccountEmail is undefined in recursive response", async () => {
@@ -370,8 +389,9 @@ describe("GET /computeMetadata/v1/instance/service-accounts/", () => {
       deps,
     );
 
-    const body = (await res.json()) as { default: Record<string, unknown> };
-    expect(body.default.email).toBe("default");
+    const body = (await res.json()) as Record<string, Record<string, unknown>>;
+    expect(body.default!.email).toBe("default");
+    expect(Object.keys(body)).toEqual(["default"]);
   });
 
   test("handles path without trailing slash", async () => {
@@ -382,7 +402,7 @@ describe("GET /computeMetadata/v1/instance/service-accounts/", () => {
 
     expect(res.status).toBe(200);
     const body = await res.text();
-    expect(body).toBe("default/\n");
+    expect(body).toBe("default/\nsa@test-project.iam.gserviceaccount.com/\n");
   });
 
   test("handles path without trailing slash with recursive=true", async () => {
@@ -395,6 +415,84 @@ describe("GET /computeMetadata/v1/instance/service-accounts/", () => {
     const body = (await res.json()) as { default: Record<string, unknown> };
     expect(body.default).toBeDefined();
     expect(body.default.email).toBe("sa@test-project.iam.gserviceaccount.com");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Email-based service account path aliasing (gcloud compatibility)
+// ---------------------------------------------------------------------------
+
+describe("email-based service account paths", () => {
+  const email = "sa@test-project.iam.gserviceaccount.com";
+
+  test("serves token via email-based path", async () => {
+    const res = await handleRequest(
+      metadataRequest(`/computeMetadata/v1/instance/service-accounts/${email}/token`),
+      makeDeps(),
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.access_token).toBe("test-access-token");
+    expect(body.token_type).toBe("Bearer");
+    expect(body.expires_in).toBeGreaterThan(0);
+  });
+
+  test("serves email via email-based path", async () => {
+    const res = await handleRequest(
+      metadataRequest(`/computeMetadata/v1/instance/service-accounts/${email}/email`),
+      makeDeps(),
+    );
+
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toBe(email);
+  });
+
+  test("serves recursive info via email-based path", async () => {
+    const res = await handleRequest(
+      metadataRequest(`/computeMetadata/v1/instance/service-accounts/${email}/?recursive=true`),
+      makeDeps(),
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.email).toBe(email);
+    expect(body.aliases).toEqual(["default"]);
+    expect(body.scopes).toEqual(["https://www.googleapis.com/auth/cloud-platform"]);
+  });
+
+  test("serves directory listing via email-based path (no recursive)", async () => {
+    const res = await handleRequest(
+      metadataRequest(`/computeMetadata/v1/instance/service-accounts/${email}/`),
+      makeDeps(),
+    );
+
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("email");
+    expect(body).toContain("token");
+  });
+
+  test("does not alias when email does not match configured serviceAccountEmail", async () => {
+    const res = await handleRequest(
+      metadataRequest(
+        "/computeMetadata/v1/instance/service-accounts/other@project.iam.gserviceaccount.com/token",
+      ),
+      makeDeps(),
+    );
+
+    expect(res.status).toBe(404);
+  });
+
+  test("does not alias when serviceAccountEmail is undefined", async () => {
+    const deps = makeDeps({ serviceAccountEmail: undefined });
+    const res = await handleRequest(
+      metadataRequest(`/computeMetadata/v1/instance/service-accounts/${email}/token`),
+      deps,
+    );
+
+    expect(res.status).toBe(404);
   });
 });
 
