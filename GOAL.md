@@ -123,6 +123,9 @@ GET /computeMetadata/v1/project/project-id
 GET /computeMetadata/v1/project/numeric-project-id
   → numeric project id (resolved via Cloud Resource Manager API)
 
+GET /computeMetadata/v1/instance/service-accounts/
+  → directory listing of available service accounts (returns "default")
+
 GET /  (metadata server detection ping)
   → 200 OK with Metadata-Flavor: Google header
 ```
