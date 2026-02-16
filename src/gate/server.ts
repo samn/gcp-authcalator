@@ -40,6 +40,7 @@ export async function startGateServer(
     mintProdToken: auth.mintProdToken,
     getIdentityEmail: auth.getIdentityEmail,
     getProjectNumber: auth.getProjectNumber,
+    getUniverseDomain: auth.getUniverseDomain,
     confirmProdAccess: confirm.confirmProdAccess,
     writeAuditLog: audit.writeAuditLog,
     prodRateLimiter,
@@ -142,6 +143,7 @@ export async function startGateServer(
   console.log("    GET /token?level=prod → prod token (with confirmation)");
   console.log("    GET /identity         → authenticated user email");
   console.log("    GET /project-number   → numeric project ID");
+  console.log("    GET /universe-domain  → GCP universe domain");
   console.log("    GET /health           → health check");
 
   return { server, stop };

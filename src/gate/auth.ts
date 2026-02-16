@@ -27,6 +27,7 @@ export interface AuthModule {
   mintProdToken: () => Promise<CachedToken>;
   getIdentityEmail: () => Promise<string>;
   getProjectNumber: () => Promise<string>;
+  getUniverseDomain: () => Promise<string>;
 }
 
 /**
@@ -36,6 +37,7 @@ export interface AuthModule {
  * - mintProdToken: engineer's own ADC token (uncached — always fresh)
  * - getIdentityEmail: email from the ADC identity (cached for daemon lifetime)
  * - getProjectNumber: numeric project ID from Cloud Resource Manager (cached permanently)
+ * - getUniverseDomain: GCP universe domain from GoogleAuth (cached permanently)
  */
 export function createAuthModule(config: GateConfig, options: AuthModuleOptions = {}): AuthModule {
   const fetchFn = options.fetchFn ?? globalThis.fetch;
@@ -48,6 +50,7 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
   let devTokenCache: CachedToken | null = null;
   let emailCache: string | null = null;
   let projectNumberCache: string | null = null;
+  let universeDomainCache: string | null = null;
 
   async function getSourceClient(): Promise<AuthClient> {
     if (!sourceClient) {
@@ -181,5 +184,13 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
     return projectNumberCache;
   }
 
-  return { mintDevToken, mintProdToken, getIdentityEmail, getProjectNumber };
+  async function getUniverseDomain(): Promise<string> {
+    if (universeDomainCache) return universeDomainCache;
+
+    const client = await getSourceClient();
+    universeDomainCache = client.universeDomain;
+    return universeDomainCache;
+  }
+
+  return { mintDevToken, mintProdToken, getIdentityEmail, getProjectNumber, getUniverseDomain };
 }

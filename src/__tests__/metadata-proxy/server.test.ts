@@ -13,12 +13,21 @@ function mockGateFetch(
   token: string,
   expiresIn = 3600,
   projectNumber = "123456789012",
+  universeDomain = "googleapis.com",
 ): typeof globalThis.fetch {
   return ((input: string | URL | Request) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     if (url.includes("/project-number")) {
       return Promise.resolve(
         new Response(JSON.stringify({ project_number: projectNumber }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    }
+    if (url.includes("/universe-domain")) {
+      return Promise.resolve(
+        new Response(JSON.stringify({ universe_domain: universeDomain }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         }),
@@ -133,6 +142,46 @@ describe("startMetadataProxyServer", () => {
     expect(res.headers.get("Content-Type")).toBe("text/plain");
     const body = await res.text();
     expect(body).toBe("999888777666");
+  });
+
+  test("serves universe-domain endpoint via gate client", async () => {
+    const port = nextPort++;
+    const config = makeConfig(port);
+
+    result = startMetadataProxyServer(config, {
+      gateClientOptions: {
+        fetchFn: mockGateFetch("tok", 3600, "123456789012", "custom.googleapis.com"),
+      },
+    });
+
+    const res = await fetch(
+      `http://127.0.0.1:${port}/computeMetadata/v1/universe/universe-domain`,
+      { headers: { "Metadata-Flavor": "Google" } },
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toBe("text/plain");
+    const body = await res.text();
+    expect(body).toBe("custom.googleapis.com");
+  });
+
+  test("universe-domain returns 404 when using custom tokenProvider", async () => {
+    const port = nextPort++;
+    const config = makeConfig(port);
+
+    const customProvider: TokenProvider = {
+      getToken: async () => ({
+        access_token: "custom-token",
+        expires_at: new Date(Date.now() + 3600_000),
+      }),
+    };
+
+    result = startMetadataProxyServer(config, { tokenProvider: customProvider });
+
+    const res = await fetch(
+      `http://127.0.0.1:${port}/computeMetadata/v1/universe/universe-domain`,
+      { headers: { "Metadata-Flavor": "Google" } },
+    );
+    expect(res.status).toBe(404);
   });
 
   test("numeric-project-id returns 404 when using custom tokenProvider", async () => {

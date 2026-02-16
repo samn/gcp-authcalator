@@ -27,6 +27,11 @@ export interface ProjectNumberResponse {
   project_number: string;
 }
 
+/** JSON response for universe domain requests. */
+export interface UniverseDomainResponse {
+  universe_domain: string;
+}
+
 /** JSON response for health checks. */
 export interface HealthResponse {
   status: "ok";
@@ -57,6 +62,7 @@ export interface GateDeps {
   mintProdToken: () => Promise<CachedToken>;
   getIdentityEmail: () => Promise<string>;
   getProjectNumber: () => Promise<string>;
+  getUniverseDomain: () => Promise<string>;
   confirmProdAccess: (email: string) => Promise<boolean>;
   writeAuditLog: (entry: AuditEntry) => void;
   prodRateLimiter: ProdRateLimiter;

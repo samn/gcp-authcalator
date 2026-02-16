@@ -65,6 +65,7 @@ export async function checkGateSocket(
  *
  * - Caches tokens in memory; re-fetches when remaining lifetime < 5 minutes
  * - Caches the numeric project ID permanently (immutable value)
+ * - Caches the universe domain permanently (immutable value)
  * - Accepts an optional fetchFn for test injection
  */
 export function createGateClient(socketPath: string, options: GateClientOptions = {}): GateClient {
@@ -72,6 +73,7 @@ export function createGateClient(socketPath: string, options: GateClientOptions 
 
   let tokenCache: CachedToken | null = null;
   let numericProjectIdCache: string | null = null;
+  let universeDomainCache: string | null = null;
 
   function isCacheValid(cached: CachedToken | null): cached is CachedToken {
     if (!cached) return false;
@@ -132,5 +134,29 @@ export function createGateClient(socketPath: string, options: GateClientOptions 
     return numericProjectIdCache;
   }
 
-  return { getToken, getNumericProjectId };
+  async function getUniverseDomain(): Promise<string> {
+    if (universeDomainCache) {
+      return universeDomainCache;
+    }
+
+    const res = await fetchFn("http://localhost/universe-domain", {
+      unix: socketPath,
+    } as RequestInit);
+
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`gcp-gate returned ${res.status}: ${text}`);
+    }
+
+    const body = (await res.json()) as { universe_domain?: string };
+
+    if (!body.universe_domain) {
+      throw new Error("gcp-gate returned no universe_domain");
+    }
+
+    universeDomainCache = body.universe_domain;
+    return universeDomainCache;
+  }
+
+  return { getToken, getNumericProjectId, getUniverseDomain };
 }

@@ -59,6 +59,8 @@ export async function handleRequest(req: Request, deps: MetadataProxyDeps): Prom
         return handleProjectId(deps);
       case "/computeMetadata/v1/project/numeric-project-id":
         return handleNumericProjectId(deps);
+      case "/computeMetadata/v1/universe/universe-domain":
+        return handleUniverseDomain(deps);
       case "/computeMetadata/v1/instance/service-accounts/default/email":
         return handleEmail(deps);
       case "/computeMetadata/v1/instance/service-accounts/default":
@@ -104,6 +106,20 @@ async function handleNumericProjectId(deps: MetadataProxyDeps): Promise<Response
   try {
     const numericId = await deps.getNumericProjectId();
     return textResponse(numericId);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    return jsonResponse({ error: message }, 500);
+  }
+}
+
+async function handleUniverseDomain(deps: MetadataProxyDeps): Promise<Response> {
+  if (!deps.getUniverseDomain) {
+    return textResponse("Not found", 404);
+  }
+
+  try {
+    const domain = await deps.getUniverseDomain();
+    return textResponse(domain);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     return jsonResponse({ error: message }, 500);

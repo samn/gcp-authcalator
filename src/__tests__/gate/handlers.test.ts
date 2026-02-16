@@ -18,6 +18,7 @@ function makeDeps(overrides: Partial<GateDeps> = {}): GateDeps {
     }),
     getIdentityEmail: async () => "user@example.com",
     getProjectNumber: async () => "123456789012",
+    getUniverseDomain: async () => "googleapis.com",
     confirmProdAccess: async () => true,
     writeAuditLog: () => {},
     prodRateLimiter: createProdRateLimiter(),
@@ -118,6 +119,39 @@ describe("GET /project-number", () => {
     expect(res.status).toBe(500);
     const body = (await res.json()) as Record<string, unknown>;
     expect(body.error).toBe("CRM API unreachable");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /universe-domain
+// ---------------------------------------------------------------------------
+
+describe("GET /universe-domain", () => {
+  test("returns universe domain from provider", async () => {
+    const deps = makeDeps({ getUniverseDomain: async () => "googleapis.com" });
+    const res = await handleRequest(makeRequest("/universe-domain"), deps);
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.universe_domain).toBe("googleapis.com");
+  });
+
+  test("returns JSON content type", async () => {
+    const res = await handleRequest(makeRequest("/universe-domain"), makeDeps());
+    expect(res.headers.get("Content-Type")).toBe("application/json");
+  });
+
+  test("returns 500 when universe domain lookup fails", async () => {
+    const deps = makeDeps({
+      getUniverseDomain: async () => {
+        throw new Error("auth not configured");
+      },
+    });
+    const res = await handleRequest(makeRequest("/universe-domain"), deps);
+
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("auth not configured");
   });
 });
 

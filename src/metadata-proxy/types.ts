@@ -14,6 +14,7 @@ export interface TokenProvider {
 /** Provides both tokens and project metadata from the gcp-gate daemon. */
 export interface GateClient extends TokenProvider {
   getNumericProjectId: () => Promise<string>;
+  getUniverseDomain: () => Promise<string>;
 }
 
 /**
@@ -23,6 +24,7 @@ export interface GateClient extends TokenProvider {
 export interface MetadataProxyDeps {
   getToken: () => Promise<CachedToken>;
   getNumericProjectId?: () => Promise<string>;
+  getUniverseDomain?: () => Promise<string>;
   projectId: string;
   serviceAccountEmail: string | undefined;
   startTime: Date;
