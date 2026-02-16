@@ -1,0 +1,18 @@
+# gcp-authcalator configuration
+#
+# Pass this file with: gcp-authcalator <command> --config config.toml
+# CLI flags take precedence over values in this file.
+
+# GCP project ID (required for all commands)
+project_id = "my-gcp-project"
+
+# Service account email to impersonate for dev tokens (required for `gate`)
+service_account = "dev-runner@my-gcp-project.iam.gserviceaccount.com"
+
+# Path to the Unix domain socket shared between host and container
+# Default: /tmp/gcp-authcalator.sock
+# socket_path = "/tmp/gcp-authcalator.sock"
+
+# TCP port for the metadata proxy
+# Default: 8173
+# port = 8173
