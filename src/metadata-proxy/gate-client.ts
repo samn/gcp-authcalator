@@ -1,3 +1,4 @@
+import { existsSync, lstatSync } from "node:fs";
 import type { CachedToken, TokenProvider } from "./types.ts";
 
 /** Minimum remaining lifetime before we re-fetch a cached token (5 minutes). */
@@ -6,6 +7,56 @@ const CACHE_MARGIN_MS = 5 * 60 * 1000;
 export interface GateClientOptions {
   /** Override fetch for testing. */
   fetchFn?: typeof globalThis.fetch;
+}
+
+/**
+ * Verify that the gcp-gate daemon is reachable on the given Unix socket.
+ *
+ * 1. Checks that the socket file exists on disk (and is actually a socket)
+ * 2. Sends a GET /health request to the daemon
+ *
+ * Throws a descriptive Error if the socket is missing or the healthcheck fails.
+ */
+export async function checkGateSocket(
+  socketPath: string,
+  fetchFn: typeof globalThis.fetch = globalThis.fetch,
+): Promise<void> {
+  if (!existsSync(socketPath)) {
+    throw new Error(
+      `gcp-gate socket not found at ${socketPath}\n` +
+        `  Make sure gcp-gate is running (gcp-authcalator gate) and the --socket-path is correct.`,
+    );
+  }
+
+  const stat = lstatSync(socketPath);
+  if (!stat.isSocket()) {
+    throw new Error(
+      `${socketPath} exists but is not a Unix socket.\n` +
+        `  Remove the file and start gcp-gate (gcp-authcalator gate).`,
+    );
+  }
+
+  let res: Response;
+  try {
+    res = await fetchFn("http://localhost/health", {
+      unix: socketPath,
+      signal: AbortSignal.timeout(3_000),
+    } as RequestInit);
+  } catch {
+    throw new Error(
+      `Could not connect to gcp-gate at ${socketPath}\n` +
+        `  The socket exists but the daemon is not responding.\n` +
+        `  Try restarting gcp-gate (gcp-authcalator gate).`,
+    );
+  }
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(
+      `gcp-gate health check failed (HTTP ${res.status})${text ? `: ${text}` : ""}\n` +
+        `  The daemon may be in a bad state. Try restarting gcp-gate.`,
+    );
+  }
 }
 
 /**
