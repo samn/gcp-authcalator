@@ -88,7 +88,7 @@ export async function runWithProd(
     CLOUDSDK_CORE_ACCOUNT: _drop6,
     ...parentEnv
   } = process.env;
-  const env = { ...parentEnv, GCE_METADATA_HOST: metadataHost };
+  const env = { ...parentEnv, GCE_METADATA_HOST: metadataHost, GCE_METADATA_IP: metadataHost };
 
   const child = spawnFn(wrappedCommand, {
     env,

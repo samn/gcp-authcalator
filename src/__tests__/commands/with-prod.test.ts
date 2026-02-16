@@ -87,8 +87,10 @@ describe("runWithProd", () => {
     // Verify the command was passed through
     expect(capturedCmd).toEqual(["echo", "hello"]);
 
-    // Verify metadata proxy env var is set, raw tokens are NOT exposed
+    // Verify metadata proxy env vars are set, raw tokens are NOT exposed
     expect(capturedEnv.GCE_METADATA_HOST).toMatch(/^127\.0\.0\.1:\d+$/);
+    expect(capturedEnv.GCE_METADATA_IP).toMatch(/^127\.0\.0\.1:\d+$/);
+    expect(capturedEnv.GCE_METADATA_IP).toBe(capturedEnv.GCE_METADATA_HOST);
     expect("CLOUDSDK_AUTH_ACCESS_TOKEN" in capturedEnv).toBe(false);
     expect("CPL_GS_BEARER" in capturedEnv).toBe(false);
 
@@ -151,8 +153,10 @@ describe("runWithProd", () => {
     expect("CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE" in capturedEnv).toBe(false);
     expect("CLOUDSDK_CORE_ACCOUNT" in capturedEnv).toBe(false);
 
-    // Verify metadata proxy env var IS set
+    // Verify metadata proxy env vars ARE set
     expect(capturedEnv.GCE_METADATA_HOST).toMatch(/^127\.0\.0\.1:\d+$/);
+    expect(capturedEnv.GCE_METADATA_IP).toMatch(/^127\.0\.0\.1:\d+$/);
+    expect(capturedEnv.GCE_METADATA_IP).toBe(capturedEnv.GCE_METADATA_HOST);
 
     // Restore original env
     process.env = originalEnv;
