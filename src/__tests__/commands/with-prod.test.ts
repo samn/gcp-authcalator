@@ -1,5 +1,5 @@
 import { describe, expect, test, beforeEach, afterEach, spyOn } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { z } from "zod";
 import { runWithProd } from "../../commands/with-prod.ts";
 import type { Subprocess } from "bun";
@@ -128,6 +128,41 @@ describe("runWithProd", () => {
     const logOutput = logSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
     expect(logOutput).toContain("requesting prod-level token");
     expect(logOutput).toContain("prod token acquired for eng@example.com");
+  });
+
+  test("sets gcloudConfigDir permissions to 0o700 (owner-only)", async () => {
+    const mockFetchFn = mockGateFetch();
+
+    let capturedMode: number | undefined;
+    const mockSpawnFn = (_cmd: string[], opts: { env: Record<string, string | undefined> }) => {
+      const configDir = opts.env.CLOUDSDK_CONFIG ?? "";
+      if (configDir) {
+        capturedMode = statSync(configDir).mode & 0o777;
+      }
+      return {
+        exited: Promise.resolve(0),
+        kill: () => {},
+      } as unknown as Subprocess;
+    };
+
+    try {
+      await runWithProd(
+        {
+          project_id: "my-proj",
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+        },
+        ["echo", "test"],
+        {
+          fetchOptions: { fetchFn: mockFetchFn },
+          spawnFn: mockSpawnFn,
+        },
+      );
+    } catch {
+      // process.exit mock throws
+    }
+
+    expect(capturedMode).toBe(0o700);
   });
 
   test("cleans up temp CLOUDSDK_CONFIG directory after child exits", async () => {

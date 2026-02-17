@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Config } from "../config.ts";
@@ -88,6 +88,7 @@ export async function runWithProd(
     // Step 3: Create an isolated gcloud config directory so the child process
     // doesn't reuse cached tokens from the main metadata proxy.
     gcloudConfigDir = mkdtempSync(join(tmpdir(), "gcp-authcalator-gcloud-"));
+    chmodSync(gcloudConfigDir, 0o700);
 
     // Step 4: Spawn wrapped command with metadata env vars
     const spawnFn = options.spawnFn ?? (Bun.spawn as unknown as SpawnFn);
