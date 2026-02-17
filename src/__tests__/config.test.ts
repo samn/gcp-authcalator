@@ -3,16 +3,50 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeFileSync, mkdtempSync } from "node:fs";
 import { z } from "zod";
+import { homedir } from "node:os";
 import {
   ConfigSchema,
   GateConfigSchema,
   MetadataProxyConfigSchema,
   WithProdConfigSchema,
+  expandTilde,
   getDefaultSocketPath,
   loadConfig,
   loadTOML,
   mapCliArgs,
 } from "../config.ts";
+
+// ---------------------------------------------------------------------------
+// expandTilde
+// ---------------------------------------------------------------------------
+
+describe("expandTilde", () => {
+  const home = homedir();
+
+  test("expands bare ~ to home directory", () => {
+    expect(expandTilde("~")).toBe(home);
+  });
+
+  test("expands ~/ prefix to home directory", () => {
+    expect(expandTilde("~/.gcp-gate/sock")).toBe(join(home, ".gcp-gate/sock"));
+  });
+
+  test("leaves absolute paths unchanged", () => {
+    expect(expandTilde("/tmp/gate.sock")).toBe("/tmp/gate.sock");
+  });
+
+  test("leaves relative paths unchanged", () => {
+    expect(expandTilde("relative/path.sock")).toBe("relative/path.sock");
+  });
+
+  test("does not expand ~ in the middle of a path", () => {
+    expect(expandTilde("/foo/~/bar")).toBe("/foo/~/bar");
+  });
+
+  test("does not expand ~user syntax", () => {
+    expect(expandTilde("~other/.gcp-gate")).toBe("~other/.gcp-gate");
+  });
+});
 
 // ---------------------------------------------------------------------------
 // ConfigSchema
@@ -67,6 +101,16 @@ describe("ConfigSchema", () => {
 
   test("rejects empty socket_path", () => {
     expect(() => ConfigSchema.parse({ socket_path: "" })).toThrow(z.ZodError);
+  });
+
+  test("expands ~ in socket_path", () => {
+    const config = ConfigSchema.parse({ socket_path: "~/.gcp-gate/my.sock" });
+    expect(config.socket_path).toBe(join(homedir(), ".gcp-gate/my.sock"));
+  });
+
+  test("expands bare ~ in socket_path", () => {
+    const config = ConfigSchema.parse({ socket_path: "~" });
+    expect(config.socket_path).toBe(homedir());
   });
 });
 
@@ -210,6 +254,20 @@ describe("loadConfig", () => {
     expect(config.project_id).toBe("toml-project");
     expect(config.socket_path).toBe("/custom/path.sock");
     expect(config.port).toBe(8173);
+  });
+
+  test("expands tilde in socket_path from TOML", () => {
+    const dir = mkdtempSync(join(tmpdir(), "config-test-"));
+    const filePath = join(dir, "config.toml");
+    writeFileSync(filePath, `project_id = "proj"\nsocket_path = "~/.gcp-gate/gate.sock"\n`);
+
+    const config = loadConfig({}, filePath);
+    expect(config.socket_path).toBe(join(homedir(), ".gcp-gate/gate.sock"));
+  });
+
+  test("expands tilde in socket_path from CLI args", () => {
+    const config = loadConfig({ socket_path: "~/custom/gate.sock" });
+    expect(config.socket_path).toBe(join(homedir(), "custom/gate.sock"));
   });
 
   test("throws ZodError for invalid merged config", () => {

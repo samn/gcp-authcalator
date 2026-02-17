@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Expand `~` to the user's home directory in `socket_path` from config files and CLI args
+
 ## [0.1.0] - 2026-02-17
 
 - `gate` command: host-side token daemon with desktop confirmation dialogs
