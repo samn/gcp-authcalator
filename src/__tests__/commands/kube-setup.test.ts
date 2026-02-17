@@ -57,14 +57,16 @@ users:
 // patchKubeconfig (pure function)
 // ---------------------------------------------------------------------------
 
+const FAKE_BINARY = "/usr/local/bin/gcp-authcalator";
+
 describe("patchKubeconfig", () => {
   test("patches a single gke-gcloud-auth-plugin user", () => {
     const kubeconfig = parseYAML(SAMPLE_KUBECONFIG);
-    const { patched, patchedUsers } = patchKubeconfig(kubeconfig);
+    const { patched, patchedUsers } = patchKubeconfig(kubeconfig, FAKE_BINARY);
 
     expect(patchedUsers).toEqual(["gke_my-project_us-central1_my-cluster"]);
     const exec = patched.users![0]!.user!.exec!;
-    expect(exec.command).toBe("gcp-authcalator");
+    expect(exec.command).toBe(FAKE_BINARY);
     expect(exec.args).toEqual(["kube-token"]);
     expect(exec.apiVersion).toBe("client.authentication.k8s.io/v1beta1");
     expect(exec.provideClusterInfo).toBe(true);
@@ -73,7 +75,7 @@ describe("patchKubeconfig", () => {
 
   test("patches multiple users including full-path commands", () => {
     const kubeconfig = parseYAML(MULTI_USER_KUBECONFIG);
-    const { patched, patchedUsers } = patchKubeconfig(kubeconfig);
+    const { patched, patchedUsers } = patchKubeconfig(kubeconfig, FAKE_BINARY);
 
     expect(patchedUsers).toEqual([
       "gke_proj-a_us-west1_cluster-a",
@@ -81,8 +83,8 @@ describe("patchKubeconfig", () => {
     ]);
 
     // Both GKE entries patched
-    expect(patched.users![0]!.user!.exec!.command).toBe("gcp-authcalator");
-    expect(patched.users![1]!.user!.exec!.command).toBe("gcp-authcalator");
+    expect(patched.users![0]!.user!.exec!.command).toBe(FAKE_BINARY);
+    expect(patched.users![1]!.user!.exec!.command).toBe(FAKE_BINARY);
 
     // Non-GKE entry left alone
     expect(patched.users![2]!.user!.exec!.command).toBe("some-other-plugin");
@@ -99,13 +101,13 @@ describe("patchKubeconfig", () => {
         },
       ],
     };
-    const { patchedUsers } = patchKubeconfig(kubeconfig);
+    const { patchedUsers } = patchKubeconfig(kubeconfig, FAKE_BINARY);
     expect(patchedUsers).toEqual([]);
   });
 
   test("handles kubeconfig with no users array", () => {
     const kubeconfig = { apiVersion: "v1", kind: "Config" };
-    const { patchedUsers } = patchKubeconfig(kubeconfig);
+    const { patchedUsers } = patchKubeconfig(kubeconfig, FAKE_BINARY);
     expect(patchedUsers).toEqual([]);
   });
 
@@ -115,7 +117,7 @@ describe("patchKubeconfig", () => {
       kind: "Config",
       users: [{ name: "token-user", user: { token: "static-token" } }],
     };
-    const { patchedUsers } = patchKubeconfig(kubeconfig);
+    const { patchedUsers } = patchKubeconfig(kubeconfig, FAKE_BINARY);
     expect(patchedUsers).toEqual([]);
   });
 
@@ -137,7 +139,7 @@ describe("patchKubeconfig", () => {
       ],
     };
 
-    const { patched } = patchKubeconfig(kubeconfig);
+    const { patched } = patchKubeconfig(kubeconfig, FAKE_BINARY);
     expect(patched.users![0]!.user!.exec!.env).toBeUndefined();
   });
 });
@@ -175,9 +177,10 @@ describe("runKubeSetup", () => {
 
     await runKubeSetup({ kubeconfigPath });
 
-    // Verify the file was patched
+    // Verify the file was patched — command should be an absolute path
     const patched = parseYAML(readFileSync(kubeconfigPath, "utf-8"));
-    expect(patched.users[0].user.exec.command).toBe("gcp-authcalator");
+    const patchedCmd = patched.users[0].user.exec.command as string;
+    expect(patchedCmd).toMatch(/^\//); // must be an absolute path
     expect(patched.users[0].user.exec.args).toEqual(["kube-token"]);
 
     // Verify backup was created
@@ -224,8 +227,8 @@ describe("runKubeSetup", () => {
     await runKubeSetup({ kubeconfigPath });
 
     const patched = parseYAML(readFileSync(kubeconfigPath, "utf-8"));
-    expect(patched.users[0].user.exec.command).toBe("gcp-authcalator");
-    expect(patched.users[1].user.exec.command).toBe("gcp-authcalator");
+    expect(patched.users[0].user.exec.command as string).toMatch(/^\//);
+    expect(patched.users[1].user.exec.command as string).toMatch(/^\//);
     expect(patched.users[2].user.exec.command).toBe("some-other-plugin");
 
     const logOutput = logSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");

@@ -2,18 +2,33 @@
  * One-time kubeconfig patcher.
  *
  * Reads the kubeconfig, finds all users using `gke-gcloud-auth-plugin`,
- * and replaces them with `gcp-authcalator kube-token`.
+ * and replaces them with `<absolute-path-to-this-binary> kube-token`.
  *
  * Revert by re-running `gcloud container clusters get-credentials`.
  */
 
-import { readFileSync, writeFileSync, copyFileSync } from "node:fs";
+import { readFileSync, writeFileSync, copyFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 const GKE_PLUGIN_COMMAND = "gke-gcloud-auth-plugin";
-const AUTHCALATOR_COMMAND = "gcp-authcalator";
 const AUTHCALATOR_ARGS = ["kube-token"];
+
+/**
+ * Resolve the absolute path of the currently running binary.
+ *
+ * Uses process.execPath which correctly returns the compiled binary path
+ * in Bun single-file executables (process.argv[0] returns "bun" instead).
+ * Falls back to resolving process.argv[0] if execPath is unavailable.
+ */
+function resolveCurrentBinary(): string {
+  const binPath = process.execPath || process.argv[0] || "gcp-authcalator";
+  try {
+    return realpathSync(binPath);
+  } catch {
+    return resolve(binPath);
+  }
+}
 
 export interface KubeSetupOptions {
   /** Override the kubeconfig path for testing. */
@@ -56,10 +71,14 @@ function resolveKubeconfigPath(override?: string): string {
   return join(homedir(), ".kube", "config");
 }
 
-export function patchKubeconfig(kubeconfig: KubeConfig): {
+export function patchKubeconfig(
+  kubeconfig: KubeConfig,
+  command?: string,
+): {
   patched: KubeConfig;
   patchedUsers: string[];
 } {
+  const authcalatorCommand = command ?? resolveCurrentBinary();
   const patchedUsers: string[] = [];
 
   if (!kubeconfig.users || !Array.isArray(kubeconfig.users)) {
@@ -71,12 +90,12 @@ export function patchKubeconfig(kubeconfig: KubeConfig): {
     if (!exec) continue;
 
     // Match both bare command and full path (e.g. /usr/lib/google-cloud-sdk/bin/gke-gcloud-auth-plugin)
-    const command = exec.command ?? "";
-    if (command !== GKE_PLUGIN_COMMAND && !command.endsWith(`/${GKE_PLUGIN_COMMAND}`)) {
+    const cmd = exec.command ?? "";
+    if (cmd !== GKE_PLUGIN_COMMAND && !cmd.endsWith(`/${GKE_PLUGIN_COMMAND}`)) {
       continue;
     }
 
-    exec.command = AUTHCALATOR_COMMAND;
+    exec.command = authcalatorCommand;
     exec.args = [...AUTHCALATOR_ARGS];
     exec.installHint = `Install gcp-authcalator or revert with: gcloud container clusters get-credentials <cluster>`;
     // Remove env vars that were for gke-gcloud-auth-plugin
@@ -115,7 +134,8 @@ export async function runKubeSetup(options: KubeSetupOptions = {}): Promise<void
     process.exit(1);
   }
 
-  const { patched, patchedUsers } = patchKubeconfig(kubeconfig);
+  const binaryPath = resolveCurrentBinary();
+  const { patched, patchedUsers } = patchKubeconfig(kubeconfig, binaryPath);
 
   if (patchedUsers.length === 0) {
     console.warn(
@@ -156,7 +176,7 @@ export async function runKubeSetup(options: KubeSetupOptions = {}): Promise<void
 
   console.log(`kube-setup: patched ${patchedUsers.length} user(s) in ${kubeconfigPath}:`);
   for (const name of patchedUsers) {
-    console.log(`  - ${name}: exec.command → ${AUTHCALATOR_COMMAND} ${AUTHCALATOR_ARGS.join(" ")}`);
+    console.log(`  - ${name}: exec.command → ${binaryPath} ${AUTHCALATOR_ARGS.join(" ")}`);
   }
   console.log(`kube-setup: backup saved to ${backupPath}`);
   console.log("kube-setup: to revert, run: gcloud container clusters get-credentials <cluster>");
