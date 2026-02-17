@@ -259,6 +259,95 @@ describe("GET /computeMetadata/v1/instance/service-accounts/default/email", () =
 });
 
 // ---------------------------------------------------------------------------
+// GET /computeMetadata/v1/instance/service-accounts/default/scopes
+// ---------------------------------------------------------------------------
+
+describe("GET /computeMetadata/v1/instance/service-accounts/default/scopes", () => {
+  test("returns cloud-platform scope as newline-delimited text", async () => {
+    const res = await handleRequest(
+      metadataRequest("/computeMetadata/v1/instance/service-accounts/default/scopes"),
+      makeDeps(),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toBe("text/plain");
+    expect(res.headers.get("Metadata-Flavor")).toBe("Google");
+    const body = await res.text();
+    expect(body).toBe("https://www.googleapis.com/auth/cloud-platform\n");
+  });
+
+  test("works via email-based path", async () => {
+    const email = "sa@test-project.iam.gserviceaccount.com";
+    const res = await handleRequest(
+      metadataRequest(`/computeMetadata/v1/instance/service-accounts/${email}/scopes`),
+      makeDeps(),
+    );
+
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toBe("https://www.googleapis.com/auth/cloud-platform\n");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /computeMetadata/v1/instance/service-accounts/default/identity
+// ---------------------------------------------------------------------------
+
+describe("GET /computeMetadata/v1/instance/service-accounts/default/identity", () => {
+  test("returns 400 when audience parameter is missing", async () => {
+    const res = await handleRequest(
+      metadataRequest("/computeMetadata/v1/instance/service-accounts/default/identity"),
+      makeDeps(),
+    );
+
+    expect(res.status).toBe(400);
+    expect(res.headers.get("Content-Type")).toBe("text/plain");
+    expect(res.headers.get("Metadata-Flavor")).toBe("Google");
+    const body = await res.text();
+    expect(body).toContain("audience");
+  });
+
+  test("returns 404 when audience parameter is provided", async () => {
+    const res = await handleRequest(
+      metadataRequest(
+        "/computeMetadata/v1/instance/service-accounts/default/identity?audience=https://example.com",
+      ),
+      makeDeps(),
+    );
+
+    expect(res.status).toBe(404);
+    expect(res.headers.get("Content-Type")).toBe("text/plain");
+    const body = await res.text();
+    expect(body).toContain("not supported");
+  });
+
+  test("returns 400 when audience parameter is empty", async () => {
+    const res = await handleRequest(
+      metadataRequest("/computeMetadata/v1/instance/service-accounts/default/identity?audience="),
+      makeDeps(),
+    );
+
+    expect(res.status).toBe(400);
+    const body = await res.text();
+    expect(body).toContain("audience");
+  });
+
+  test("works via email-based path", async () => {
+    const email = "sa@test-project.iam.gserviceaccount.com";
+    const res = await handleRequest(
+      metadataRequest(
+        `/computeMetadata/v1/instance/service-accounts/${email}/identity?audience=https://example.com`,
+      ),
+      makeDeps(),
+    );
+
+    expect(res.status).toBe(404);
+    const body = await res.text();
+    expect(body).toContain("not supported");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // GET /computeMetadata/v1/instance/service-accounts/default/ (recursive)
 // ---------------------------------------------------------------------------
 
@@ -299,10 +388,11 @@ describe("GET /computeMetadata/v1/instance/service-accounts/default/", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("Content-Type")).toBe("text/plain");
     const body = await res.text();
-    expect(body).toContain("email");
-    expect(body).toContain("token");
-    expect(body).toContain("scopes");
     expect(body).toContain("aliases");
+    expect(body).toContain("email");
+    expect(body).toContain("identity");
+    expect(body).toContain("scopes");
+    expect(body).toContain("token");
   });
 
   test("handles path without trailing slash", async () => {
