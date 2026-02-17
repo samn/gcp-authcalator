@@ -1,8 +1,7 @@
-import { chmodSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import type { Config } from "../config.ts";
-import { WithProdConfigSchema } from "../config.ts";
+import { getDefaultRuntimeDir, WithProdConfigSchema } from "../config.ts";
 import { fetchProdToken, type FetchProdTokenOptions } from "../with-prod/fetch-prod-token.ts";
 import { createStaticTokenProvider } from "../with-prod/static-token-provider.ts";
 import { startMetadataProxyServer } from "../metadata-proxy/server.ts";
@@ -87,7 +86,11 @@ export async function runWithProd(
   try {
     // Step 3: Create an isolated gcloud config directory so the child process
     // doesn't reuse cached tokens from the main metadata proxy.
-    gcloudConfigDir = mkdtempSync(join(tmpdir(), "gcp-authcalator-gcloud-"));
+    // Place it in the user-private runtime directory (not /tmp) so other
+    // local users cannot observe or race the temp directory.
+    const runtimeDir = getDefaultRuntimeDir();
+    mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
+    gcloudConfigDir = mkdtempSync(join(runtimeDir, "gcp-authcalator-gcloud-"));
     chmodSync(gcloudConfigDir, 0o700);
 
     // Step 4: Spawn wrapped command with metadata env vars

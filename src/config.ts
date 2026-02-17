@@ -1,6 +1,32 @@
 import { z } from "zod";
 import { parse as parseTOML } from "smol-toml";
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+// ---------------------------------------------------------------------------
+// Runtime directory helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Return a user-private directory for runtime files (sockets, temp data).
+ *
+ * Prefers $XDG_RUNTIME_DIR (typically /run/user/$UID, already 0o700).
+ * Falls back to ~/.gcp-gate/.
+ *
+ * Using a user-private directory instead of /tmp eliminates TOCTOU symlink
+ * races — no other user can create files inside the directory.
+ */
+export function getDefaultRuntimeDir(): string {
+  const xdg = process.env.XDG_RUNTIME_DIR;
+  if (xdg) return xdg;
+  return join(homedir(), ".gcp-gate");
+}
+
+/** Default socket path inside the user-private runtime directory. */
+export function getDefaultSocketPath(): string {
+  return join(getDefaultRuntimeDir(), "gcp-authcalator.sock");
+}
 
 // ---------------------------------------------------------------------------
 // Schemas
@@ -9,7 +35,7 @@ import { readFileSync } from "node:fs";
 export const ConfigSchema = z.object({
   project_id: z.string().min(1).optional(),
   service_account: z.email().optional(),
-  socket_path: z.string().min(1).default("/tmp/gcp-authcalator.sock"),
+  socket_path: z.string().min(1).default(getDefaultSocketPath),
   port: z.coerce.number().int().min(1).max(65535).default(8173),
 });
 

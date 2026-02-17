@@ -28,7 +28,7 @@ The Unix socket is the only channel, and the host daemon controls what tokens ar
 │                          ├─ confirmation UI │
 │                          └─ audit log       │
 └──────────────────┬──────────────────────────┘
-                   │ /tmp/gcp-authcalator.sock
+                   │ $XDG_RUNTIME_DIR/gcp-authcalator.sock
 ┌──────────────────┴──────────────────────────┐
 │ devcontainer                                │
 │                                             │
@@ -87,7 +87,7 @@ CLI flags take precedence over the config file, which takes precedence over defa
 ```
 --project-id <id>          GCP project ID
 --service-account <email>  Service account email to impersonate
---socket-path <path>       Unix socket path (default: /tmp/gcp-authcalator.sock)
+--socket-path <path>       Unix socket path (default: $XDG_RUNTIME_DIR/gcp-authcalator.sock)
 -p, --port <port>          Metadata proxy port (default: 8173)
 -c, --config <path>        Path to TOML config file
 ```
@@ -97,7 +97,8 @@ CLI flags take precedence over the config file, which takes precedence over defa
 ```toml
 project_id = "my-gcp-project"
 service_account = "dev-runner@my-gcp-project.iam.gserviceaccount.com"
-socket_path = "/tmp/gcp-authcalator.sock"
+# socket_path defaults to $XDG_RUNTIME_DIR/gcp-authcalator.sock
+# (or ~/.gcp-gate/gcp-authcalator.sock if XDG_RUNTIME_DIR is unset)
 port = 8173
 ```
 
@@ -266,13 +267,16 @@ To use gcp-authcalator in a devcontainer:
    gcp-authcalator gate --config /path/to/config.toml
    ```
 
-2. **Mount the socket** into the container by adding to `devcontainer.json`:
+2. **Mount the socket** into the container by adding to `devcontainer.json`.
+   The socket lives in a user-private directory — use `$XDG_RUNTIME_DIR` (typically `/run/user/$UID`) or `~/.gcp-gate/` if that's unset:
 
    ```json
    "mounts": [
-     "source=/tmp/gcp-authcalator.sock,target=/tmp/gcp-authcalator.sock,type=bind"
+     "source=${localEnv:XDG_RUNTIME_DIR}/gcp-authcalator.sock,target=${localEnv:XDG_RUNTIME_DIR}/gcp-authcalator.sock,type=bind"
    ]
    ```
+
+   Make sure the container uses the same `--socket-path` as the host.
 
 3. **Container:** Start the metadata proxy (e.g., in a post-start script):
 
@@ -301,12 +305,13 @@ To use gcp-authcalator in a devcontainer:
 ## Security model
 
 - **Credentials never enter the container.** The host daemon holds ADC; the container only receives short-lived tokens.
+- **User-private runtime directory.** The socket and temporary files are placed in `$XDG_RUNTIME_DIR` (typically `/run/user/$UID`, already `0700`) or `~/.gcp-gate/` (created with `0700`), rather than world-writable `/tmp`. This eliminates TOCTOU symlink races from other local users.
 - **Unix socket permissions** are set to `0600` (owner-only) on creation.
 - **Prod access requires confirmation** via a GUI dialog or terminal prompt on the host.
 - **Rate limiting** prevents automated brute-forcing of the confirmation flow.
 - **PID-based restriction** on temporary `with-prod` proxies ensures only the intended process tree can use elevated tokens.
-- **Environment isolation** in `with-prod` strips credential-related env vars and uses a temporary `CLOUDSDK_CONFIG` to prevent credential leakage around the proxy.
-- **Audit logging** records all token requests to `~/.gcp-gate/audit.log`.
+- **Environment isolation** in `with-prod` strips credential-related env vars and uses a temporary `CLOUDSDK_CONFIG` (in the user-private runtime directory) to prevent credential leakage around the proxy.
+- **Audit logging** records all token requests to `~/.gcp-gate/audit.log` (directory created with `0700` permissions).
 - **Stale socket recovery** verifies socket ownership and checks for running instances before cleanup.
 
 ## Development

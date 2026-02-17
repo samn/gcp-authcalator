@@ -26,7 +26,7 @@ Commands:
 Options:
   --project-id <id>        GCP project ID
   --service-account <email> Service account email to impersonate
-  --socket-path <path>     Unix socket path (default: /tmp/gcp-authcalator.sock)
+  --socket-path <path>     Unix socket path (default: $XDG_RUNTIME_DIR/gcp-authcalator.sock)
   -p, --port <port>        Metadata proxy port (default: 8173)
   -c, --config <path>      Path to TOML config file
   -h, --help               Show this help message
