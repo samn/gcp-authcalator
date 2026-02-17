@@ -198,6 +198,55 @@ This command:
 
 The temporary proxy uses PID-based process restriction — only the wrapped command and its descendants can request tokens from it.
 
+### `kube-setup` — Patch kubeconfig for GKE
+
+One-time setup command that patches your kubeconfig to use gcp-authcalator instead of `gke-gcloud-auth-plugin` for GKE cluster authentication.
+
+```bash
+gcp-authcalator kube-setup
+```
+
+This command:
+
+1. Reads the kubeconfig (from `$KUBECONFIG` or `~/.kube/config`)
+2. Finds all users with `exec.command: gke-gcloud-auth-plugin` (including full paths)
+3. Replaces the exec section to point to `gcp-authcalator kube-token`
+4. Creates a backup at `<kubeconfig>.bak`
+5. Writes the patched kubeconfig back
+
+After patching, kubeconfig user entries will look like:
+
+```yaml
+users:
+  - name: gke_project_region_cluster
+    user:
+      exec:
+        apiVersion: client.authentication.k8s.io/v1beta1
+        command: /absolute/path/to/gcp-authcalator
+        args: ["kube-token"]
+        installHint: "Install gcp-authcalator or revert with: gcloud container clusters get-credentials <cluster>"
+        provideClusterInfo: true
+```
+
+To revert, re-run `gcloud container clusters get-credentials <cluster>`.
+
+### `kube-token` — kubectl credential plugin
+
+kubectl [exec credential plugin](https://kubernetes.io/docs/reference/access-authn-authz/authentication/#client-go-credential-plugins) that fetches a token from the active metadata proxy and outputs an `ExecCredential` JSON for kubectl. You don't call this directly — kubectl invokes it automatically after running `kube-setup`.
+
+```bash
+gcp-authcalator kube-token
+```
+
+The plugin reads `GCE_METADATA_HOST` from the environment (falls back to `127.0.0.1:8173`) and requests a token from that metadata proxy. This means it automatically picks up the correct token:
+
+- **Normal usage:** fetches a dev token from the default metadata proxy
+- **Under `with-prod`:** `GCE_METADATA_HOST` points to the temporary prod proxy, so kubectl transparently gets the prod token
+
+The `expirationTimestamp` is set to ~1 second from now, which effectively disables kubectl's exec credential cache. This ensures concurrent kubectl processes (some normal, some under `with-prod`) always get the correct token. The metadata proxy already caches tokens, so the overhead is one fast localhost HTTP round-trip per kubectl API call.
+
+**Why not `gke-gcloud-auth-plugin`?** The GKE plugin caches tokens at `~/.kube/gke_gcloud_auth_plugin_cache` and ignores `CLOUDSDK_CONFIG`, so it keeps serving stale dev tokens even under `with-prod`.
+
 ### `version` — Show version
 
 Prints the current version and exits.
@@ -239,6 +288,15 @@ To use gcp-authcalator in a devcontainer:
      "GCE_METADATA_IP": "127.0.0.1:8173"
    }
    ```
+
+5. **Container (optional):** If you use `kubectl` with GKE, patch the kubeconfig so kubectl fetches tokens through gcp-authcalator instead of `gke-gcloud-auth-plugin`:
+
+   ```bash
+   gcloud container clusters get-credentials <cluster> --region <region> --project <project>
+   gcp-authcalator kube-setup
+   ```
+
+   This ensures `kubectl` works correctly under both normal and `with-prod` usage.
 
 ## Security model
 
