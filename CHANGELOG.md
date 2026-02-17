@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - `with-prod`: set `CLOUDSDK_CORE_ACCOUNT` and `CLOUDSDK_CORE_PROJECT` so `gcloud auth list` shows the engineer's elevated account instead of the dev service account
 
+### Added
+
+- `with-prod`: set `PR_SET_DUMPABLE=0` via prctl to prevent `/proc/<pid>/environ` inspection and ptrace attachment while holding prod tokens (Linux only, no-op on other platforms)
+- `--dumpable` CLI flag to disable the above protection for debugging sessions
+
 ## [0.1.1] - 2026-02-17
 
 ### Fixed
