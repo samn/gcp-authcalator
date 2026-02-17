@@ -81,6 +81,10 @@ export async function handleRequest(req: Request, deps: MetadataProxyDeps): Prom
         return handleUniverseDomain(deps);
       case "/computeMetadata/v1/instance/service-accounts/default/email":
         return handleEmail(deps);
+      case "/computeMetadata/v1/instance/service-accounts/default/scopes":
+        return handleScopes();
+      case "/computeMetadata/v1/instance/service-accounts/default/identity":
+        return handleIdentity(url);
       case "/computeMetadata/v1/instance/service-accounts/default":
         return handleServiceAccountInfo(url, deps);
       case "/computeMetadata/v1/instance/service-accounts":
@@ -152,6 +156,35 @@ function handleEmail(deps: MetadataProxyDeps): Response {
 }
 
 /**
+ * Handles GET /computeMetadata/v1/instance/service-accounts/default/scopes
+ *
+ * Returns the OAuth scopes granted to the service account as a
+ * newline-delimited list (mirrors real GCE metadata behavior).
+ */
+function handleScopes(): Response {
+  return textResponse("https://www.googleapis.com/auth/cloud-platform\n");
+}
+
+/**
+ * Handles GET /computeMetadata/v1/instance/service-accounts/default/identity
+ *
+ * On a real GCE VM this returns an OIDC identity token for the given
+ * `audience` query parameter.  The metadata-proxy cannot mint identity
+ * tokens — it only supports access-token impersonation — so we return
+ * an appropriate error.
+ *
+ * - Missing `audience` → 400 (matches real GCE metadata behavior)
+ * - With `audience`   → 404 (identity tokens are not available)
+ */
+function handleIdentity(url: URL): Response {
+  const audience = url.searchParams.get("audience");
+  if (!audience) {
+    return textResponse("non-empty audience parameter required", 400);
+  }
+  return textResponse("identity tokens are not supported by the metadata proxy", 404);
+}
+
+/**
  * Handles GET /computeMetadata/v1/instance/service-accounts/
  *
  * With `?recursive=true`, returns a JSON object keyed by service account name
@@ -212,5 +245,5 @@ function handleServiceAccountInfo(url: URL, deps: MetadataProxyDeps): Response {
   }
 
   // Non-recursive: return a text directory listing (like the real metadata server)
-  return textResponse("aliases\nemail\nscopes\ntoken\n");
+  return textResponse("aliases\nemail\nidentity\nscopes\ntoken\n");
 }
