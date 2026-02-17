@@ -104,6 +104,6 @@ Wire `gateClient?.getUniverseDomain` into deps and add the endpoint to startup l
 - **[src/**tests**/gate/handlers.test.ts](src/**tests**/gate/handlers.test.ts)**: Add tests for the new `/universe-domain` gate endpoint
 - **[src/**tests**/gate/auth.test.ts](src/**tests**/gate/auth.test.ts)**: Add tests for `getUniverseDomain` in the auth module
 
-### 10. GOAL.md -- [GOAL.md](GOAL.md)
+### 10. SPEC.md -- [SPEC.md](SPEC.md)
 
 Add `GET /computeMetadata/v1/universe/universe-domain` to the metadata proxy endpoint listing in the Components section, and add `GET /universe-domain` to the gate endpoint table.

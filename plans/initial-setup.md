@@ -2,7 +2,7 @@
 
 ## Context
 
-gcp-authcalator is an early-stage TypeScript/Bun project with only a placeholder `index.ts`. GOAL.md defines three subcommands (`gate`, `metadata-proxy`, `with-prod`) that should be part of a single CLI tool. This plan stubs out the CLI structure, subcommand routing, and configuration system (TOML file + CLI args, validated with zod).
+gcp-authcalator is an early-stage TypeScript/Bun project with only a placeholder `index.ts`. SPEC.md defines three subcommands (`gate`, `metadata-proxy`, `with-prod`) that should be part of a single CLI tool. This plan stubs out the CLI structure, subcommand routing, and configuration system (TOML file + CLI args, validated with zod).
 
 ## Dependencies to Add
 

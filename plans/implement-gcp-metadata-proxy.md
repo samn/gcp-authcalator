@@ -2,7 +2,7 @@
 
 ## Context
 
-Step 3 from GOAL.md. The `gcp-metadata-proxy` is a container-side HTTP server that emulates the GCE metadata server protocol. It sits between Google Cloud client libraries (which query `GCE_METADATA_HOST`) and the host-side `gcp-gate` daemon (which mints tokens). This lets all libraries transparently get credentials without any application code changes — the same mechanism GKE workloads already use.
+Step 3 from SPEC.md. The `gcp-metadata-proxy` is a container-side HTTP server that emulates the GCE metadata server protocol. It sits between Google Cloud client libraries (which query `GCE_METADATA_HOST`) and the host-side `gcp-gate` daemon (which mints tokens). This lets all libraries transparently get credentials without any application code changes — the same mechanism GKE workloads already use.
 
 Currently `src/commands/metadata-proxy.ts` is a stub printing `[STUB] Not yet implemented.`.
 

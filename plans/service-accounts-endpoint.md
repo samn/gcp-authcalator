@@ -53,7 +53,7 @@ Follow the existing test patterns (`describe` block, `metadataRequest` helper, `
 - Works with and without trailing slash
 - Returns `Metadata-Flavor: Google` header
 
-### 4. Update `[GOAL.md](GOAL.md)`
+### 4. Update `[SPEC.md](SPEC.md)`
 
 Add the new endpoint to the metadata proxy endpoints section (around line 107) to keep the documentation current.
 

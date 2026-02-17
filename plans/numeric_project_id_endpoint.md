@@ -33,7 +33,7 @@ todos:
     content: Add metadata proxy tests for numeric-project-id (handlers, gate-client, server)
     status: completed
   - id: docs
-    content: Update CHANGELOG.md, plans doc, and GOAL.md
+    content: Update CHANGELOG.md, plans doc, and SPEC.md
     status: completed
   - id: verify
     content: Run format, lint, typecheck, and tests
@@ -174,7 +174,7 @@ Add under `[Unreleased]`:
 ### 12. Plans and existing docs
 
 - Update [plans/implement-gcp-metadata-proxy.md](plans/implement-gcp-metadata-proxy.md) endpoint table to include the new endpoint
-- Update [GOAL.md](GOAL.md) metadata proxy endpoint listing
+- Update [SPEC.md](SPEC.md) metadata proxy endpoint listing
 
 ## No New Dependencies
 
