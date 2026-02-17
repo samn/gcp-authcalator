@@ -227,6 +227,168 @@ describe("createConfirmModule", () => {
     });
   });
 
+  describe("command display in zenity", () => {
+    test("includes command in zenity text when provided", async () => {
+      let capturedCmd: string[] = [];
+      const spawnFn = (cmd: string[]) => {
+        capturedCmd = cmd;
+        return {
+          exited: Promise.resolve(0),
+          pid: 12345,
+          stdin: null,
+          stdout: null,
+          stderr: null,
+          exitCode: null,
+          signalCode: null,
+          killed: false,
+          kill: () => {},
+          ref: () => {},
+          unref: () => {},
+          [Symbol.asyncDispose]: async () => {},
+        } as unknown as ReturnType<typeof Bun.spawn>;
+      };
+
+      const { confirmProdAccess } = createConfirmModule({
+        spawn: spawnFn,
+        platform: "linux",
+      });
+      await confirmProdAccess("user@example.com", "gcloud compute instances list");
+
+      const textArg = capturedCmd.find((arg) => arg.startsWith("--text="));
+      expect(textArg).toBeDefined();
+      expect(textArg).toContain("Command: gcloud compute instances list");
+      expect(textArg).toContain("user@example.com");
+    });
+
+    test("omits command from zenity text when not provided", async () => {
+      let capturedCmd: string[] = [];
+      const spawnFn = (cmd: string[]) => {
+        capturedCmd = cmd;
+        return {
+          exited: Promise.resolve(0),
+          pid: 12345,
+          stdin: null,
+          stdout: null,
+          stderr: null,
+          exitCode: null,
+          signalCode: null,
+          killed: false,
+          kill: () => {},
+          ref: () => {},
+          unref: () => {},
+          [Symbol.asyncDispose]: async () => {},
+        } as unknown as ReturnType<typeof Bun.spawn>;
+      };
+
+      const { confirmProdAccess } = createConfirmModule({
+        spawn: spawnFn,
+        platform: "linux",
+      });
+      await confirmProdAccess("user@example.com");
+
+      const textArg = capturedCmd.find((arg) => arg.startsWith("--text="));
+      expect(textArg).toBeDefined();
+      expect(textArg).not.toContain("Command:");
+    });
+  });
+
+  describe("command display in osascript", () => {
+    test("includes command in osascript dialog when provided", async () => {
+      let capturedCmd: string[] = [];
+      const spawnFn = (cmd: string[]) => {
+        capturedCmd = cmd;
+        return {
+          exited: Promise.resolve(0),
+          pid: 12345,
+          stdin: null,
+          stdout: null,
+          stderr: null,
+          exitCode: null,
+          signalCode: null,
+          killed: false,
+          kill: () => {},
+          ref: () => {},
+          unref: () => {},
+          [Symbol.asyncDispose]: async () => {},
+        } as unknown as ReturnType<typeof Bun.spawn>;
+      };
+
+      const { confirmProdAccess } = createConfirmModule({
+        spawn: spawnFn,
+        platform: "darwin",
+      });
+      await confirmProdAccess("user@example.com", "terraform apply");
+
+      const scriptArg = capturedCmd.find((arg) => arg.includes("display dialog"));
+      expect(scriptArg).toBeDefined();
+      expect(scriptArg).toContain("Command: terraform apply");
+      expect(scriptArg).toContain("user@example.com");
+    });
+
+    test("escapes command content in osascript to prevent injection", async () => {
+      let capturedCmd: string[] = [];
+      const spawnFn = (cmd: string[]) => {
+        capturedCmd = cmd;
+        return {
+          exited: Promise.resolve(0),
+          pid: 12345,
+          stdin: null,
+          stdout: null,
+          stderr: null,
+          exitCode: null,
+          signalCode: null,
+          killed: false,
+          kill: () => {},
+          ref: () => {},
+          unref: () => {},
+          [Symbol.asyncDispose]: async () => {},
+        } as unknown as ReturnType<typeof Bun.spawn>;
+      };
+
+      const { confirmProdAccess } = createConfirmModule({
+        spawn: spawnFn,
+        platform: "darwin",
+      });
+      await confirmProdAccess("user@example.com", 'cmd "with quotes"');
+
+      const scriptArg = capturedCmd.find((arg) => arg.includes("display dialog"));
+      expect(scriptArg).toBeDefined();
+      // Quotes in the command should be escaped
+      expect(scriptArg).toContain('cmd \\"with quotes\\"');
+    });
+
+    test("omits command from osascript dialog when not provided", async () => {
+      let capturedCmd: string[] = [];
+      const spawnFn = (cmd: string[]) => {
+        capturedCmd = cmd;
+        return {
+          exited: Promise.resolve(0),
+          pid: 12345,
+          stdin: null,
+          stdout: null,
+          stderr: null,
+          exitCode: null,
+          signalCode: null,
+          killed: false,
+          kill: () => {},
+          ref: () => {},
+          unref: () => {},
+          [Symbol.asyncDispose]: async () => {},
+        } as unknown as ReturnType<typeof Bun.spawn>;
+      };
+
+      const { confirmProdAccess } = createConfirmModule({
+        spawn: spawnFn,
+        platform: "darwin",
+      });
+      await confirmProdAccess("user@example.com");
+
+      const scriptArg = capturedCmd.find((arg) => arg.includes("display dialog"));
+      expect(scriptArg).toBeDefined();
+      expect(scriptArg).not.toContain("Command:");
+    });
+  });
+
   describe("platform routing", () => {
     test("uses osascript on darwin", async () => {
       let capturedCmd: string[] = [];

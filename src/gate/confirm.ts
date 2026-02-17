@@ -19,35 +19,43 @@ export interface ConfirmOptions {
  * Default: deny if no interactive method is available.
  */
 export function createConfirmModule(options: ConfirmOptions = {}): {
-  confirmProdAccess: (email: string) => Promise<boolean>;
+  confirmProdAccess: (email: string, command?: string) => Promise<boolean>;
 } {
   const spawnFn = options.spawn ?? (Bun.spawn as unknown as SpawnFn);
   const platform = options.platform ?? process.platform;
   const isTTY = options.isTTY ?? !!process.stdin.isTTY;
 
-  async function confirmProdAccess(email: string): Promise<boolean> {
+  async function confirmProdAccess(email: string, command?: string): Promise<boolean> {
     const tryGui = platform === "darwin" ? tryOsascript : tryZenity;
 
     try {
-      const result = await tryGui(email, spawnFn);
+      const result = await tryGui(email, spawnFn, command);
       if (result !== null) return result;
     } catch {
       // GUI not available, fall through to terminal
     }
 
     // Fallback to terminal prompt
-    return tryTerminalPrompt(email, isTTY);
+    return tryTerminalPrompt(email, isTTY, command);
   }
 
   return { confirmProdAccess };
 }
 
-async function tryZenity(email: string, spawnFn: SpawnFn): Promise<boolean | null> {
+async function tryZenity(
+  email: string,
+  spawnFn: SpawnFn,
+  command?: string,
+): Promise<boolean | null> {
+  const text = command
+    ? `Grant prod-level GCP access to ${email}?\n\nCommand: ${command}`
+    : `Grant prod-level GCP access to ${email}?`;
+
   const proc = spawnFn([
     "zenity",
     "--question",
     "--title=gcp-gate: Prod Access",
-    `--text=Grant prod-level GCP access to ${email}?`,
+    `--text=${text}`,
     "--timeout=60",
   ]);
 
@@ -64,14 +72,23 @@ async function tryZenity(email: string, spawnFn: SpawnFn): Promise<boolean | nul
   return false;
 }
 
-async function tryOsascript(email: string, spawnFn: SpawnFn): Promise<boolean | null> {
+async function tryOsascript(
+  email: string,
+  spawnFn: SpawnFn,
+  command?: string,
+): Promise<boolean | null> {
   // Escape backslashes and double quotes to prevent AppleScript injection
   const escaped = email.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  const escapedCommand = command?.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+
+  const message = escapedCommand
+    ? `Grant prod-level GCP access to ${escaped}?\\n\\nCommand: ${escapedCommand}`
+    : `Grant prod-level GCP access to ${escaped}?`;
 
   const proc = spawnFn([
     "osascript",
     "-e",
-    `set r to display dialog "Grant prod-level GCP access to ${escaped}?" buttons {"Deny", "Allow"} default button "Deny" with icon caution giving up after 60`,
+    `set r to display dialog "${message}" buttons {"Deny", "Allow"} default button "Deny" with icon caution giving up after 60`,
     "-e",
     'if button returned of r is not "Allow" or gave up of r is true then error "denied"',
   ]);
@@ -85,12 +102,15 @@ async function tryOsascript(email: string, spawnFn: SpawnFn): Promise<boolean | 
   return false;
 }
 
-async function tryTerminalPrompt(email: string, isTTY: boolean): Promise<boolean> {
+async function tryTerminalPrompt(email: string, isTTY: boolean, command?: string): Promise<boolean> {
   if (!isTTY) {
     console.error("confirm: no interactive method available, denying prod access");
     return false;
   }
 
+  if (command) {
+    process.stdout.write(`gcp-gate: Command: ${command}\n`);
+  }
   process.stdout.write(`gcp-gate: Grant prod-level GCP access to ${email}? [y/N] `);
 
   return new Promise<boolean>((resolve) => {

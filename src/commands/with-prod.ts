@@ -50,7 +50,10 @@ export async function runWithProd(
   console.log("with-prod: requesting prod-level token from gcp-gate...");
   let tokenResult;
   try {
-    tokenResult = await fetchProdToken(wpConfig.socket_path, options.fetchOptions);
+    tokenResult = await fetchProdToken(wpConfig.socket_path, {
+      ...options.fetchOptions,
+      command: wrappedCommand,
+    });
   } catch (err) {
     console.error(
       `with-prod: failed to acquire prod token: ${err instanceof Error ? err.message : String(err)}`,
