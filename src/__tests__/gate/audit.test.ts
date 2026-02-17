@@ -1,5 +1,5 @@
 import { describe, expect, test, beforeEach } from "bun:test";
-import { mkdtempSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, readFileSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createAuditModule } from "../../gate/audit.ts";
@@ -16,6 +16,13 @@ describe("createAuditModule", () => {
     const logDir = join(tempDir, "nested", "dir");
     createAuditModule(logDir);
     expect(existsSync(logDir)).toBe(true);
+  });
+
+  test("creates log directory with owner-only permissions (0o700)", () => {
+    const logDir = join(tempDir, "private-dir");
+    createAuditModule(logDir);
+    const mode = statSync(logDir).mode & 0o777;
+    expect(mode).toBe(0o700);
   });
 
   test("writes a single audit entry as JSON line", () => {

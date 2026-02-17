@@ -15,9 +15,11 @@ export function createAuditModule(logDir: string = DEFAULT_LOG_DIR): {
 } {
   const logPath = join(logDir, LOG_FILENAME);
 
-  // Ensure directory exists on creation
+  // Ensure directory exists with owner-only permissions (0o700).
+  // The audit log contains timestamps, access decisions, and email addresses
+  // — restrict directory access so other local users cannot read it.
   try {
-    mkdirSync(logDir, { recursive: true });
+    mkdirSync(logDir, { recursive: true, mode: 0o700 });
   } catch (err) {
     console.error(`audit: failed to create log directory ${logDir}:`, err);
   }

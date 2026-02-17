@@ -1,4 +1,5 @@
-import { unlinkSync, existsSync, chmodSync, lstatSync } from "node:fs";
+import { unlinkSync, existsSync, chmodSync, lstatSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import type { GateConfig } from "../config.ts";
 import type { GateDeps } from "./types.ts";
 import { createAuthModule, type AuthModuleOptions } from "./auth.ts";
@@ -46,6 +47,13 @@ export async function startGateServer(
     prodRateLimiter,
     startTime: new Date(),
   };
+
+  // Ensure the socket directory exists with owner-only permissions (0o700).
+  // For $XDG_RUNTIME_DIR the directory already exists; for the ~/.gcp-gate
+  // fallback this creates it.  mode only applies to newly created dirs so
+  // we never alter permissions on a pre-existing $XDG_RUNTIME_DIR.
+  const socketDir = dirname(config.socket_path);
+  mkdirSync(socketDir, { recursive: true, mode: 0o700 });
 
   // Remove stale socket from a previous crash — with ownership verification
   if (existsSync(config.socket_path)) {

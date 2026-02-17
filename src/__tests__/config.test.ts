@@ -8,6 +8,7 @@ import {
   GateConfigSchema,
   MetadataProxyConfigSchema,
   WithProdConfigSchema,
+  getDefaultSocketPath,
   loadConfig,
   loadTOML,
   mapCliArgs,
@@ -20,7 +21,7 @@ import {
 describe("ConfigSchema", () => {
   test("applies defaults when no values provided", () => {
     const config = ConfigSchema.parse({});
-    expect(config.socket_path).toBe("/tmp/gcp-authcalator.sock");
+    expect(config.socket_path).toBe(getDefaultSocketPath());
     expect(config.port).toBe(8173);
     expect(config.project_id).toBeUndefined();
     expect(config.service_account).toBeUndefined();
@@ -95,7 +96,7 @@ describe("GateConfigSchema", () => {
     });
     expect(config.project_id).toBe("my-proj");
     expect(config.service_account).toBe("sa@proj.iam.gserviceaccount.com");
-    expect(config.socket_path).toBe("/tmp/gcp-authcalator.sock");
+    expect(config.socket_path).toBe(getDefaultSocketPath());
   });
 });
 
@@ -186,7 +187,7 @@ describe("loadTOML", () => {
 describe("loadConfig", () => {
   test("returns defaults when no values provided", () => {
     const config = loadConfig({});
-    expect(config.socket_path).toBe("/tmp/gcp-authcalator.sock");
+    expect(config.socket_path).toBe(getDefaultSocketPath());
     expect(config.port).toBe(8173);
   });
 
