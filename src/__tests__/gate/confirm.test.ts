@@ -57,8 +57,8 @@ describe("createConfirmModule", () => {
       const { confirmProdAccess } = createConfirmModule({
         spawn: mockSpawn(127),
         platform: "linux",
+        isTTY: false,
       });
-      // In test environment, stdin is not a TTY, so fallback should deny
       const result = await confirmProdAccess("user@example.com");
       expect(result).toBe(false);
     });
@@ -124,6 +124,7 @@ describe("createConfirmModule", () => {
       const { confirmProdAccess } = createConfirmModule({
         spawn: mockSpawn(127),
         platform: "darwin",
+        isTTY: false,
       });
       const result = await confirmProdAccess("user@example.com");
       expect(result).toBe(false);

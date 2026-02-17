@@ -7,6 +7,8 @@ export interface ConfirmOptions {
   spawn?: SpawnFn;
   /** Override process.platform for testing. */
   platform?: string;
+  /** Override process.stdin.isTTY for testing. */
+  isTTY?: boolean;
 }
 
 /**
@@ -21,6 +23,7 @@ export function createConfirmModule(options: ConfirmOptions = {}): {
 } {
   const spawnFn = options.spawn ?? (Bun.spawn as unknown as SpawnFn);
   const platform = options.platform ?? process.platform;
+  const isTTY = options.isTTY ?? !!process.stdin.isTTY;
 
   async function confirmProdAccess(email: string): Promise<boolean> {
     const tryGui = platform === "darwin" ? tryOsascript : tryZenity;
@@ -33,7 +36,7 @@ export function createConfirmModule(options: ConfirmOptions = {}): {
     }
 
     // Fallback to terminal prompt
-    return tryTerminalPrompt(email);
+    return tryTerminalPrompt(email, isTTY);
   }
 
   return { confirmProdAccess };
@@ -82,9 +85,8 @@ async function tryOsascript(email: string, spawnFn: SpawnFn): Promise<boolean | 
   return false;
 }
 
-async function tryTerminalPrompt(email: string): Promise<boolean> {
-  // Check if stdin is a TTY
-  if (!process.stdin.isTTY) {
+async function tryTerminalPrompt(email: string, isTTY: boolean): Promise<boolean> {
+  if (!isTTY) {
     console.error("confirm: no interactive method available, denying prod access");
     return false;
   }
