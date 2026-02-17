@@ -48,12 +48,13 @@ async function tryZenity(
   command?: string,
 ): Promise<boolean | null> {
   const text = command
-    ? `Grant prod-level GCP access to ${email}?\n\nCommand: ${command}`
+    ? `Grant prod-level GCP access to ${email}?\n\nReported command: ${command}`
     : `Grant prod-level GCP access to ${email}?`;
 
   const proc = spawnFn([
     "zenity",
     "--question",
+    "--no-markup",
     "--title=gcp-gate: Prod Access",
     `--text=${text}`,
     "--timeout=60",
@@ -82,7 +83,7 @@ async function tryOsascript(
   const escapedCommand = command?.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 
   const message = escapedCommand
-    ? `Grant prod-level GCP access to ${escaped}?\\n\\nCommand: ${escapedCommand}`
+    ? `Grant prod-level GCP access to ${escaped}?\\n\\nReported command: ${escapedCommand}`
     : `Grant prod-level GCP access to ${escaped}?`;
 
   const proc = spawnFn([
@@ -102,14 +103,18 @@ async function tryOsascript(
   return false;
 }
 
-async function tryTerminalPrompt(email: string, isTTY: boolean, command?: string): Promise<boolean> {
+async function tryTerminalPrompt(
+  email: string,
+  isTTY: boolean,
+  command?: string,
+): Promise<boolean> {
   if (!isTTY) {
     console.error("confirm: no interactive method available, denying prod access");
     return false;
   }
 
   if (command) {
-    process.stdout.write(`gcp-gate: Command: ${command}\n`);
+    process.stdout.write(`gcp-gate: Reported command: ${command}\n`);
   }
   process.stdout.write(`gcp-gate: Grant prod-level GCP access to ${email}? [y/N] `);
 

@@ -93,6 +93,7 @@ describe("createConfirmModule", () => {
 
       expect(capturedCmd[0]).toBe("zenity");
       expect(capturedCmd).toContain("--question");
+      expect(capturedCmd).toContain("--no-markup");
       expect(capturedCmd).toContain("--title=gcp-gate: Prod Access");
       expect(capturedCmd.some((arg) => arg.includes("user@example.com"))).toBe(true);
       expect(capturedCmd).toContain("--timeout=60");
@@ -256,7 +257,7 @@ describe("createConfirmModule", () => {
 
       const textArg = capturedCmd.find((arg) => arg.startsWith("--text="));
       expect(textArg).toBeDefined();
-      expect(textArg).toContain("Command: gcloud compute instances list");
+      expect(textArg).toContain("Reported command: gcloud compute instances list");
       expect(textArg).toContain("user@example.com");
     });
 
@@ -288,7 +289,7 @@ describe("createConfirmModule", () => {
 
       const textArg = capturedCmd.find((arg) => arg.startsWith("--text="));
       expect(textArg).toBeDefined();
-      expect(textArg).not.toContain("Command:");
+      expect(textArg).not.toContain("Reported command:");
     });
   });
 
@@ -321,7 +322,7 @@ describe("createConfirmModule", () => {
 
       const scriptArg = capturedCmd.find((arg) => arg.includes("display dialog"));
       expect(scriptArg).toBeDefined();
-      expect(scriptArg).toContain("Command: terraform apply");
+      expect(scriptArg).toContain("Reported command: terraform apply");
       expect(scriptArg).toContain("user@example.com");
     });
 
@@ -385,7 +386,7 @@ describe("createConfirmModule", () => {
 
       const scriptArg = capturedCmd.find((arg) => arg.includes("display dialog"));
       expect(scriptArg).toBeDefined();
-      expect(scriptArg).not.toContain("Command:");
+      expect(scriptArg).not.toContain("Reported command:");
     });
   });
 

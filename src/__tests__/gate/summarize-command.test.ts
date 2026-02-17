@@ -84,6 +84,31 @@ describe("summarizeCommand", () => {
 
     expect(result).toBe("terraform apply -auto-approve");
   });
+
+  test("strips control characters from arguments", () => {
+    const result = summarizeCommand(["gcloud", "compute\ninstances", "list"]);
+
+    expect(result).toBeDefined();
+    expect(result).not.toContain("\n");
+    expect(result).toBe("gcloud compute instances list");
+  });
+
+  test("strips control characters from binary name", () => {
+    const result = summarizeCommand(["my\tbin"]);
+
+    expect(result).toBeDefined();
+    expect(result).not.toContain("\t");
+    expect(result).toBe("my bin");
+  });
+
+  test("strips null bytes and other control chars", () => {
+    const result = summarizeCommand(["gcloud", "arg\x00with\x1fnulls"]);
+
+    expect(result).toBeDefined();
+    expect(result).not.toContain("\x00");
+    expect(result).not.toContain("\x1f");
+    expect(result).toBe("gcloud arg with nulls");
+  });
 });
 
 // ---------------------------------------------------------------------------

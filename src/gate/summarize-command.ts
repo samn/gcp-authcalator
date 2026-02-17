@@ -23,6 +23,12 @@ const SECRET_VALUE_RE = /^[A-Za-z0-9+/=_-]{40,}$/;
 const SECRET_KEY_RE =
   /^-*(?:.*(?:password|passwd|secret|token|key|credential|auth|api[_-]?key|private).*)[=:]/i;
 
+/** Strip control characters (newlines, tabs, etc.) that could manipulate dialog layout. */
+function stripControlChars(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/[\u0000-\u001f\u007f]/g, " ");
+}
+
 /** Redact an argument if it looks like a secret value. */
 function redactArg(arg: string): string {
   // Redact long random-looking values (likely tokens/keys)
@@ -54,10 +60,10 @@ export function summarizeCommand(command: string[]): string | undefined {
   const binaryPath = command[0]!;
   const binary = basename(binaryPath);
 
-  if (command.length === 1) return binary;
+  if (command.length === 1) return stripControlChars(binary);
 
   const redactedArgs = command.slice(1).map(redactArg);
-  const full = `${binary} ${redactedArgs.join(" ")}`;
+  const full = stripControlChars(`${binary} ${redactedArgs.join(" ")}`);
 
   if (full.length <= MAX_SUMMARY_LENGTH) return full;
 
