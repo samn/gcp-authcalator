@@ -4,6 +4,8 @@ import { loadConfig, mapCliArgs } from "./config.ts";
 import { runGate } from "./commands/gate.ts";
 import { runMetadataProxy } from "./commands/metadata-proxy.ts";
 import { runWithProd } from "./commands/with-prod.ts";
+import { runKubeToken } from "./commands/kube-token.ts";
+import { runKubeSetup } from "./commands/kube-setup.ts";
 import packageJson from "../package.json";
 
 const VERSION = packageJson.version;
@@ -17,6 +19,8 @@ Commands:
   gate              Start the host-side token daemon
   metadata-proxy    Start the GCE metadata server emulator
   with-prod         Wrap a command with prod credentials
+  kube-token        kubectl exec credential plugin (outputs ExecCredential JSON)
+  kube-setup        Patch kubeconfig to use gcp-authcalator instead of gke-gcloud-auth-plugin
   version           Show version
 
 Options:
@@ -31,9 +35,17 @@ Options:
 Examples:
   gcp-authcalator gate --project-id my-project --service-account sa@my-project.iam.gserviceaccount.com
   gcp-authcalator metadata-proxy --config config.toml
-  gcp-authcalator with-prod -- python some/script.py`;
+  gcp-authcalator with-prod -- python some/script.py
+  gcp-authcalator kube-setup`;
 
-const SUBCOMMANDS = ["gate", "metadata-proxy", "with-prod", "version"] as const;
+const SUBCOMMANDS = [
+  "gate",
+  "metadata-proxy",
+  "with-prod",
+  "kube-token",
+  "kube-setup",
+  "version",
+] as const;
 type Subcommand = (typeof SUBCOMMANDS)[number];
 
 function isSubcommand(value: string): value is Subcommand {
@@ -83,6 +95,17 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
   if (subcommand === "version") {
     console.log(VERSION);
     process.exit(0);
+  }
+
+  // Commands that don't need project config
+  if (subcommand === "kube-token") {
+    await runKubeToken();
+    return;
+  }
+
+  if (subcommand === "kube-setup") {
+    await runKubeSetup();
+    return;
   }
 
   const cliValues = mapCliArgs(values);

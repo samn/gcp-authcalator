@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - TOML configuration file support
 - PID-based process restriction for metadata proxy
 - Audit logging for token requests
+- `kube-setup` command: patch kubeconfig to use gcp-authcalator for GKE auth
+- `kube-token` command: kubectl exec credential plugin for fetching tokens from the metadata proxy
 - `version` subcommand and `--version` flag
 - Compiled single-executable binaries for Linux amd64 and macOS arm64
 - Automated release process via GitHub Actions
