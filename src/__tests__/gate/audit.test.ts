@@ -87,15 +87,22 @@ describe("createAuditModule", () => {
   });
 
   test("does not throw when log directory is unwritable", () => {
-    const { writeAuditLog } = createAuditModule("/nonexistent/path/that/should/fail");
-    const entry: AuditEntry = {
-      timestamp: "2025-01-01T00:00:00.000Z",
-      endpoint: "/token",
-      level: "dev",
-      result: "granted",
-    };
+    // Suppress expected console.error from the error-handling code paths
+    const orig = console.error;
+    console.error = () => {};
+    try {
+      const { writeAuditLog } = createAuditModule("/nonexistent/path/that/should/fail");
+      const entry: AuditEntry = {
+        timestamp: "2025-01-01T00:00:00.000Z",
+        endpoint: "/token",
+        level: "dev",
+        result: "granted",
+      };
 
-    // Should not throw, just log to stderr
-    expect(() => writeAuditLog(entry)).not.toThrow();
+      // Should not throw, just log to stderr
+      expect(() => writeAuditLog(entry)).not.toThrow();
+    } finally {
+      console.error = orig;
+    }
   });
 });

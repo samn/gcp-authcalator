@@ -65,7 +65,7 @@ async function main() {
 
   // 6. Push commit and tag
   console.log("Pushing commit and tag...");
-  const { exitCode: pushExit } = await run(["git", "push"]);
+  const { exitCode: pushExit } = await run(["git", "push", "origin", "main"]);
   if (pushExit !== 0) {
     console.error("error: failed to push commit");
     process.exit(1);
