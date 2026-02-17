@@ -108,4 +108,57 @@ describe("fetchProdToken", () => {
       "gcp-gate /identity returned no email",
     );
   });
+
+  test("sends X-Wrapped-Command header when command is provided", async () => {
+    let capturedHeaders: Headers | undefined;
+
+    const fetchFn = (async (url: string, init: RequestInit) => {
+      const parsed = new URL(url);
+      if (parsed.pathname === "/token") {
+        capturedHeaders = new Headers(init.headers);
+        return new Response(JSON.stringify({ access_token: "tok", expires_in: 1800 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ email: "eng@example.com" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof globalThis.fetch;
+
+    await fetchProdToken("/tmp/gate.sock", {
+      fetchFn,
+      command: ["gcloud", "compute", "instances", "list"],
+    });
+
+    expect(capturedHeaders).toBeDefined();
+    const headerValue = capturedHeaders!.get("X-Wrapped-Command");
+    expect(headerValue).toBe(JSON.stringify(["gcloud", "compute", "instances", "list"]));
+  });
+
+  test("does not send X-Wrapped-Command header when command is not provided", async () => {
+    let capturedHeaders: Headers | undefined;
+
+    const fetchFn = (async (url: string, init: RequestInit) => {
+      const parsed = new URL(url);
+      if (parsed.pathname === "/token") {
+        capturedHeaders = new Headers(init.headers);
+        return new Response(JSON.stringify({ access_token: "tok", expires_in: 1800 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ email: "eng@example.com" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof globalThis.fetch;
+
+    await fetchProdToken("/tmp/gate.sock", { fetchFn });
+
+    expect(capturedHeaders).toBeDefined();
+    const headerValue = capturedHeaders!.get("X-Wrapped-Command");
+    expect(headerValue).toBeNull();
+  });
 });

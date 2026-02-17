@@ -5,6 +5,7 @@ import type {
   UniverseDomainResponse,
   AuditEntry,
 } from "./types.ts";
+import { parseCommandHeader, summarizeCommand } from "./summarize-command.ts";
 
 const JSON_HEADERS = { "Content-Type": "application/json" };
 
@@ -25,7 +26,7 @@ export async function handleRequest(req: Request, deps: GateDeps): Promise<Respo
 
   switch (url.pathname) {
     case "/token":
-      return handleToken(url, deps);
+      return handleToken(req, url, deps);
     case "/identity":
       return handleIdentity(deps);
     case "/project-number":
@@ -39,11 +40,11 @@ export async function handleRequest(req: Request, deps: GateDeps): Promise<Respo
   }
 }
 
-async function handleToken(url: URL, deps: GateDeps): Promise<Response> {
+async function handleToken(req: Request, url: URL, deps: GateDeps): Promise<Response> {
   const level = url.searchParams.get("level") === "prod" ? "prod" : "dev";
 
   if (level === "prod") {
-    return handleProdToken(deps);
+    return handleProdToken(req, deps);
   }
 
   return handleDevToken(deps);
@@ -86,7 +87,7 @@ async function handleDevToken(deps: GateDeps): Promise<Response> {
   }
 }
 
-async function handleProdToken(deps: GateDeps): Promise<Response> {
+async function handleProdToken(req: Request, deps: GateDeps): Promise<Response> {
   const auditBase: Pick<AuditEntry, "endpoint" | "level"> = {
     endpoint: "/token?level=prod",
     level: "prod",
@@ -108,7 +109,11 @@ async function handleProdToken(deps: GateDeps): Promise<Response> {
   try {
     const email = await deps.getIdentityEmail();
 
-    const approved = await deps.confirmProdAccess(email);
+    // Extract and summarize the command for the confirmation dialog
+    const commandArr = parseCommandHeader(req.headers.get("X-Wrapped-Command"));
+    const commandSummary = commandArr ? summarizeCommand(commandArr) : undefined;
+
+    const approved = await deps.confirmProdAccess(email, commandSummary);
     if (!approved) {
       deps.prodRateLimiter.release("denied");
 

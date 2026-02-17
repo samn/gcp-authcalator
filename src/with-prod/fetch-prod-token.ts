@@ -1,6 +1,8 @@
 export interface FetchProdTokenOptions {
   /** Override fetch for testing. */
   fetchFn?: typeof globalThis.fetch;
+  /** The command being wrapped, sent to gcp-gate for display in the confirmation dialog. */
+  command?: string[];
 }
 
 export interface ProdTokenResult {
@@ -25,7 +27,11 @@ export async function fetchProdToken(
   options: FetchProdTokenOptions = {},
 ): Promise<ProdTokenResult> {
   const fetchFn = options.fetchFn ?? globalThis.fetch;
-  const unixOpts = { unix: socketPath } as RequestInit;
+  const headers: Record<string, string> = {};
+  if (options.command && options.command.length > 0) {
+    headers["X-Wrapped-Command"] = JSON.stringify(options.command);
+  }
+  const unixOpts = { unix: socketPath, headers } as RequestInit;
 
   // Fetch prod token (may trigger host-side confirmation dialog)
   const tokenRes = await fetchFn("http://localhost/token?level=prod", unixOpts);

@@ -35,8 +35,8 @@ function blockedRateLimiter(reason = "rate limited"): ProdRateLimiter {
   };
 }
 
-function makeRequest(path: string, method = "GET"): Request {
-  return new Request(`http://localhost${path}`, { method });
+function makeRequest(path: string, method = "GET", headers?: Record<string, string>): Request {
+  return new Request(`http://localhost${path}`, { method, headers });
 }
 
 // ---------------------------------------------------------------------------
@@ -365,6 +365,151 @@ describe("GET /token?level=prod", () => {
 
     await handleRequest(makeRequest("/token?level=prod"), deps);
     expect(releases).toEqual(["error"]);
+  });
+
+  test("passes command summary to confirmProdAccess when header is present", async () => {
+    let capturedCommand: string | undefined;
+    const deps = makeDeps({
+      confirmProdAccess: async (_email, command) => {
+        capturedCommand = command;
+        return true;
+      },
+    });
+
+    const headers = {
+      "X-Wrapped-Command": JSON.stringify(["gcloud", "compute", "instances", "list"]),
+    };
+    await handleRequest(makeRequest("/token?level=prod", "GET", headers), deps);
+
+    expect(capturedCommand).toBe("gcloud compute instances list");
+  });
+
+  test("passes undefined command when header is missing", async () => {
+    let capturedCommand: string | undefined = "should-be-replaced";
+    const deps = makeDeps({
+      confirmProdAccess: async (_email, command) => {
+        capturedCommand = command;
+        return true;
+      },
+    });
+
+    await handleRequest(makeRequest("/token?level=prod"), deps);
+
+    expect(capturedCommand).toBeUndefined();
+  });
+
+  test("passes undefined command when header contains invalid JSON", async () => {
+    let capturedCommand: string | undefined = "should-be-replaced";
+    const deps = makeDeps({
+      confirmProdAccess: async (_email, command) => {
+        capturedCommand = command;
+        return true;
+      },
+    });
+
+    const headers = { "X-Wrapped-Command": "not-json" };
+    await handleRequest(makeRequest("/token?level=prod", "GET", headers), deps);
+
+    expect(capturedCommand).toBeUndefined();
+  });
+
+  test("summarizes long commands with truncation", async () => {
+    let capturedCommand: string | undefined;
+    const deps = makeDeps({
+      confirmProdAccess: async (_email, command) => {
+        capturedCommand = command;
+        return true;
+      },
+    });
+
+    const longArgs = Array.from({ length: 20 }, (_, i) => `arg-with-content-${i}`);
+    const headers = {
+      "X-Wrapped-Command": JSON.stringify(["mybinary", ...longArgs]),
+    };
+    await handleRequest(makeRequest("/token?level=prod", "GET", headers), deps);
+
+    expect(capturedCommand).toBeDefined();
+    expect(capturedCommand!.length).toBeLessThanOrEqual(80);
+    expect(capturedCommand!.startsWith("mybinary")).toBe(true);
+  });
+
+  test("redacts sensitive-looking values in command", async () => {
+    let capturedCommand: string | undefined;
+    const deps = makeDeps({
+      confirmProdAccess: async (_email, command) => {
+        capturedCommand = command;
+        return true;
+      },
+    });
+
+    const token = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnop";
+    const headers = {
+      "X-Wrapped-Command": JSON.stringify(["curl", "-H", token]),
+    };
+    await handleRequest(makeRequest("/token?level=prod", "GET", headers), deps);
+
+    expect(capturedCommand).toBeDefined();
+    expect(capturedCommand).toContain("***");
+    expect(capturedCommand).not.toContain(token);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Concurrent dialog prevention
+// ---------------------------------------------------------------------------
+
+describe("concurrent dialog prevention", () => {
+  test("second prod request is rejected while first dialog is pending", async () => {
+    let resolveDialog!: (value: boolean) => void;
+    const dialogPromise = new Promise<boolean>((resolve) => {
+      resolveDialog = resolve;
+    });
+
+    const deps = makeDeps({
+      confirmProdAccess: async () => dialogPromise,
+    });
+
+    // Fire first request (will block on the confirmation dialog)
+    const first = handleRequest(makeRequest("/token?level=prod"), deps);
+
+    // Fire second request while first dialog is still pending
+    const second = await handleRequest(makeRequest("/token?level=prod"), deps);
+
+    expect(second.status).toBe(429);
+    const body = (await second.json()) as Record<string, unknown>;
+    expect(body.error).toContain("already pending");
+
+    // Resolve the first dialog so the test can complete cleanly
+    resolveDialog(true);
+    const firstRes = await first;
+    expect(firstRes.status).toBe(200);
+  });
+
+  test("only one confirm call is made when concurrent requests arrive", async () => {
+    let confirmCallCount = 0;
+    let resolveDialog!: (value: boolean) => void;
+    const dialogPromise = new Promise<boolean>((resolve) => {
+      resolveDialog = resolve;
+    });
+
+    const deps = makeDeps({
+      confirmProdAccess: async () => {
+        confirmCallCount++;
+        return dialogPromise;
+      },
+    });
+
+    // Fire two requests concurrently
+    const first = handleRequest(makeRequest("/token?level=prod"), deps);
+    const secondRes = await handleRequest(makeRequest("/token?level=prod"), deps);
+
+    // Second should be rate-limited without calling confirm
+    expect(secondRes.status).toBe(429);
+    expect(confirmCallCount).toBe(1);
+
+    // Clean up
+    resolveDialog(true);
+    await first;
   });
 });
 
