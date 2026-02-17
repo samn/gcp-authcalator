@@ -1,6 +1,6 @@
 # Prod Token Rate Limiting
 
-**Issue:** https://github.com/Upstream-Tech/gcp-authcalator/issues/15
+**Issue:** https://github.com/samn/gcp-authcalator/issues/15
 
 ## Problem
 

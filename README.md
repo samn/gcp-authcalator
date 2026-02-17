@@ -58,7 +58,7 @@ The host-side `gate` daemon uses ADC to impersonate the service account via [`ge
 
 ### From releases
 
-Download a prebuilt binary from the [GitHub Releases](https://github.com/Upstream-Tech/gcp-authcalator/releases) page:
+Download a prebuilt binary from the [GitHub Releases](https://github.com/samn/gcp-authcalator/releases) page:
 
 | Platform     | Binary                         |
 | ------------ | ------------------------------ |
