@@ -7,13 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Security
-
-- Fix zenity Pango markup injection in confirmation dialog by adding `--no-markup` flag
-- Strip control characters (newlines, tabs, null bytes) from command summaries to prevent dialog layout manipulation
-- Label command in confirmation dialog as "Reported command" to clarify it is unverified
-
-### Added
+## [0.1.0] - 2026-02-17
 
 - `gate` command: host-side token daemon with desktop confirmation dialogs
 - `metadata-proxy` command: GCE metadata server emulator for containers
