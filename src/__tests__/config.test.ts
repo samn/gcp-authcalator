@@ -28,7 +28,7 @@ describe("expandTilde", () => {
   });
 
   test("expands ~/ prefix to home directory", () => {
-    expect(expandTilde("~/.gcp-gate/sock")).toBe(join(home, ".gcp-gate/sock"));
+    expect(expandTilde("~/.gcp-authcalator/sock")).toBe(join(home, ".gcp-authcalator/sock"));
   });
 
   test("leaves absolute paths unchanged", () => {
@@ -44,7 +44,7 @@ describe("expandTilde", () => {
   });
 
   test("does not expand ~user syntax", () => {
-    expect(expandTilde("~other/.gcp-gate")).toBe("~other/.gcp-gate");
+    expect(expandTilde("~other/.gcp-authcalator")).toBe("~other/.gcp-authcalator");
   });
 });
 
@@ -104,8 +104,8 @@ describe("ConfigSchema", () => {
   });
 
   test("expands ~ in socket_path", () => {
-    const config = ConfigSchema.parse({ socket_path: "~/.gcp-gate/my.sock" });
-    expect(config.socket_path).toBe(join(homedir(), ".gcp-gate/my.sock"));
+    const config = ConfigSchema.parse({ socket_path: "~/.gcp-authcalator/my.sock" });
+    expect(config.socket_path).toBe(join(homedir(), ".gcp-authcalator/my.sock"));
   });
 
   test("expands bare ~ in socket_path", () => {
@@ -259,10 +259,10 @@ describe("loadConfig", () => {
   test("expands tilde in socket_path from TOML", () => {
     const dir = mkdtempSync(join(tmpdir(), "config-test-"));
     const filePath = join(dir, "config.toml");
-    writeFileSync(filePath, `project_id = "proj"\nsocket_path = "~/.gcp-gate/gate.sock"\n`);
+    writeFileSync(filePath, `project_id = "proj"\nsocket_path = "~/.gcp-authcalator/gate.sock"\n`);
 
     const config = loadConfig({}, filePath);
-    expect(config.socket_path).toBe(join(homedir(), ".gcp-gate/gate.sock"));
+    expect(config.socket_path).toBe(join(homedir(), ".gcp-authcalator/gate.sock"));
   });
 
   test("expands tilde in socket_path from CLI args", () => {

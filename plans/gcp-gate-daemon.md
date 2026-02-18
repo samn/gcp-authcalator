@@ -20,7 +20,7 @@ src/
     types.ts          # Shared interfaces (TokenResponse, GateDeps, AuditEntry, etc.)
     auth.ts           # GCP auth: ADC client, Impersonated client, token cache
     confirm.ts        # Prod token confirmation (zenity dialog / terminal prompt)
-    audit.ts          # JSON-lines audit logger (~/.gcp-gate/audit.log)
+    audit.ts          # JSON-lines audit logger (~/.gcp-authcalator/audit.log)
     handlers.ts       # Pure request handlers (token, identity, health)
     server.ts         # Bun.serve() setup, wires modules, shutdown
   commands/
@@ -83,7 +83,7 @@ Accepts optional `spawn` function for testing.
 
 Factory function `createAuditModule(logDir?)` returns `{ writeAuditLog }`.
 
-- Defaults to `~/.gcp-gate/audit.log`
+- Defaults to `~/.gcp-authcalator/audit.log`
 - Creates directory if needed
 - Writes JSON lines (one JSON object per line, synchronous append)
 - Failures logged to stderr but don't break token serving

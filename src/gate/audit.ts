@@ -1,16 +1,16 @@
 import { mkdirSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
 import type { AuditEntry } from "./types.ts";
+import { getDefaultRuntimeDir } from "../config.ts";
 
-const DEFAULT_LOG_DIR = join(homedir(), ".gcp-gate");
 const LOG_FILENAME = "audit.log";
 
 /**
- * Create an audit logger that writes JSON lines to ~/.gcp-gate/audit.log.
+ * Create an audit logger that writes JSON lines to the runtime directory's audit.log.
+ * Uses $XDG_RUNTIME_DIR when available, falls back to ~/.gcp-authcalator/.
  * Failures are logged to stderr but never break token serving.
  */
-export function createAuditModule(logDir: string = DEFAULT_LOG_DIR): {
+export function createAuditModule(logDir: string = getDefaultRuntimeDir()): {
   writeAuditLog: (entry: AuditEntry) => void;
 } {
   const logPath = join(logDir, LOG_FILENAME);

@@ -12,7 +12,7 @@ import { join } from "node:path";
  * Return a user-private directory for runtime files (sockets, temp data).
  *
  * Prefers $XDG_RUNTIME_DIR (typically /run/user/$UID, already 0o700).
- * Falls back to ~/.gcp-gate/.
+ * Falls back to ~/.gcp-authcalator/.
  *
  * Using a user-private directory instead of /tmp eliminates TOCTOU symlink
  * races — no other user can create files inside the directory.
@@ -20,7 +20,7 @@ import { join } from "node:path";
 export function getDefaultRuntimeDir(): string {
   const xdg = process.env.XDG_RUNTIME_DIR;
   if (xdg) return xdg;
-  return join(homedir(), ".gcp-gate");
+  return join(homedir(), ".gcp-authcalator");
 }
 
 /** Default socket path inside the user-private runtime directory. */

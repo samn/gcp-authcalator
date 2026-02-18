@@ -16,7 +16,7 @@ graph TB
     creds["~/.config/gcloud/\n(engineer credentials)"]
     gate["gcp-gate daemon\n"]
     confirm["Confirmation UI\n(desktop notification)"]
-    audit["~/.gcp-gate/audit.log"]
+    audit["~/.gcp-authcalator/audit.log"]
     creds --> gate
     gate --> confirm
     gate --> audit
@@ -107,7 +107,7 @@ A small HTTP server using the `google-auth-library` library. Runs on the host ma
 
 **Rate limiting:** Single-flight lock (one dialog at a time), 5-second cooldown after denial, maximum 5 attempts per minute. This prevents automated brute-forcing of the confirmation flow.
 
-**Socket security:** The Unix socket is created with `0600` permissions in a `0700` directory (`$XDG_RUNTIME_DIR` or `~/.gcp-gate/`). Stale sockets are cleaned up only after verifying ownership, refusing to follow symlinks, and checking that no other instance is running.
+**Socket security:** The Unix socket is created with `0600` permissions in a `0700` directory (`$XDG_RUNTIME_DIR` or `~/.gcp-authcalator/`). Stale sockets are cleaned up only after verifying ownership, refusing to follow symlinks, and checking that no other instance is running.
 
 **Lifecycle:** Started by the devcontainer initialize script (runs on host before container build). Stopped when container is destroyed. Could later be a systemd/launchd user service for persistence.
 
