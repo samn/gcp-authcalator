@@ -165,7 +165,7 @@ Set `GCE_METADATA_HOST=127.0.0.1:8173 GCE_METADATA_IP=127.0.0.1:8173` in the con
 | `GET /computeMetadata/v1/instance/service-accounts/default/token` | Token JSON                             | Yes                                 |
 | `GET /computeMetadata/v1/project/project-id`                      | Plain text project ID                  | Yes                                 |
 | `GET /computeMetadata/v1/project/numeric-project-id`              | Plain text numeric project ID          | Yes                                 |
-| `GET /computeMetadata/v1/universe/universe-domain`                | Plain text universe domain             | Yes                                 |
+| `GET /computeMetadata/v1/universe/universe_domain`                | Plain text universe domain             | Yes                                 |
 | `GET /computeMetadata/v1/instance/service-accounts/default/email` | Plain text SA email                    | Yes                                 |
 | `GET /computeMetadata/v1/instance/service-accounts/default`       | SA info (JSON or directory listing)    | Yes                                 |
 | `GET /computeMetadata/v1/instance/service-accounts`               | SA listing (JSON or directory listing) | Yes                                 |
