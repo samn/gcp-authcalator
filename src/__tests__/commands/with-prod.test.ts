@@ -103,6 +103,7 @@ describe("runWithProd", () => {
         {
           fetchOptions: { fetchFn: mockFetchFn },
           spawnFn: mockSpawnFn,
+          dumpable: true,
         },
       ),
     ).rejects.toThrow("process.exit called");
@@ -160,6 +161,7 @@ describe("runWithProd", () => {
         {
           fetchOptions: { fetchFn: mockFetchFn },
           spawnFn: mockSpawnFn,
+          dumpable: true,
         },
       );
     } catch {
@@ -192,6 +194,7 @@ describe("runWithProd", () => {
         {
           fetchOptions: { fetchFn: mockFetchFn },
           spawnFn: mockSpawnFn,
+          dumpable: true,
         },
       );
     } catch {
@@ -234,6 +237,7 @@ describe("runWithProd", () => {
         {
           fetchOptions: { fetchFn: mockFetchFn },
           spawnFn: mockSpawnFn,
+          dumpable: true,
         },
       );
     } catch {
@@ -279,6 +283,7 @@ describe("runWithProd", () => {
         ["echo", "hello"],
         {
           fetchOptions: { fetchFn: mockFetchFn },
+          dumpable: true,
         },
       ),
     ).rejects.toThrow("process.exit called");
@@ -386,6 +391,7 @@ describe("runWithProd", () => {
         {
           fetchOptions: { fetchFn: mockFetchFn },
           spawnFn: mockSpawnFn,
+          dumpable: true,
         },
       ),
     ).rejects.toThrow("process.exit called");
