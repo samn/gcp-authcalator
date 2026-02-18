@@ -8,9 +8,9 @@
 // ---------------------------------------------------------------------------
 
 /** Tunables (intentionally not user-configurable). */
-const DENIAL_COOLDOWN_MS = 5_000;
+const DENIAL_COOLDOWN_MS = 1_000;
 const WINDOW_MS = 1 * 60 * 1000;
-const MAX_ATTEMPTS_PER_WINDOW = 5;
+const MAX_ATTEMPTS_PER_WINDOW = 10;
 
 export type AcquireResult = { allowed: true } | { allowed: false; reason: string };
 
