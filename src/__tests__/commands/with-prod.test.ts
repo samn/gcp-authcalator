@@ -1,5 +1,5 @@
 import { describe, expect, test, beforeEach, afterEach, spyOn } from "bun:test";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { z } from "zod";
 import { runWithProd } from "../../commands/with-prod.ts";
 import type { Subprocess } from "bun";
@@ -167,6 +167,82 @@ describe("runWithProd", () => {
     }
 
     expect(capturedMode).toBe(0o700);
+  });
+
+  test("writes access_token file with mode 0600 containing the prod token", async () => {
+    const mockFetchFn = mockGateFetch();
+
+    let tokenContent = "";
+    let tokenMode: number | undefined;
+    const mockSpawnFn = (_cmd: string[], opts: { env: Record<string, string | undefined> }) => {
+      const configDir = opts.env.CLOUDSDK_CONFIG ?? "";
+      const tokenPath = `${configDir}/access_token`;
+      tokenContent = readFileSync(tokenPath, "utf-8");
+      tokenMode = statSync(tokenPath).mode & 0o777;
+      return {
+        exited: Promise.resolve(0),
+        kill: () => {},
+      } as unknown as Subprocess;
+    };
+
+    try {
+      await runWithProd(
+        {
+          project_id: "my-proj",
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+        },
+        ["echo", "test"],
+        {
+          fetchOptions: { fetchFn: mockFetchFn },
+          spawnFn: mockSpawnFn,
+        },
+      );
+    } catch {
+      // process.exit mock throws
+    }
+
+    expect(tokenContent).toBe("prod-token-abc");
+    expect(tokenMode).toBe(0o600);
+  });
+
+  test("writes gcloud properties file with access_token_file pointing to token", async () => {
+    const mockFetchFn = mockGateFetch();
+
+    let propertiesContent = "";
+    let propertiesMode: number | undefined;
+    let configDir = "";
+    const mockSpawnFn = (_cmd: string[], opts: { env: Record<string, string | undefined> }) => {
+      configDir = opts.env.CLOUDSDK_CONFIG ?? "";
+      const propsPath = `${configDir}/properties`;
+      propertiesContent = readFileSync(propsPath, "utf-8");
+      propertiesMode = statSync(propsPath).mode & 0o777;
+      return {
+        exited: Promise.resolve(0),
+        kill: () => {},
+      } as unknown as Subprocess;
+    };
+
+    try {
+      await runWithProd(
+        {
+          project_id: "my-proj",
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+        },
+        ["echo", "test"],
+        {
+          fetchOptions: { fetchFn: mockFetchFn },
+          spawnFn: mockSpawnFn,
+        },
+      );
+    } catch {
+      // process.exit mock throws
+    }
+
+    expect(propertiesContent).toContain("[auth]");
+    expect(propertiesContent).toContain(`access_token_file = ${configDir}/access_token`);
+    expect(propertiesMode).toBe(0o600);
   });
 
   test("cleans up temp CLOUDSDK_CONFIG directory after child exits", async () => {
