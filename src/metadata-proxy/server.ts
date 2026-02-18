@@ -1,4 +1,4 @@
-import type { MetadataProxyConfig } from "../config.ts";
+import { DEFAULT_SCOPES, type MetadataProxyConfig } from "../config.ts";
 import type { GateConnection } from "../gate/connection.ts";
 import type { MetadataProxyDeps, TokenProvider } from "./types.ts";
 import { createGateClient, type GateClientOptions } from "./gate-client.ts";
@@ -22,6 +22,8 @@ export interface StartMetadataProxyServerOptions {
   allowedAncestorPid?: number;
   /** Gate connection config. If not provided, defaults to Unix socket from config.socket_path. */
   gateConnection?: GateConnection;
+  /** OAuth scopes for token requests. Defaults to cloud-platform. */
+  scopes?: string[];
 }
 
 /**
@@ -41,9 +43,11 @@ export function startMetadataProxyServer(
     socketPath: config.socket_path,
   };
 
+  const effectiveScopes = options.scopes ?? DEFAULT_SCOPES;
+  const gateClientOpts = { ...options.gateClientOptions, scopes: effectiveScopes };
   const gateClient = options.tokenProvider
     ? null
-    : createGateClient(conn, options.gateClientOptions);
+    : createGateClient(conn, gateClientOpts);
   const provider: TokenProvider = options.tokenProvider ?? gateClient!;
 
   const deps: MetadataProxyDeps = {
@@ -52,6 +56,7 @@ export function startMetadataProxyServer(
     getUniverseDomain: gateClient?.getUniverseDomain,
     projectId: config.project_id,
     serviceAccountEmail: config.service_account,
+    scopes: effectiveScopes,
     startTime: new Date(),
   };
 

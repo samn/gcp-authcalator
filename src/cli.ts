@@ -61,6 +61,7 @@ Options:
   --tls-bundle <path>      Path to TLS client bundle file (PEM or base64-encoded)
   --bundle-b64             Print base64-encoded client bundle (init-tls only)
   --show-path              Print TLS directory path (init-tls only)
+  --scopes <scopes>        Comma-separated OAuth scopes (default: cloud-platform)
   -c, --config <path>      Path to TOML config file
   -h, --help               Show this help message
   -v, --version            Show version
@@ -102,6 +103,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       "tls-bundle": { type: "string" },
       "bundle-b64": { type: "boolean" },
       "show-path": { type: "boolean" },
+      scopes: { type: "string" },
       config: { type: "string", short: "c" },
       help: { type: "boolean", short: "h" },
       version: { type: "boolean", short: "v" },

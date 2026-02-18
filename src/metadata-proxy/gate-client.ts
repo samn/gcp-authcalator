@@ -12,6 +12,8 @@ const CACHE_MARGIN_MS = 5 * 60 * 1000;
 export interface GateClientOptions {
   /** Override fetch for testing. */
   fetchFn?: typeof globalThis.fetch;
+  /** OAuth scopes to request from the gate daemon. */
+  scopes?: string[];
 }
 
 /**
@@ -135,7 +137,10 @@ export function createGateClient(
       return tokenCache;
     }
 
-    const res = await fetchFn(`${baseUrl}/token`, extraOpts);
+    const tokenUrl = options.scopes
+      ? `${baseUrl}/token?scopes=${options.scopes.join(",")}`
+      : `${baseUrl}/token`;
+    const res = await fetchFn(tokenUrl, extraOpts);
 
     if (!res.ok) {
       const text = await res.text();

@@ -152,6 +152,32 @@ describe("ConfigSchema", () => {
     const config = ConfigSchema.parse({ tls_bundle: "~/.tls/bundle.pem" });
     expect(config.tls_bundle).toBe(join(homedir(), ".tls/bundle.pem"));
   });
+
+  test("accepts scopes array", () => {
+    const config = ConfigSchema.parse({
+      scopes: [
+        "https://www.googleapis.com/auth/sqlservice.login",
+        "https://www.googleapis.com/auth/cloud-platform",
+      ],
+    });
+    expect(config.scopes).toEqual([
+      "https://www.googleapis.com/auth/sqlservice.login",
+      "https://www.googleapis.com/auth/cloud-platform",
+    ]);
+  });
+
+  test("allows undefined scopes", () => {
+    const config = ConfigSchema.parse({});
+    expect(config.scopes).toBeUndefined();
+  });
+
+  test("rejects scopes with empty strings", () => {
+    expect(() => ConfigSchema.parse({ scopes: [""] })).toThrow(z.ZodError);
+  });
+
+  test("rejects non-array scopes", () => {
+    expect(() => ConfigSchema.parse({ scopes: "not-an-array" })).toThrow(z.ZodError);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -252,6 +278,28 @@ describe("mapCliArgs", () => {
       tls_dir: "~/.tls",
       gate_url: "https://localhost:8174",
       tls_bundle: "/path/to/bundle.pem",
+    });
+  });
+
+  test("splits comma-separated scopes string into array", () => {
+    const result = mapCliArgs({
+      scopes:
+        "https://www.googleapis.com/auth/sqlservice.login,https://www.googleapis.com/auth/cloud-platform",
+    });
+    expect(result).toEqual({
+      scopes: [
+        "https://www.googleapis.com/auth/sqlservice.login",
+        "https://www.googleapis.com/auth/cloud-platform",
+      ],
+    });
+  });
+
+  test("handles single scope string", () => {
+    const result = mapCliArgs({
+      scopes: "https://www.googleapis.com/auth/sqlservice.login",
+    });
+    expect(result).toEqual({
+      scopes: ["https://www.googleapis.com/auth/sqlservice.login"],
     });
   });
 });
@@ -475,5 +523,32 @@ describe("loadConfig", () => {
       expect(config.port).toBe(5555);
       expect(config.socket_path).toBe("/cli.sock");
     });
+  });
+
+  test("loads scopes from TOML", () => {
+    const dir = mkdtempSync(join(tmpdir(), "config-test-"));
+    const filePath = join(dir, "config.toml");
+    writeFileSync(
+      filePath,
+      `project_id = "proj"\nscopes = ["https://www.googleapis.com/auth/sqlservice.login"]\n`,
+    );
+
+    const config = loadConfig({}, filePath);
+    expect(config.scopes).toEqual(["https://www.googleapis.com/auth/sqlservice.login"]);
+  });
+
+  test("CLI scopes override TOML scopes", () => {
+    const dir = mkdtempSync(join(tmpdir(), "config-test-"));
+    const filePath = join(dir, "config.toml");
+    writeFileSync(
+      filePath,
+      `project_id = "proj"\nscopes = ["https://www.googleapis.com/auth/cloud-platform"]\n`,
+    );
+
+    const config = loadConfig(
+      { scopes: ["https://www.googleapis.com/auth/sqlservice.login"] },
+      filePath,
+    );
+    expect(config.scopes).toEqual(["https://www.googleapis.com/auth/sqlservice.login"]);
   });
 });

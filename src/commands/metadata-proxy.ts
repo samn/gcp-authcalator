@@ -24,5 +24,5 @@ export async function runMetadataProxy(
     process.exit(1);
   }
 
-  startMetadataProxyServer(proxyConfig, { gateConnection: conn });
+  startMetadataProxyServer(proxyConfig, { gateConnection: conn, scopes: proxyConfig.scopes });
 }
