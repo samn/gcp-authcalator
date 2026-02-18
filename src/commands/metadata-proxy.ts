@@ -21,5 +21,5 @@ export async function runMetadataProxy(
     process.exit(1);
   }
 
-  startMetadataProxyServer(proxyConfig);
+  startMetadataProxyServer(proxyConfig, { scopes: proxyConfig.scopes });
 }

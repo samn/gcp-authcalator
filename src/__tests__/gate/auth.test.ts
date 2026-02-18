@@ -1,4 +1,30 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, mock } from "bun:test";
+
+// Mock google-auth-library so tests can exercise code paths that construct
+// GoogleAuth / Impersonated objects (custom scopes, lazy source client init).
+// bun auto-hoists mock.module before imports, so this takes effect before auth.ts
+// resolves its imports.  Existing tests are unaffected because they inject clients
+// directly and never trigger these constructors.
+mock.module("google-auth-library", () => ({
+  GoogleAuth: class MockGoogleAuth {
+    constructor(_opts: { scopes?: string[] } = {}) {}
+    async getClient() {
+      return {
+        credentials: { expiry_date: Date.now() + 3600_000 },
+        getAccessToken: async () => ({ token: "mock-adc-token", res: null }),
+        universeDomain: "googleapis.com",
+      };
+    }
+  },
+  Impersonated: class MockImpersonated {
+    credentials = { expiry_date: Date.now() + 3600_000 };
+    constructor() {}
+    async getAccessToken() {
+      return { token: "mock-impersonated-token", res: null };
+    }
+  },
+}));
+
 import { createAuthModule } from "../../gate/auth.ts";
 import type { GateConfig } from "../../config.ts";
 import type { AuthClient } from "google-auth-library";
@@ -375,6 +401,61 @@ describe("createAuthModule", () => {
       });
 
       await expect(getProjectNumber()).rejects.toThrow("no access token available");
+    });
+  });
+
+  describe("custom scopes", () => {
+    const CUSTOM_SCOPES = ["https://www.googleapis.com/auth/bigquery"];
+
+    test("mintDevToken creates an Impersonated client for non-default scopes", async () => {
+      const { mintDevToken } = createAuthModule(TEST_CONFIG, {
+        sourceClient: mockClient("source-token"),
+        impersonatedClient: mockClient("default-dev-token"),
+      });
+
+      // Custom scopes bypass the injected impersonatedClient and go through
+      // new Impersonated(...) — exercising lines 76, 78-88 in auth.ts.
+      const result = await mintDevToken(CUSTOM_SCOPES);
+      expect(result.access_token).toBe("mock-impersonated-token");
+      expect(result.expires_at).toBeInstanceOf(Date);
+    });
+
+    test("mintDevToken reuses cached Impersonated client for same custom scopes", async () => {
+      const { mintDevToken } = createAuthModule(TEST_CONFIG, {
+        sourceClient: mockClient("source-token"),
+        impersonatedClient: mockClient("default-dev-token"),
+      });
+
+      const first = await mintDevToken(CUSTOM_SCOPES);
+      const second = await mintDevToken(CUSTOM_SCOPES);
+
+      // Both return the same cached token (not re-minted).
+      expect(first.access_token).toBe(second.access_token);
+    });
+
+    test("mintProdToken creates a fresh GoogleAuth for non-default scopes", async () => {
+      const { mintProdToken } = createAuthModule(TEST_CONFIG, {
+        sourceClient: mockClient("default-prod-token"),
+        impersonatedClient: mockClient("dev-token"),
+      });
+
+      // Custom scopes take the else branch (line 137) and construct a new GoogleAuth.
+      const result = await mintProdToken(CUSTOM_SCOPES);
+      expect(result.access_token).toBe("mock-adc-token");
+      expect(result.expires_at).toBeInstanceOf(Date);
+    });
+  });
+
+  describe("lazy source client initialization", () => {
+    test("creates GoogleAuth when no sourceClient is injected", async () => {
+      // No sourceClient injected — getSourceClient() lazily creates one via
+      // new GoogleAuth(...), exercising lines 64-65 in auth.ts.
+      const { getUniverseDomain } = createAuthModule(TEST_CONFIG, {
+        impersonatedClient: mockClient("dev-token"),
+      });
+
+      const domain = await getUniverseDomain();
+      expect(domain).toBe("googleapis.com");
     });
   });
 });

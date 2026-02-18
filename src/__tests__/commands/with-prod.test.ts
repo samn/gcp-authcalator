@@ -493,6 +493,54 @@ describe("runWithProd", () => {
     expect(exitSpy).toHaveBeenCalledWith(42);
   });
 
+  test("passes scopes from config to fetchProdToken URL", async () => {
+    let capturedTokenUrl = "";
+    const mockFetchFn = (async (url: string) => {
+      const parsed = new URL(url);
+      if (parsed.pathname === "/token") {
+        capturedTokenUrl = url;
+        return new Response(JSON.stringify({ access_token: "tok", expires_in: 1800 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (parsed.pathname === "/identity") {
+        return new Response(JSON.stringify({ email: "eng@example.com" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response("Not found", { status: 404 });
+    }) as unknown as typeof globalThis.fetch;
+
+    const mockSpawnFn = () => {
+      return {
+        exited: Promise.resolve(0),
+        kill: () => {},
+      } as unknown as Subprocess;
+    };
+
+    try {
+      await runWithProd(
+        {
+          project_id: "my-proj",
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+          scopes: ["https://www.googleapis.com/auth/sqlservice.login"],
+        },
+        ["echo", "test"],
+        {
+          fetchOptions: { fetchFn: mockFetchFn },
+          spawnFn: mockSpawnFn,
+        },
+      );
+    } catch {
+      // process.exit mock throws
+    }
+
+    expect(capturedTokenUrl).toContain("scopes=https://www.googleapis.com/auth/sqlservice.login");
+  });
+
   test("normal flow sets GCP_AUTHCALATOR_PROD_SESSION in child env", async () => {
     const mockFetchFn = mockGateFetch();
     const { mockSpawnFn, getCapturedEnv } = mockSpawnCapture();

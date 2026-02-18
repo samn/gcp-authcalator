@@ -27,5 +27,6 @@ export interface MetadataProxyDeps {
   getUniverseDomain?: () => Promise<string>;
   projectId: string;
   serviceAccountEmail: string | undefined;
+  scopes: string[];
   startTime: Date;
 }

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { handleRequest } from "../../metadata-proxy/handlers.ts";
 import type { MetadataProxyDeps, CachedToken } from "../../metadata-proxy/types.ts";
+import { DEFAULT_SCOPES } from "../../config.ts";
 
 function makeDeps(overrides: Partial<MetadataProxyDeps> = {}): MetadataProxyDeps {
   const token: CachedToken = {
@@ -12,6 +13,7 @@ function makeDeps(overrides: Partial<MetadataProxyDeps> = {}): MetadataProxyDeps
     getToken: async () => token,
     projectId: "test-project",
     serviceAccountEmail: "sa@test-project.iam.gserviceaccount.com",
+    scopes: DEFAULT_SCOPES,
     startTime: new Date(Date.now() - 60_000),
     ...overrides,
   };
@@ -334,6 +336,22 @@ describe("GET /computeMetadata/v1/instance/service-accounts/default/scopes", () 
     const body = await res.text();
     expect(body).toBe("https://www.googleapis.com/auth/cloud-platform\n");
   });
+
+  test("returns custom scopes when configured", async () => {
+    const customScopes = [
+      "https://www.googleapis.com/auth/sqlservice.login",
+      "https://www.googleapis.com/auth/devstorage.read_only",
+    ];
+    const deps = makeDeps({ scopes: customScopes });
+    const res = await handleRequest(
+      metadataRequest("/computeMetadata/v1/instance/service-accounts/default/scopes"),
+      deps,
+    );
+
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toBe(customScopes.join("\n") + "\n");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -413,6 +431,19 @@ describe("GET /computeMetadata/v1/instance/service-accounts/default/", () => {
     expect(body.email).toBe("sa@project.iam.gserviceaccount.com");
     expect(body.aliases).toEqual(["default"]);
     expect(body.scopes).toEqual(["https://www.googleapis.com/auth/cloud-platform"]);
+  });
+
+  test("returns custom scopes in recursive response when configured", async () => {
+    const customScopes = ["https://www.googleapis.com/auth/sqlservice.login"];
+    const deps = makeDeps({ scopes: customScopes });
+    const res = await handleRequest(
+      metadataRequest("/computeMetadata/v1/instance/service-accounts/default/?recursive=true"),
+      deps,
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.scopes).toEqual(customScopes);
   });
 
   test("does not include token in recursive response", async () => {
@@ -503,6 +534,19 @@ describe("GET /computeMetadata/v1/instance/service-accounts/", () => {
     // Email-keyed entry must also exist (required by gcloud Accounts() discovery)
     expect(body[email]).toBeDefined();
     expect(body[email]!.email).toBe(email);
+  });
+
+  test("returns custom scopes in recursive service account listing", async () => {
+    const customScopes = ["https://www.googleapis.com/auth/sqlservice.login"];
+    const deps = makeDeps({ scopes: customScopes });
+    const res = await handleRequest(
+      metadataRequest("/computeMetadata/v1/instance/service-accounts/?recursive=true"),
+      deps,
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, Record<string, unknown>>;
+    expect(body.default!.scopes).toEqual(customScopes);
   });
 
   test("uses configured serviceAccountEmail in recursive response", async () => {
