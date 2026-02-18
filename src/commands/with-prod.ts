@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Config } from "../config.ts";
 import { getDefaultRuntimeDir, WithProdConfigSchema } from "../config.ts";
@@ -95,6 +95,17 @@ export async function runWithProd(
     mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
     gcloudConfigDir = mkdtempSync(join(runtimeDir, "gcp-authcalator-gcloud-"));
     chmodSync(gcloudConfigDir, 0o700);
+
+    // Write the access token to a file and configure gcloud to use it via
+    // auth/access_token_file. This is safer than CLOUDSDK_AUTH_ACCESS_TOKEN
+    // (which leaks into /proc/*/environ and is inherited by all children).
+    const tokenFilePath = join(gcloudConfigDir, "access_token");
+    writeFileSync(tokenFilePath, tokenResult.access_token, { mode: 0o600 });
+    writeFileSync(
+      join(gcloudConfigDir, "properties"),
+      `[auth]\naccess_token_file = ${tokenFilePath}\n`,
+      { mode: 0o600 },
+    );
 
     // Step 4: Spawn wrapped command with metadata env vars
     const spawnFn = options.spawnFn ?? (Bun.spawn as unknown as SpawnFn);
