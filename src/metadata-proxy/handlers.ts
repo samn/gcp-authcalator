@@ -77,7 +77,7 @@ export async function handleRequest(req: Request, deps: MetadataProxyDeps): Prom
         return handleProjectId(deps);
       case "/computeMetadata/v1/project/numeric-project-id":
         return handleNumericProjectId(deps);
-      case "/computeMetadata/v1/universe/universe-domain":
+      case "/computeMetadata/v1/universe/universe_domain":
         return handleUniverseDomain(deps);
       case "/computeMetadata/v1/instance/service-accounts/default/email":
         return handleEmail(deps);

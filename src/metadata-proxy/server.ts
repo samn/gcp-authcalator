@@ -106,7 +106,7 @@ export function startMetadataProxyServer(
     console.log("    GET /computeMetadata/v1/instance/service-accounts/default/email → SA email");
     console.log("    GET /computeMetadata/v1/instance/service-accounts               → SA listing");
     console.log(
-      "    GET /computeMetadata/v1/universe/universe-domain                → universe domain",
+      "    GET /computeMetadata/v1/universe/universe_domain                → universe domain",
     );
   }
 

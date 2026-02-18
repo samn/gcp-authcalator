@@ -183,14 +183,14 @@ describe("GET /computeMetadata/v1/project/numeric-project-id", () => {
 });
 
 // ---------------------------------------------------------------------------
-// GET /computeMetadata/v1/universe/universe-domain
+// GET /computeMetadata/v1/universe/universe_domain
 // ---------------------------------------------------------------------------
 
-describe("GET /computeMetadata/v1/universe/universe-domain", () => {
+describe("GET /computeMetadata/v1/universe/universe_domain", () => {
   test("returns universe domain as plain text", async () => {
     const deps = makeDeps({ getUniverseDomain: async () => "googleapis.com" });
     const res = await handleRequest(
-      metadataRequest("/computeMetadata/v1/universe/universe-domain"),
+      metadataRequest("/computeMetadata/v1/universe/universe_domain"),
       deps,
     );
 
@@ -204,7 +204,7 @@ describe("GET /computeMetadata/v1/universe/universe-domain", () => {
   test("returns 404 when getUniverseDomain is not configured", async () => {
     const deps = makeDeps({ getUniverseDomain: undefined });
     const res = await handleRequest(
-      metadataRequest("/computeMetadata/v1/universe/universe-domain"),
+      metadataRequest("/computeMetadata/v1/universe/universe_domain"),
       deps,
     );
 
@@ -219,7 +219,7 @@ describe("GET /computeMetadata/v1/universe/universe-domain", () => {
     });
 
     const res = await handleRequest(
-      metadataRequest("/computeMetadata/v1/universe/universe-domain"),
+      metadataRequest("/computeMetadata/v1/universe/universe_domain"),
       deps,
     );
 

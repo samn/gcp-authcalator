@@ -144,7 +144,7 @@ describe("startMetadataProxyServer", () => {
     expect(body).toBe("999888777666");
   });
 
-  test("serves universe-domain endpoint via gate client", async () => {
+  test("serves universe_domain endpoint via gate client", async () => {
     const port = nextPort++;
     const config = makeConfig(port);
 
@@ -155,7 +155,7 @@ describe("startMetadataProxyServer", () => {
     });
 
     const res = await fetch(
-      `http://127.0.0.1:${port}/computeMetadata/v1/universe/universe-domain`,
+      `http://127.0.0.1:${port}/computeMetadata/v1/universe/universe_domain`,
       { headers: { "Metadata-Flavor": "Google" } },
     );
     expect(res.status).toBe(200);
@@ -164,7 +164,7 @@ describe("startMetadataProxyServer", () => {
     expect(body).toBe("custom.googleapis.com");
   });
 
-  test("universe-domain returns 404 when using custom tokenProvider", async () => {
+  test("universe_domain returns 404 when using custom tokenProvider", async () => {
     const port = nextPort++;
     const config = makeConfig(port);
 
@@ -178,7 +178,7 @@ describe("startMetadataProxyServer", () => {
     result = startMetadataProxyServer(config, { tokenProvider: customProvider });
 
     const res = await fetch(
-      `http://127.0.0.1:${port}/computeMetadata/v1/universe/universe-domain`,
+      `http://127.0.0.1:${port}/computeMetadata/v1/universe/universe_domain`,
       { headers: { "Metadata-Flavor": "Google" } },
     );
     expect(res.status).toBe(404);

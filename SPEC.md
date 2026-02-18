@@ -127,7 +127,7 @@ GET /computeMetadata/v1/project/numeric-project-id
 GET /computeMetadata/v1/instance/service-accounts/
   → directory listing of available service accounts (returns "default")
 
-GET /computeMetadata/v1/universe/universe-domain
+GET /computeMetadata/v1/universe/universe_domain
   → universe domain (e.g. "googleapis.com", resolved via gcp-gate)
 
 GET /  (metadata server detection ping)
