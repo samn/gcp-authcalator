@@ -113,6 +113,13 @@ export async function runWithProd(
       GCE_METADATA_HOST: metadataHost,
       GCE_METADATA_IP: metadataHost,
       CLOUDSDK_CONFIG: gcloudConfigDir,
+      // Explicitly set gcloud-specific env vars so `gcloud auth list` and
+      // other gcloud commands show the correct active account and project.
+      // gcloud's internal account-enumeration code may not honor
+      // GCE_METADATA_HOST, falling back to the original metadata proxy.
+      // Tokens still flow through the PID-validated metadata proxy.
+      CLOUDSDK_CORE_ACCOUNT: tokenResult.email,
+      CLOUDSDK_CORE_PROJECT: wpConfig.project_id,
     };
 
     const child = spawnFn(wrappedCommand, {

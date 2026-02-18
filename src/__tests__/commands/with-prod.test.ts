@@ -121,6 +121,10 @@ describe("runWithProd", () => {
     expect(capturedEnv.CLOUDSDK_CONFIG).toBeDefined();
     expect(capturedEnv.CLOUDSDK_CONFIG).toContain("gcp-authcalator-gcloud-");
 
+    // Verify gcloud-specific env vars are set to the engineer's identity
+    expect(capturedEnv.CLOUDSDK_CORE_ACCOUNT).toBe("eng@example.com");
+    expect(capturedEnv.CLOUDSDK_CORE_PROJECT).toBe("my-proj");
+
     // Verify exit code propagated (0)
     expect(exitSpy).toHaveBeenCalledWith(0);
 
@@ -236,13 +240,16 @@ describe("runWithProd", () => {
       // process.exit mock throws
     }
 
-    // Verify ALL credential env vars are stripped
+    // Verify credential env vars are stripped (raw tokens never leak)
     expect("CLOUDSDK_AUTH_ACCESS_TOKEN" in capturedEnv).toBe(false);
     expect("CPL_GS_BEARER" in capturedEnv).toBe(false);
     expect("GOOGLE_APPLICATION_CREDENTIALS" in capturedEnv).toBe(false);
     expect("GOOGLE_OAUTH_ACCESS_TOKEN" in capturedEnv).toBe(false);
     expect("CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE" in capturedEnv).toBe(false);
-    expect("CLOUDSDK_CORE_ACCOUNT" in capturedEnv).toBe(false);
+
+    // CLOUDSDK_CORE_ACCOUNT is overridden with the engineer's email (not the original value)
+    expect(capturedEnv.CLOUDSDK_CORE_ACCOUNT).toBe("eng@example.com");
+    expect(capturedEnv.CLOUDSDK_CORE_ACCOUNT).not.toBe("sneaky@example.com");
 
     // CLOUDSDK_CONFIG should be set to a NEW temp dir, not the original value
     expect(capturedEnv.CLOUDSDK_CONFIG).toBeDefined();
