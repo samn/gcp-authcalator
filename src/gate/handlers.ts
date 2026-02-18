@@ -42,22 +42,24 @@ export async function handleRequest(req: Request, deps: GateDeps): Promise<Respo
 
 async function handleToken(req: Request, url: URL, deps: GateDeps): Promise<Response> {
   const level = url.searchParams.get("level") === "prod" ? "prod" : "dev";
+  const scopesParam = url.searchParams.get("scopes");
+  const scopes = scopesParam ? scopesParam.split(",") : undefined;
 
   if (level === "prod") {
-    return handleProdToken(req, deps);
+    return handleProdToken(req, deps, scopes);
   }
 
-  return handleDevToken(deps);
+  return handleDevToken(deps, scopes);
 }
 
-async function handleDevToken(deps: GateDeps): Promise<Response> {
+async function handleDevToken(deps: GateDeps, scopes?: string[]): Promise<Response> {
   const auditBase: Pick<AuditEntry, "endpoint" | "level"> = {
     endpoint: "/token",
     level: "dev",
   };
 
   try {
-    const cached = await deps.mintDevToken();
+    const cached = await deps.mintDevToken(scopes);
     const expiresIn = Math.floor((cached.expires_at.getTime() - Date.now()) / 1000);
 
     const body: TokenResponse = {
@@ -87,7 +89,7 @@ async function handleDevToken(deps: GateDeps): Promise<Response> {
   }
 }
 
-async function handleProdToken(req: Request, deps: GateDeps): Promise<Response> {
+async function handleProdToken(req: Request, deps: GateDeps, scopes?: string[]): Promise<Response> {
   const auditBase: Pick<AuditEntry, "endpoint" | "level"> = {
     endpoint: "/token?level=prod",
     level: "prod",
@@ -127,7 +129,7 @@ async function handleProdToken(req: Request, deps: GateDeps): Promise<Response> 
       return jsonResponse({ error: "Prod access denied by user" }, 403);
     }
 
-    const cached = await deps.mintProdToken();
+    const cached = await deps.mintProdToken(scopes);
     const expiresIn = Math.floor((cached.expires_at.getTime() - Date.now()) / 1000);
 
     deps.prodRateLimiter.release("granted");
