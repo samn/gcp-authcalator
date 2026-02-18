@@ -58,8 +58,8 @@ export interface AuditEntry {
  * Allows handlers to be tested without real GCP calls.
  */
 export interface GateDeps {
-  mintDevToken: () => Promise<CachedToken>;
-  mintProdToken: () => Promise<CachedToken>;
+  mintDevToken: (scopes?: string[]) => Promise<CachedToken>;
+  mintProdToken: (scopes?: string[]) => Promise<CachedToken>;
   getIdentityEmail: () => Promise<string>;
   getProjectNumber: () => Promise<string>;
   getUniverseDomain: () => Promise<string>;

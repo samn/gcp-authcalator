@@ -204,6 +204,62 @@ describe("GET /token (dev)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /token with scopes
+// ---------------------------------------------------------------------------
+
+describe("GET /token with scopes", () => {
+  test("passes scopes to mintDevToken when scopes query param present", async () => {
+    let capturedScopes: string[] | undefined;
+    const deps = makeDeps({
+      mintDevToken: async (scopes) => {
+        capturedScopes = scopes;
+        return {
+          access_token: "scoped-dev-token",
+          expires_at: new Date(Date.now() + 3600 * 1000),
+        };
+      },
+    });
+
+    const res = await handleRequest(makeRequest("/token?scopes=scope1,scope2"), deps);
+    expect(res.status).toBe(200);
+    expect(capturedScopes).toEqual(["scope1", "scope2"]);
+  });
+
+  test("passes scopes to mintProdToken when scopes query param present", async () => {
+    let capturedScopes: string[] | undefined;
+    const deps = makeDeps({
+      mintProdToken: async (scopes) => {
+        capturedScopes = scopes;
+        return {
+          access_token: "scoped-prod-token",
+          expires_at: new Date(Date.now() + 3600 * 1000),
+        };
+      },
+    });
+
+    const res = await handleRequest(makeRequest("/token?level=prod&scopes=scope1"), deps);
+    expect(res.status).toBe(200);
+    expect(capturedScopes).toEqual(["scope1"]);
+  });
+
+  test("passes undefined scopes when no scopes query param", async () => {
+    let capturedScopes: string[] | undefined = ["should-be-replaced"];
+    const deps = makeDeps({
+      mintDevToken: async (scopes) => {
+        capturedScopes = scopes;
+        return {
+          access_token: "test-token",
+          expires_at: new Date(Date.now() + 3600 * 1000),
+        };
+      },
+    });
+
+    await handleRequest(makeRequest("/token"), deps);
+    expect(capturedScopes).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // GET /token?level=prod
 // ---------------------------------------------------------------------------
 
