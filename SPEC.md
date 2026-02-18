@@ -4,7 +4,9 @@ gcp-authcalator is an auth escalator for GCP in development environments.
 
 ## Problem
 
-GCP credentials in the devcontainer are **global** `google.auth.default()` returns the engineer's full-privilege credentials to any process. An unattended coding agent has the same access as the engineer, including production database write access and SOPS secret decryption.
+Running an AI coding agent inside the same devcontainer as the engineer is convenient and encouraged by modern IDEs — but it creates a serious credential exposure problem. GCP credentials in the devcontainer are **global**: `google.auth.default()` returns the engineer's full-privilege credentials to any process. An unattended coding agent, a compromised dependency, or a prompt-injected tool has the same access as the engineer, including production database write access and SOPS secret decryption. There is no privilege boundary between the engineer's interactive session and automated tooling.
+
+gcp-authcalator keeps credentials on the host and requires human approval for all privilege escalation. Processes running as other OS users cannot access the token socket (ideally, coding agents should run as a separate user). For same-user processes, defense-in-depth measures (PID-based restriction, environment isolation, rate limiting) make credential abuse significantly harder.
 
 ## Architecture
 
@@ -33,7 +35,7 @@ graph TB
     withprod --> elevated
   end
 
-  socket["/run/gcp-gate.sock\n(Unix domain socket)"]
+  socket["$XDG_RUNTIME_DIR/gcp-authcalator.sock\n(Unix domain socket)"]
   gate --- socket
   proxy -->|"GET /token"| socket
   withprod -->|"GET /token?level=prod"| socket
@@ -62,7 +64,7 @@ The end user will need to mount it into the devcontainer.
 
 ### 3. Why `generateAccessToken` (not Workload Identity Federation)?
 
-GCP's IAM `generateAccessToken` API creates short-lived access tokens for a service account. The host daemon uses the engineer's credentials + `serviceAccountTokenCreator` role (already granted to the engineering group on `dev-test-runner` per [dev.ts](backend/deploy/pulumi/dev.ts)) to mint tokens. This avoids the complexity of setting up a WIF pool + custom OIDC issuer, while producing the same result: scoped, short-lived tokens.
+GCP's IAM `generateAccessToken` API creates short-lived access tokens for a service account. The host daemon uses the engineer's credentials + `serviceAccountTokenCreator` role on the target service account to mint tokens. This avoids the complexity of setting up a WIF pool + custom OIDC issuer, while producing the same result: scoped, short-lived tokens.
 
 WIF is a natural "Phase 2" enhancement if stronger audit trails or attribute conditions are needed.
 
@@ -72,18 +74,13 @@ WIF is a natural "Phase 2" enhancement if stronger audit trails or attribute con
 
 ## Components
 
-The following components (except for the prerequisites) can be implemented as sub-commands of `gcp-authcalator`.
-We'll distribute this as one single-file executable using `bun` to make deployment easy.
-Arguments for the necessary GCP configuration (like the project id, and which service account to impersonate for the default downscoped credentials, or what role/service account to escalate to via PAM for elevated credentials) should be configurable.
-The configuration options will be widely shared for consistency.
-Accept them as CLI, or from a minimal toml file (the CLI takes precedence over the config file).
-Follow modern patterns for these settings, and ensure that all values are validated accordingly.
+All components are sub-commands of a single `gcp-authcalator` binary, distributed as a compiled Bun executable.
+Configuration (project ID, service account, socket path, port) can be provided via CLI flags or a TOML config file (CLI takes precedence).
 
 ### 1. GCP IAM Setup (prerequisites)
 
-- Create a Service Account with limited permissions that can be used for development.
-- Ensure developers have access as `serviceAccountTokenCreator`.
-- Optional: Create a GCP PAM entitlement for prod-level access with approval requirements
+- Create a service account with limited permissions for development use.
+- Grant developers the `roles/iam.serviceAccountTokenCreator` role on that service account.
 
 ### 2. `gcp-gate` -- Host-Side Token Daemon
 
@@ -104,9 +101,13 @@ A small HTTP server using the `google-auth-library` library. Runs on the host ma
 
 **Confirmation flow** for prod tokens:
 
-1. Desktop notification via `notify-send` (Linux) with approve/deny
-2. Fallback: terminal prompt on the host
-3. Future enhancement: TOTP challenge with configurable TTL (e.g., one confirmation per 30 minutes)
+1. Desktop dialog via `zenity` (Linux) or `osascript` (macOS) with approve/deny (60-second timeout)
+2. Fallback: terminal prompt on the host (if TTY is available)
+3. Deny by default if no interactive method is available
+
+**Rate limiting:** Single-flight lock (one dialog at a time), 5-second cooldown after denial, maximum 5 attempts per minute. This prevents automated brute-forcing of the confirmation flow.
+
+**Socket security:** The Unix socket is created with `0600` permissions in a `0700` directory (`$XDG_RUNTIME_DIR` or `~/.gcp-gate/`). Stale sockets are cleaned up only after verifying ownership, refusing to follow symlinks, and checking that no other instance is running.
 
 **Lifecycle:** Started by the devcontainer initialize script (runs on host before container build). Stopped when container is destroyed. Could later be a systemd/launchd user service for persistence.
 
@@ -140,30 +141,33 @@ Validates the `Metadata-Flavor: Google` request header (standard metadata server
 
 ### 4. `with-prod` -- Elevation Wrapper
 
-Logic similar to this bash script to get an elevated token and configure a subprocess to use it.
+The conceptual flow (simplified pseudocode):
 
 ```bash
 #!/bin/bash
 set -euo pipefail
 
-# 1. Request prod token from host daemon (triggers confirmation)
-RESPONSE=$(curl -sf --unix-socket /run/gcp-gate.sock http://gate/token?level=prod)
-TOKEN=$(echo "$RESPONSE" | jq -r .access_token)
-EXPIRY=$(echo "$RESPONSE" | jq -r .expires_in)
+# 1. Request prod token from host daemon (triggers confirmation dialog)
+RESPONSE=$(curl -sf --unix-socket "$XDG_RUNTIME_DIR/gcp-authcalator.sock" \
+  http://gate/token?level=prod)
 
 # 2. Start temporary metadata proxy serving this specific token
-PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("",0)); print(s.getsockname()[1]); s.close()')
-gcp-metadata-proxy --port "$PORT" --static-token "$TOKEN" --expires-in "$EXPIRY" &
-PROXY_PID=$!
-trap "kill $PROXY_PID 2>/dev/null" EXIT
+#    (on a random port, restricted to the child process tree via PID validation)
 
-# 3. Override env vars for child process only
-export GCE_METADATA_HOST="127.0.0.1:$PORT"
-export CLOUDSDK_AUTH_ACCESS_TOKEN="$TOKEN"
-export CPL_GS_BEARER="$TOKEN"  # For GDAL/rasterio GCS access
+# 3. Create an isolated gcloud config directory with the token written to a file
+#    (not an env var — avoids /proc/*/environ exposure)
 
-# 4. Exec the command
-exec "$@"
+# 4. Strip credential env vars and spawn the command with GCE_METADATA_HOST
+#    pointing at the temporary proxy
+
+# 5. Forward signals, propagate exit code, clean up temp files
 ```
 
-Usage: `with-prod python some/script.py`, `with-prod gcloud sql instances list`, `with-prod alembic upgrade head`
+The actual implementation adds several security hardening measures beyond this pseudocode:
+
+- **PID-based process restriction** — the temporary proxy validates that each requesting process is a descendant of the `with-prod` wrapper (via `/proc` introspection)
+- **Token file instead of env var** — the access token is written to a `0600` file in a user-private directory, and gcloud is configured via `auth/access_token_file` rather than `CLOUDSDK_AUTH_ACCESS_TOKEN` (which leaks into `/proc/*/environ`)
+- **Environment stripping** — all credential-related env vars (`GOOGLE_APPLICATION_CREDENTIALS`, `CLOUDSDK_AUTH_ACCESS_TOKEN`, `CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE`, etc.) are removed from the child's environment to prevent bypass
+- **Temp directory in user-private runtime dir** — not `/tmp`, preventing other users from observing or racing the temp directory
+
+Usage: `with-prod -- python some/script.py`, `with-prod -- gcloud sql instances list`, `with-prod -- alembic upgrade head`

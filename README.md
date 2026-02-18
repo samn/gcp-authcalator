@@ -3,19 +3,19 @@
 A GCP auth escalator for containerized development environments.
 Keeps GCP credentials out of devcontainers and AI coding agents by proxying token requests through a host-side daemon with confirmation dialogs for production access.
 
-## Problem
+## Why
 
-GCP credentials inside a devcontainer are global — `google.auth.default()` returns the engineer's full-privilege credentials to any process.
-An unattended coding agent has the same access as the engineer, including production database writes and secret decryption.
+Modern IDEs encourage running AI coding agents in the same devcontainer the engineer works in. This is convenient — but it means every process inside the container, including unattended agents, has the same GCP credentials as the engineer. A single compromised dependency, a prompt-injection attack, or a malicious tool can silently use those credentials to write to production databases, decrypt secrets, or exfiltrate data.
 
-gcp-authcalator solves this by:
+The core problem is that `google.auth.default()` returns the engineer's full-privilege credentials to **any** process. There is no privilege boundary between the engineer's interactive session and automated tooling.
 
-1. Running a **token daemon** (`gate`) on the host that mints short-lived, downscoped tokens
-2. Running a **metadata server emulator** (`metadata-proxy`) inside the container that serves those tokens transparently to all Google Cloud client libraries
-3. Requiring **explicit confirmation** before issuing production-level tokens
+gcp-authcalator solves this by keeping credentials on the host and making the container ask for them:
 
-Credentials never enter Docker.
-The Unix socket is the only channel, and the host daemon controls what tokens are issued.
+1. A **token daemon** (`gate`) runs on the host and holds the engineer's Application Default Credentials. It mints short-lived, downscoped tokens via service account impersonation — never handing out the root credentials.
+2. A **metadata server emulator** (`metadata-proxy`) runs inside the container, serving those downscoped tokens transparently to all Google Cloud client libraries. No application code changes needed.
+3. **Production-level access requires explicit human confirmation** — a desktop dialog or terminal prompt on the host — so no automated process can silently escalate privileges.
+
+Credentials never enter Docker. The Unix socket is the only channel, and the host daemon controls what tokens are issued.
 
 ## Architecture
 
@@ -98,7 +98,7 @@ CLI flags take precedence over the config file, which takes precedence over defa
 project_id = "my-gcp-project"
 service_account = "dev-runner@my-gcp-project.iam.gserviceaccount.com"
 # socket_path defaults to $XDG_RUNTIME_DIR/gcp-authcalator.sock
-# (or ~/.gcp-gate/gcp-authcalator.sock if XDG_RUNTIME_DIR is unset)
+# (or ~/.gcp-gate/gcp-authcalator.sock if $XDG_RUNTIME_DIR is unset)
 port = 8173
 ```
 
@@ -143,7 +143,7 @@ gcp-authcalator gate \
 
 Prod token requests are rate-limited: one confirmation dialog at a time, a 5-second cooldown after denial, and a maximum of 5 attempts per minute.
 
-**Audit logging:** All token requests are logged as JSON lines to `~/.gcp-gate/audit.log`.
+**Audit logging:** All token requests are logged as JSON lines to `~/.gcp-gate/audit.log` (directory created with `0700` permissions).
 
 ### `metadata-proxy` — Container-side metadata emulator
 
@@ -268,7 +268,7 @@ To use gcp-authcalator in a devcontainer:
    ```
 
 2. **Mount the socket** into the container by adding to `devcontainer.json`.
-   The socket lives in a user-private directory — use `$XDG_RUNTIME_DIR` (typically `/run/user/$UID`) or `~/.gcp-gate/` if that's unset:
+   The socket lives in a user-private directory — `$XDG_RUNTIME_DIR` (typically `/run/user/$UID`) or `~/.gcp-gate/` if that's unset:
 
    ```json
    "mounts": [
@@ -304,15 +304,29 @@ To use gcp-authcalator in a devcontainer:
 
 ## Security model
 
-- **Credentials never enter the container.** The host daemon holds ADC; the container only receives short-lived tokens.
-- **User-private runtime directory.** The socket and temporary files are placed in `$XDG_RUNTIME_DIR` (typically `/run/user/$UID`, already `0700`) or `~/.gcp-gate/` (created with `0700`), rather than world-writable `/tmp`. This eliminates TOCTOU symlink races from other local users.
-- **Unix socket permissions** are set to `0600` (owner-only) on creation.
-- **Prod access requires confirmation** via a GUI dialog or terminal prompt on the host.
-- **Rate limiting** prevents automated brute-forcing of the confirmation flow.
-- **PID-based restriction** on temporary `with-prod` proxies ensures only the intended process tree can use elevated tokens.
-- **Environment isolation** in `with-prod` strips credential-related env vars and uses a temporary `CLOUDSDK_CONFIG` (in the user-private runtime directory) to prevent credential leakage around the proxy.
-- **Audit logging** records all token requests to `~/.gcp-gate/audit.log` (directory created with `0700` permissions).
-- **Stale socket recovery** verifies socket ownership and checks for running instances before cleanup.
+### Threat model
+
+gcp-authcalator is designed for environments where a coding agent (or other untrusted automation) runs in the same devcontainer as the engineer. The goal is to ensure that **all privilege escalation requires human approval** and that **credentials are never directly accessible inside the container**.
+
+**Hard security boundaries:**
+
+- **Credentials never enter the container.** The host daemon holds ADC; the container only receives short-lived, downscoped tokens. Even if the container is fully compromised, the attacker gets only a dev service account token — not the engineer's identity.
+- **Cross-user isolation.** The Unix socket is set to `0600` (owner-only) and lives in a `0700` directory (`$XDG_RUNTIME_DIR` or `~/.gcp-gate/`). Processes running as other OS users cannot connect. **For strongest isolation, run coding agents as a separate OS user** — they will be unable to access the socket at all.
+- **Human-in-the-loop for production access.** Prod tokens require explicit confirmation via a desktop dialog (`osascript` on macOS, `zenity` on Linux) or terminal prompt on the host. If no interactive method is available, access is denied.
+- **Rate limiting** prevents automated brute-forcing of the confirmation flow: one dialog at a time, a 5-second cooldown after denial, and a maximum of 5 attempts per minute.
+
+**Best-effort protections** (defense in depth against same-user attacks):
+
+- **PID-based process restriction** on `with-prod` temporary proxies ensures only the intended process tree can request elevated tokens. This uses `/proc` introspection and is effective against casual abuse, but a sufficiently privileged same-user process could circumvent it.
+- **Environment isolation** in `with-prod` strips credential-related env vars (`GOOGLE_APPLICATION_CREDENTIALS`, `CLOUDSDK_AUTH_ACCESS_TOKEN`, etc.) and uses a temporary `CLOUDSDK_CONFIG` in the user-private runtime directory to prevent credential leakage around the proxy.
+- **Token files** are written with `0600` permissions in user-private directories, not passed via environment variables (which are readable via `/proc/*/environ`).
+- **Audit logging** records all token requests as JSON lines to the runtime directory, providing a trail for forensic review.
+- **Stale socket recovery** verifies socket ownership and refuses to follow symlinks, preventing TOCTOU races.
+
+**Limitations:**
+
+- A malicious process running as the **same user** with sufficient sophistication (e.g., `ptrace`, reading `/proc/*/mem`) can potentially extract tokens from a running process. Full same-user isolation requires OS-level sandboxing beyond what gcp-authcalator provides.
+- Once the engineer approves a prod token request, the elevated token is available to the approved process tree for its lifetime (~1 hour). gcp-authcalator cannot revoke it early.
 
 ## Development
 
