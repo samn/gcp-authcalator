@@ -20,7 +20,7 @@ export interface StartGateServerOptions {
 }
 
 /**
- * Start the gcp-gate token daemon on a Unix domain socket.
+ * Start the gate token daemon on a Unix domain socket.
  *
  * 1. Creates auth / confirm / audit modules and wires them into GateDeps
  * 2. Removes stale socket file (crash recovery)
@@ -49,7 +49,7 @@ export async function startGateServer(
   };
 
   // Ensure the socket directory exists with owner-only permissions (0o700).
-  // For $XDG_RUNTIME_DIR the directory already exists; for the ~/.gcp-gate
+  // For $XDG_RUNTIME_DIR the directory already exists; for the ~/.gcp-authcalator
   // fallback this creates it.  mode only applies to newly created dirs so
   // we never alter permissions on a pre-existing $XDG_RUNTIME_DIR.
   const socketDir = dirname(config.socket_path);

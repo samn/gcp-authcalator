@@ -98,7 +98,7 @@ CLI flags take precedence over the config file, which takes precedence over defa
 project_id = "my-gcp-project"
 service_account = "dev-runner@my-gcp-project.iam.gserviceaccount.com"
 # socket_path defaults to $XDG_RUNTIME_DIR/gcp-authcalator.sock
-# (or ~/.gcp-gate/gcp-authcalator.sock if $XDG_RUNTIME_DIR is unset)
+# (or ~/.gcp-authcalator/gcp-authcalator.sock if XDG_RUNTIME_DIR is unset)
 port = 8173
 ```
 
@@ -143,7 +143,7 @@ gcp-authcalator gate \
 
 Prod token requests are rate-limited: one confirmation dialog at a time, a 5-second cooldown after denial, and a maximum of 5 attempts per minute.
 
-**Audit logging:** All token requests are logged as JSON lines to `~/.gcp-gate/audit.log` (directory created with `0700` permissions).
+**Audit logging:** All token requests are logged as JSON lines to the runtime directory's `audit.log` (`$XDG_RUNTIME_DIR/audit.log` or `~/.gcp-authcalator/audit.log`).
 
 ### `metadata-proxy` — Container-side metadata emulator
 
@@ -268,7 +268,7 @@ To use gcp-authcalator in a devcontainer:
    ```
 
 2. **Mount the socket** into the container by adding to `devcontainer.json`.
-   The socket lives in a user-private directory — `$XDG_RUNTIME_DIR` (typically `/run/user/$UID`) or `~/.gcp-gate/` if that's unset:
+   The socket lives in a user-private directory — use `$XDG_RUNTIME_DIR` (typically `/run/user/$UID`) or `~/.gcp-authcalator/` if that's unset:
 
    ```json
    "mounts": [
@@ -311,7 +311,7 @@ gcp-authcalator is designed for environments where a coding agent (or other untr
 **Hard security boundaries:**
 
 - **Credentials never enter the container.** The host daemon holds ADC; the container only receives short-lived, downscoped tokens. Even if the container is fully compromised, the attacker gets only a dev service account token — not the engineer's identity.
-- **Cross-user isolation.** The Unix socket is set to `0600` (owner-only) and lives in a `0700` directory (`$XDG_RUNTIME_DIR` or `~/.gcp-gate/`). Processes running as other OS users cannot connect. **For strongest isolation, run coding agents as a separate OS user** — they will be unable to access the socket at all.
+- **Cross-user isolation.** The Unix socket is set to `0600` (owner-only) and lives in a `0700` directory (`$XDG_RUNTIME_DIR` or `~/.gcp-authcalator/`). Processes running as other OS users cannot connect. **For strongest isolation, run coding agents as a separate OS user** — they will be unable to access the socket at all.
 - **Human-in-the-loop for production access.** Prod tokens require explicit confirmation via a desktop dialog (`osascript` on macOS, `zenity` on Linux) or terminal prompt on the host. If no interactive method is available, access is denied.
 - **Rate limiting** prevents automated brute-forcing of the confirmation flow: one dialog at a time, a 5-second cooldown after denial, and a maximum of 5 attempts per minute.
 
