@@ -5,6 +5,7 @@ import { getDefaultRuntimeDir, WithProdConfigSchema } from "../config.ts";
 import { fetchProdToken, type FetchProdTokenOptions } from "../with-prod/fetch-prod-token.ts";
 import { createStaticTokenProvider } from "../with-prod/static-token-provider.ts";
 import { startMetadataProxyServer } from "../metadata-proxy/server.ts";
+import { detectNestedSession, PROD_SESSION_ENV_VAR } from "../with-prod/detect-nested-session.ts";
 import type { Subprocess } from "bun";
 
 type SpawnFn = (
@@ -18,20 +19,61 @@ type SpawnFn = (
 ) => Subprocess;
 
 export interface WithProdOptions {
-  /** Override fetch for testing (passed to fetchProdToken). */
+  /** Override fetch for testing (passed to fetchProdToken and detectNestedSession). */
   fetchOptions?: FetchProdTokenOptions;
   /** Override Bun.spawn for testing. */
   spawnFn?: SpawnFn;
 }
 
+/** Strip credential env vars that could bypass the metadata proxy. */
+function stripCredentialEnvVars(
+  env: Record<string, string | undefined>,
+): Record<string, string | undefined> {
+  const {
+    CLOUDSDK_AUTH_ACCESS_TOKEN: _drop1,
+    CPL_GS_BEARER: _drop2,
+    GOOGLE_APPLICATION_CREDENTIALS: _drop3,
+    GOOGLE_OAUTH_ACCESS_TOKEN: _drop4,
+    CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: _drop5,
+    CLOUDSDK_CORE_ACCOUNT: _drop6,
+    CLOUDSDK_CONFIG: _drop7,
+    ...cleaned
+  } = env;
+  return cleaned;
+}
+
+/** Spawn child, forward signals, wait for exit, then exit with the child's code. */
+async function spawnAndWait(
+  wrappedCommand: string[],
+  env: Record<string, string | undefined>,
+  spawnFn: SpawnFn,
+): Promise<never> {
+  const child = spawnFn(wrappedCommand, {
+    env,
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+
+  const forwardSignal = (signal: NodeJS.Signals) => {
+    child.kill(signal === "SIGINT" ? 2 : 15);
+  };
+  process.on("SIGTERM", () => forwardSignal("SIGTERM"));
+  process.on("SIGINT", () => forwardSignal("SIGINT"));
+
+  const exitCode = (await child.exited) ?? undefined;
+  process.exit(exitCode ?? 1);
+}
+
 /**
  * Wrap a shell command with prod-level GCP credentials.
  *
- * 1. Fetches a prod token + engineer identity from gcp-gate
- * 2. Starts a temporary metadata proxy serving that token
- * 3. Creates an isolated CLOUDSDK_CONFIG so gcloud doesn't reuse cached creds
- * 4. Execs the wrapped command with env vars pointing at the proxy
- * 5. Forwards signals to child, propagates exit code, cleans up
+ * 1. If already inside a with-prod session, reuses the parent's proxy
+ * 2. Otherwise fetches a prod token + engineer identity from gcp-gate
+ * 3. Starts a temporary metadata proxy serving that token
+ * 4. Creates an isolated CLOUDSDK_CONFIG so gcloud doesn't reuse cached creds
+ * 5. Execs the wrapped command with env vars pointing at the proxy
+ * 6. Forwards signals to child, propagates exit code, cleans up
  */
 export async function runWithProd(
   config: Config,
@@ -44,6 +86,43 @@ export async function runWithProd(
     process.exit(1);
   }
 
+  const spawnFn = options.spawnFn ?? (Bun.spawn as unknown as SpawnFn);
+
+  // Check for nested session before parsing config (project_id is not required
+  // when reusing an existing session, since we inherit it from the parent proxy).
+  const nestedSession = await detectNestedSession(process.env, options.fetchOptions?.fetchFn);
+
+  if (nestedSession) {
+    // If the caller explicitly requested a different project, fall through to
+    // a new session so the confirmation dialog reflects the correct project.
+    if (config.project_id && config.project_id !== nestedSession.projectId) {
+      console.log(
+        `with-prod: requested project ${config.project_id} differs from active session (${nestedSession.projectId}), starting new session`,
+      );
+    } else {
+      console.log(
+        `with-prod: reusing existing prod session (proxy at ${nestedSession.metadataHost})`,
+      );
+
+      const env: Record<string, string | undefined> = {
+        ...stripCredentialEnvVars(process.env),
+        GCE_METADATA_HOST: nestedSession.metadataHost,
+        GCE_METADATA_IP: nestedSession.metadataHost,
+        CLOUDSDK_CORE_ACCOUNT: nestedSession.email,
+        CLOUDSDK_CORE_PROJECT: nestedSession.projectId,
+        [PROD_SESSION_ENV_VAR]: nestedSession.metadataHost,
+      };
+
+      // Preserve parent's CLOUDSDK_CONFIG if set
+      if (process.env.CLOUDSDK_CONFIG) {
+        env.CLOUDSDK_CONFIG = process.env.CLOUDSDK_CONFIG;
+      }
+
+      await spawnAndWait(wrappedCommand, env, spawnFn);
+    }
+  }
+
+  // Normal flow: fetch a new prod token and start a fresh session.
   const wpConfig = WithProdConfigSchema.parse(config);
 
   // Step 1: Fetch prod token + identity from gcp-gate
@@ -108,19 +187,8 @@ export async function runWithProd(
     );
 
     // Step 4: Spawn wrapped command with metadata env vars
-    const spawnFn = options.spawnFn ?? (Bun.spawn as unknown as SpawnFn);
-    const {
-      CLOUDSDK_AUTH_ACCESS_TOKEN: _drop1,
-      CPL_GS_BEARER: _drop2,
-      GOOGLE_APPLICATION_CREDENTIALS: _drop3,
-      GOOGLE_OAUTH_ACCESS_TOKEN: _drop4,
-      CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: _drop5,
-      CLOUDSDK_CORE_ACCOUNT: _drop6,
-      CLOUDSDK_CONFIG: _drop7,
-      ...parentEnv
-    } = process.env;
     const env = {
-      ...parentEnv,
+      ...stripCredentialEnvVars(process.env),
       GCE_METADATA_HOST: metadataHost,
       GCE_METADATA_IP: metadataHost,
       CLOUDSDK_CONFIG: gcloudConfigDir,
@@ -131,6 +199,7 @@ export async function runWithProd(
       // Tokens still flow through the PID-validated metadata proxy.
       CLOUDSDK_CORE_ACCOUNT: tokenResult.email,
       CLOUDSDK_CORE_PROJECT: wpConfig.project_id,
+      [PROD_SESSION_ENV_VAR]: metadataHost,
     };
 
     const child = spawnFn(wrappedCommand, {
