@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `with-prod`: fix interactive TTY passthrough (Tab, arrow keys) by switching from `Bun.spawn` to `node:child_process.spawn`
+- `with-prod`: forward `SIGWINCH` to child process for correct terminal resize handling
+
 ## [0.1.3] - 2026-02-19
 
 ### Fixed

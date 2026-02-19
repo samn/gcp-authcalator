@@ -2,7 +2,7 @@ import { describe, expect, test, beforeEach, afterEach, spyOn } from "bun:test";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { z } from "zod";
 import { runWithProd } from "../../commands/with-prod.ts";
-import type { Subprocess } from "bun";
+import type { ChildHandle } from "../../commands/with-prod.ts";
 
 /**
  * URL-aware mock that returns different responses for /token and /identity
@@ -89,7 +89,7 @@ describe("runWithProd", () => {
       return {
         exited: Promise.resolve(0),
         kill: () => {},
-      } as unknown as Subprocess;
+      } as ChildHandle;
     };
 
     await expect(
@@ -146,7 +146,7 @@ describe("runWithProd", () => {
       return {
         exited: Promise.resolve(0),
         kill: () => {},
-      } as unknown as Subprocess;
+      } as ChildHandle;
     };
 
     try {
@@ -182,7 +182,7 @@ describe("runWithProd", () => {
       return {
         exited: Promise.resolve(0),
         kill: () => {},
-      } as unknown as Subprocess;
+      } as ChildHandle;
     };
 
     try {
@@ -220,7 +220,7 @@ describe("runWithProd", () => {
       return {
         exited: Promise.resolve(0),
         kill: () => {},
-      } as unknown as Subprocess;
+      } as ChildHandle;
     };
 
     try {
@@ -254,7 +254,7 @@ describe("runWithProd", () => {
       return {
         exited: Promise.resolve(0),
         kill: () => {},
-      } as unknown as Subprocess;
+      } as ChildHandle;
     };
 
     try {
@@ -296,7 +296,7 @@ describe("runWithProd", () => {
       return {
         exited: Promise.resolve(0),
         kill: () => {},
-      } as unknown as Subprocess;
+      } as ChildHandle;
     };
 
     try {
@@ -371,7 +371,7 @@ describe("runWithProd", () => {
       return {
         exited: Promise.resolve(42),
         kill: () => {},
-      } as unknown as Subprocess;
+      } as ChildHandle;
     };
 
     await expect(
@@ -390,5 +390,86 @@ describe("runWithProd", () => {
     ).rejects.toThrow("process.exit called");
 
     expect(exitSpy).toHaveBeenCalledWith(42);
+  });
+
+  test("forwards SIGWINCH to child process", async () => {
+    const mockFetchFn = mockGateFetch();
+
+    const killCalls: (NodeJS.Signals | undefined)[] = [];
+    let resolveExited: (code: number | null) => void;
+    const mockSpawnFn = () => {
+      return {
+        exited: new Promise<number | null>((resolve) => {
+          resolveExited = resolve;
+        }),
+        kill: (signal?: NodeJS.Signals) => {
+          killCalls.push(signal);
+        },
+      } as ChildHandle;
+    };
+
+    const runPromise = runWithProd(
+      {
+        project_id: "my-proj",
+        socket_path: "/tmp/gate.sock",
+        port: 8173,
+      },
+      ["echo", "test"],
+      {
+        fetchOptions: { fetchFn: mockFetchFn },
+        spawnFn: mockSpawnFn,
+      },
+    );
+
+    // Wait a tick so the signal listener is installed
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Emit SIGWINCH on the current process
+    process.emit("SIGWINCH" as NodeJS.Signals);
+
+    expect(killCalls).toContain("SIGWINCH");
+
+    // Let child exit so the function completes
+    resolveExited!(0);
+    await expect(runPromise).rejects.toThrow("process.exit called");
+  });
+
+  test("cleans up signal listeners after child exits", async () => {
+    const mockFetchFn = mockGateFetch();
+
+    const listenerCountsBefore = {
+      SIGTERM: process.listenerCount("SIGTERM"),
+      SIGINT: process.listenerCount("SIGINT"),
+      SIGWINCH: process.listenerCount("SIGWINCH"),
+    };
+
+    const mockSpawnFn = () => {
+      return {
+        exited: Promise.resolve(0),
+        kill: () => {},
+      } as ChildHandle;
+    };
+
+    try {
+      await runWithProd(
+        {
+          project_id: "my-proj",
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+        },
+        ["echo", "test"],
+        {
+          fetchOptions: { fetchFn: mockFetchFn },
+          spawnFn: mockSpawnFn,
+        },
+      );
+    } catch {
+      // process.exit mock throws
+    }
+
+    // Listener counts should be back to their original values
+    expect(process.listenerCount("SIGTERM")).toBe(listenerCountsBefore.SIGTERM);
+    expect(process.listenerCount("SIGINT")).toBe(listenerCountsBefore.SIGINT);
+    expect(process.listenerCount("SIGWINCH")).toBe(listenerCountsBefore.SIGWINCH);
   });
 });

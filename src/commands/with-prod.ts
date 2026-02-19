@@ -1,26 +1,48 @@
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { spawn } from "node:child_process";
 import type { Config } from "../config.ts";
 import { getDefaultRuntimeDir, WithProdConfigSchema } from "../config.ts";
 import { fetchProdToken, type FetchProdTokenOptions } from "../with-prod/fetch-prod-token.ts";
 import { createStaticTokenProvider } from "../with-prod/static-token-provider.ts";
 import { startMetadataProxyServer } from "../metadata-proxy/server.ts";
-import type { Subprocess } from "bun";
+
+export interface ChildHandle {
+  exited: Promise<number | null>;
+  kill(signal?: NodeJS.Signals): void;
+}
 
 type SpawnFn = (
   cmd: string[],
   opts: {
     env: Record<string, string | undefined>;
-    stdin: "inherit";
-    stdout: "inherit";
-    stderr: "inherit";
+    stdio: "inherit";
   },
-) => Subprocess;
+) => ChildHandle;
+
+function defaultSpawn(
+  cmd: string[],
+  opts: { env: Record<string, string | undefined>; stdio: "inherit" },
+): ChildHandle {
+  const [file, ...args] = cmd;
+  const child = spawn(file!, args, {
+    env: opts.env as NodeJS.ProcessEnv,
+    stdio: opts.stdio,
+  });
+  return {
+    exited: new Promise<number | null>((resolve) => {
+      child.on("exit", (code: number | null) => resolve(code));
+    }),
+    kill(signal?: NodeJS.Signals) {
+      child.kill(signal);
+    },
+  };
+}
 
 export interface WithProdOptions {
   /** Override fetch for testing (passed to fetchProdToken). */
   fetchOptions?: FetchProdTokenOptions;
-  /** Override Bun.spawn for testing. */
+  /** Override spawn for testing. */
   spawnFn?: SpawnFn;
 }
 
@@ -108,7 +130,7 @@ export async function runWithProd(
     );
 
     // Step 4: Spawn wrapped command with metadata env vars
-    const spawnFn = options.spawnFn ?? (Bun.spawn as unknown as SpawnFn);
+    const spawnFn = options.spawnFn ?? defaultSpawn;
     const {
       CLOUDSDK_AUTH_ACCESS_TOKEN: _drop1,
       CPL_GS_BEARER: _drop2,
@@ -135,20 +157,25 @@ export async function runWithProd(
 
     const child = spawnFn(wrappedCommand, {
       env,
-      stdin: "inherit",
-      stdout: "inherit",
-      stderr: "inherit",
+      stdio: "inherit",
     });
 
     // Step 5: Forward signals to child
-    const forwardSignal = (signal: NodeJS.Signals) => {
-      child.kill(signal === "SIGINT" ? 2 : 15);
-    };
-    process.on("SIGTERM", () => forwardSignal("SIGTERM"));
-    process.on("SIGINT", () => forwardSignal("SIGINT"));
+    const onSigterm = () => child.kill("SIGTERM");
+    const onSigint = () => child.kill("SIGINT");
+    const onSigwinch = () => child.kill("SIGWINCH");
+    process.on("SIGTERM", onSigterm);
+    process.on("SIGINT", onSigint);
+    process.on("SIGWINCH", onSigwinch);
 
     // Step 6: Wait for child
-    exitCode = (await child.exited) ?? undefined;
+    try {
+      exitCode = (await child.exited) ?? undefined;
+    } finally {
+      process.removeListener("SIGTERM", onSigterm);
+      process.removeListener("SIGINT", onSigint);
+      process.removeListener("SIGWINCH", onSigwinch);
+    }
   } finally {
     stop();
     if (gcloudConfigDir) {
