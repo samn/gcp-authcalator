@@ -1,0 +1,16 @@
+[test]
+# Always enable coverage
+coverage = true
+
+# To require 90% line-level and function-level coverage
+coverageThreshold = 0.9
+
+coveragePathIgnorePatterns = [
+  # Ignore coverage for things that are hard to
+  # unit test or exercise without real credentials.
+  "src/commands/kube-token.ts",
+  "src/commands/with-prod.ts",
+  "src/gate/confirm.ts",
+  "src/gate/server.ts",
+  "src/metadata-proxy/server.ts"
+]

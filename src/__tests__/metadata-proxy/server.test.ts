@@ -305,6 +305,59 @@ describe("startMetadataProxyServer", () => {
     expect(res.status).toBe(200);
   });
 
+  test("PID validation: allows requests from descendant of allowed ancestor", async () => {
+    const port = nextPort++;
+    const config = makeConfig(port);
+
+    const customProvider: TokenProvider = {
+      getToken: async () => ({
+        access_token: "pid-validated-token",
+        expires_at: new Date(Date.now() + 3600_000),
+      }),
+    };
+
+    // Use PID 1 (init) as ancestor — every process is a descendant of PID 1
+    result = startMetadataProxyServer(config, {
+      tokenProvider: customProvider,
+      allowedAncestorPid: 1,
+      quiet: true,
+    });
+
+    const res = await fetch(`http://127.0.0.1:${port}/`, {
+      headers: { "Metadata-Flavor": "Google" },
+    });
+    // On Linux, should succeed because test process is a descendant of PID 1
+    // On non-Linux, getOwnerPid returns null → 403
+    if (process.platform === "linux") {
+      expect(res.status).toBe(200);
+    } else {
+      expect(res.status).toBe(403);
+    }
+  });
+
+  test("PID validation: rejects requests from non-descendant", async () => {
+    const port = nextPort++;
+    const config = makeConfig(port);
+
+    const customProvider: TokenProvider = {
+      getToken: async () => ({
+        access_token: "should-not-reach",
+        expires_at: new Date(Date.now() + 3600_000),
+      }),
+    };
+
+    // Use an impossible ancestor PID that no process descends from
+    result = startMetadataProxyServer(config, {
+      tokenProvider: customProvider,
+      allowedAncestorPid: 2147483647,
+      quiet: true,
+    });
+
+    const res = await fetch(`http://127.0.0.1:${port}/`);
+    expect(res.status).toBe(403);
+    expect(await res.text()).toBe("Forbidden");
+  });
+
   test("quiet: true suppresses startup logs", async () => {
     const port = nextPort++;
     const config = makeConfig(port);
