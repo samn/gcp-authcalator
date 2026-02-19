@@ -144,6 +144,39 @@ describe("getOwnerPid", () => {
     expect(getOwnerPid(8080, fs)).toBeNull();
   });
 
+  test("returns null when /proc readdir fails", () => {
+    const fs: ProcFS = {
+      readFileSync(path: string) {
+        if (path === "/proc/net/tcp") {
+          const portHex = (8080).toString(16).toUpperCase().padStart(4, "0");
+          return `${TCP_HEADER}\n   0: 0100007F:${portHex} 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 55555 1 0000000000000000 100 0 0 10 0\n`;
+        }
+        if (path === "/proc/net/tcp6") return `${TCP6_HEADER}\n`;
+        throw new Error("ENOENT");
+      },
+      readdirSync() {
+        throw new Error("EACCES");
+      },
+      readlinkSync() {
+        throw new Error("ENOENT");
+      },
+    };
+    // Inode 55555 is found in /proc/net/tcp but /proc can't be listed
+    expect(getOwnerPid(8080, fs)).toBeNull();
+  });
+
+  test("skips PIDs with unreadable fd directories", () => {
+    // Create a scenario where the first PID's fd dir throws but a second PID succeeds
+    const fs = fakeProcFS({
+      sockets: [{ file: "tcp", port: 7070, inode: 44444 }],
+      pids: new Map([
+        [10, { ppid: 1 }], // no fds → will throw ENOENT on readdirSync
+        [20, { ppid: 1, fds: new Map([["4", "socket:[44444]"]]) }],
+      ]),
+    });
+    expect(getOwnerPid(7070, fs)).toBe(20);
+  });
+
   test("returns null when /proc/net/tcp is unreadable", () => {
     const fs: ProcFS = {
       readFileSync() {
@@ -211,6 +244,28 @@ describe("isDescendantOf", () => {
     });
     // PID 2's parent is 1, but we're looking for ancestor 999
     expect(isDescendantOf(2, 999, fs)).toBe(false);
+  });
+
+  test("returns false when max depth is exceeded (circular parentage)", () => {
+    // Build a chain longer than 256 entries that never reaches the ancestor.
+    // We simulate a pathological case where every pid's parent is pid+1,
+    // forming a very long chain away from the target ancestor.
+    const pids = new Map<number, { ppid: number }>();
+    for (let i = 1000; i < 1300; i++) {
+      pids.set(i, { ppid: i + 1 });
+    }
+    // Close the loop so it never terminates naturally
+    pids.set(1300, { ppid: 1000 });
+
+    const fs = fakeProcFS({ pids });
+    expect(isDescendantOf(1000, 9999, fs)).toBe(false);
+  });
+
+  test("returns false when ppid equals current pid (self-referencing)", () => {
+    const fs = fakeProcFS({
+      pids: new Map([[500, { ppid: 500 }]]),
+    });
+    expect(isDescendantOf(500, 100, fs)).toBe(false);
   });
 
   test("handles missing /proc/<pid>/status gracefully", () => {

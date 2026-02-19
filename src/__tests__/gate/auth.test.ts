@@ -226,6 +226,16 @@ describe("createAuthModule", () => {
       await expect(getIdentityEmail()).rejects.toThrow("tokeninfo returned 401");
     });
 
+    test("throws when source client returns null token", async () => {
+      const { getIdentityEmail } = createAuthModule(TEST_CONFIG, {
+        sourceClient: mockClient(null),
+        impersonatedClient: mockClient("dev"),
+        fetchFn: mockFetch("user@example.com"),
+      });
+
+      await expect(getIdentityEmail()).rejects.toThrow("no access token available");
+    });
+
     test("throws when tokeninfo has no email", async () => {
       const fetchFn = (async () =>
         new Response(JSON.stringify({ aud: "something" }), {
@@ -339,6 +349,22 @@ describe("createAuthModule", () => {
       });
 
       await expect(getProjectNumber()).rejects.toThrow("no name in CRM API response");
+    });
+
+    test("throws when CRM API response has unexpected name format", async () => {
+      const fetchFn = (async () =>
+        new Response(JSON.stringify({ name: "unexpected-format" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })) as unknown as typeof globalThis.fetch;
+
+      const { getProjectNumber } = createAuthModule(TEST_CONFIG, {
+        sourceClient: mockClient("source"),
+        impersonatedClient: mockClient("dev"),
+        fetchFn,
+      });
+
+      await expect(getProjectNumber()).rejects.toThrow("unexpected name format");
     });
 
     test("throws when source client has no token", async () => {

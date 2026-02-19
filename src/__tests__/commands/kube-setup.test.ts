@@ -235,6 +235,109 @@ describe("runKubeSetup", () => {
     expect(logOutput).toContain("patched 2 user(s)");
   });
 
+  test("exits 1 when kubeconfig contains invalid YAML", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kube-setup-"));
+    const kubeconfigPath = join(dir, "config");
+    writeFileSync(kubeconfigPath, "{{{{not: valid: yaml: [[[");
+
+    await expect(runKubeSetup({ kubeconfigPath })).rejects.toThrow("process.exit called");
+
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
+    expect(errorOutput).toContain("failed to parse kubeconfig YAML");
+  });
+
+  test("exits 1 when kubeconfig is empty", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kube-setup-"));
+    const kubeconfigPath = join(dir, "config");
+    writeFileSync(kubeconfigPath, "");
+
+    await expect(runKubeSetup({ kubeconfigPath })).rejects.toThrow("process.exit called");
+
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
+    expect(errorOutput).toContain("empty or not a valid YAML");
+  });
+
+  test("exits 1 when kubeconfig is a scalar YAML value", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kube-setup-"));
+    const kubeconfigPath = join(dir, "config");
+    writeFileSync(kubeconfigPath, "just-a-string");
+
+    await expect(runKubeSetup({ kubeconfigPath })).rejects.toThrow("process.exit called");
+
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
+    expect(errorOutput).toContain("empty or not a valid YAML");
+  });
+
+  test("uses KUBECONFIG env var when kubeconfigPath not provided", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kube-setup-"));
+    const kubeconfigPath = join(dir, "custom-config");
+    writeFileSync(kubeconfigPath, SAMPLE_KUBECONFIG);
+
+    const originalKubeconfig = process.env.KUBECONFIG;
+    process.env.KUBECONFIG = kubeconfigPath;
+
+    try {
+      await runKubeSetup({});
+
+      // Verify the file was patched
+      const patched = parseYAML(readFileSync(kubeconfigPath, "utf-8"));
+      const patchedCmd = patched.users[0].user.exec.command as string;
+      expect(patchedCmd).toMatch(/^\//);
+    } finally {
+      if (originalKubeconfig === undefined) {
+        delete process.env.KUBECONFIG;
+      } else {
+        process.env.KUBECONFIG = originalKubeconfig;
+      }
+    }
+  });
+
+  test("uses first path from colon-separated KUBECONFIG", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kube-setup-"));
+    const kubeconfigPath = join(dir, "first-config");
+    writeFileSync(kubeconfigPath, SAMPLE_KUBECONFIG);
+
+    const originalKubeconfig = process.env.KUBECONFIG;
+    process.env.KUBECONFIG = `${kubeconfigPath}:/some/other/path`;
+
+    try {
+      await runKubeSetup({});
+
+      const patched = parseYAML(readFileSync(kubeconfigPath, "utf-8"));
+      const patchedCmd = patched.users[0].user.exec.command as string;
+      expect(patchedCmd).toMatch(/^\//);
+    } finally {
+      if (originalKubeconfig === undefined) {
+        delete process.env.KUBECONFIG;
+      } else {
+        process.env.KUBECONFIG = originalKubeconfig;
+      }
+    }
+  });
+
+  test("exits 1 when kubeconfig is not writable", async () => {
+    const { chmodSync } = await import("node:fs");
+    const dir = mkdtempSync(join(tmpdir(), "kube-setup-"));
+    const kubeconfigPath = join(dir, "config");
+    writeFileSync(kubeconfigPath, SAMPLE_KUBECONFIG);
+    // Make the file read-only
+    chmodSync(kubeconfigPath, 0o444);
+
+    try {
+      await expect(runKubeSetup({ kubeconfigPath })).rejects.toThrow("process.exit called");
+
+      expect(exitSpy).toHaveBeenCalledWith(1);
+      const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
+      expect(errorOutput).toContain("failed to write kubeconfig");
+    } finally {
+      // Restore write permission for cleanup
+      chmodSync(kubeconfigPath, 0o644);
+    }
+  });
+
   test("dryRun mode does not write to disk", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kube-setup-"));
     const kubeconfigPath = join(dir, "config");

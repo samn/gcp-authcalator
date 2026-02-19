@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createConfirmModule } from "../../gate/confirm.ts";
+import { createConfirmModule, type ConfirmOptions } from "../../gate/confirm.ts";
 
 /** Create a mock spawn function that returns a process with the given exit code. */
 function mockSpawn(exitCode: number) {
@@ -387,6 +387,60 @@ describe("createConfirmModule", () => {
       const scriptArg = capturedCmd.find((arg) => arg.includes("display dialog"));
       expect(scriptArg).toBeDefined();
       expect(scriptArg).not.toContain("Reported command:");
+    });
+  });
+
+  describe("zenity unexpected exit code", () => {
+    test("returns false for unexpected exit code (e.g. 2)", async () => {
+      const { confirmProdAccess } = createConfirmModule({
+        spawn: mockSpawn(2),
+        platform: "linux",
+        isTTY: false,
+      });
+      const result = await confirmProdAccess("user@example.com");
+      expect(result).toBe(false);
+    });
+  });
+
+  describe("osascript unexpected exit code", () => {
+    test("returns false for unexpected exit code (e.g. 2)", async () => {
+      const { confirmProdAccess } = createConfirmModule({
+        spawn: mockSpawn(2),
+        platform: "darwin",
+        isTTY: false,
+      });
+      const result = await confirmProdAccess("user@example.com");
+      expect(result).toBe(false);
+    });
+  });
+
+  describe("GUI spawn throws", () => {
+    test("falls through to terminal deny when spawn throws and no TTY", async () => {
+      const spawnFn = () => {
+        throw new Error("spawn ENOENT");
+      };
+
+      const { confirmProdAccess } = createConfirmModule({
+        spawn: spawnFn as unknown as ConfirmOptions["spawn"],
+        platform: "linux",
+        isTTY: false,
+      });
+      const result = await confirmProdAccess("user@example.com");
+      expect(result).toBe(false);
+    });
+
+    test("falls through to terminal deny when osascript spawn throws and no TTY", async () => {
+      const spawnFn = () => {
+        throw new Error("spawn ENOENT");
+      };
+
+      const { confirmProdAccess } = createConfirmModule({
+        spawn: spawnFn as unknown as ConfirmOptions["spawn"],
+        platform: "darwin",
+        isTTY: false,
+      });
+      const result = await confirmProdAccess("user@example.com");
+      expect(result).toBe(false);
     });
   });
 
