@@ -14,9 +14,9 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "check": "bun run lint && bun run format:check",
-    "build": "bun build --compile index.ts --outfile gcp-authcalator",
-    "build:linux-amd64": "bun build --compile --target=bun-linux-x64 index.ts --outfile gcp-authcalator-linux-amd64",
-    "build:darwin-arm64": "bun build --compile --target=bun-darwin-arm64 index.ts --outfile gcp-authcalator-darwin-arm64",
+    "build": "bun run scripts/build.ts",
+    "build:linux-amd64": "bun run scripts/build.ts --target=bun-linux-x64 --outfile=gcp-authcalator-linux-amd64",
+    "build:darwin-arm64": "bun run scripts/build.ts --target=bun-darwin-arm64 --outfile=gcp-authcalator-darwin-arm64",
     "release": "bun run scripts/release.ts",
     "prepare": "prek install"
   },
