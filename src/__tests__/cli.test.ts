@@ -40,18 +40,18 @@ describe("--help", () => {
 });
 
 describe("--version", () => {
-  test("prints version and exits 0", async () => {
+  test("prints version with commit sha and exits 0", async () => {
     const { stdout, exitCode } = await runCLI(["--version"]);
     expect(exitCode).toBe(0);
-    expect(stdout.trim()).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(stdout.trim()).toMatch(/^\d+\.\d+\.\d+ \([a-f0-9]+\)$/);
   });
 });
 
 describe("version subcommand", () => {
-  test("prints version and exits 0", async () => {
+  test("prints version with commit sha and exits 0", async () => {
     const { stdout, exitCode } = await runCLI(["version"]);
     expect(exitCode).toBe(0);
-    expect(stdout.trim()).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(stdout.trim()).toMatch(/^\d+\.\d+\.\d+ \([a-f0-9]+\)$/);
   });
 });
 

@@ -1,4 +1,5 @@
 import { parseArgs } from "node:util";
+import { spawnSync } from "node:child_process";
 import { z } from "zod";
 import { loadConfig, mapCliArgs } from "./config.ts";
 import { runGate } from "./commands/gate.ts";
@@ -10,7 +11,31 @@ import packageJson from "../package.json";
 
 const VERSION = packageJson.version;
 
-const USAGE = `gcp-authcalator v${VERSION} — GCP auth escalator for development environments
+function getCommitSha(): string {
+  // When compiled with --define, process.env.COMMIT_SHA is replaced with a literal string.
+  if (process.env.COMMIT_SHA) {
+    return process.env.COMMIT_SHA;
+  }
+  try {
+    const result = spawnSync("git", ["rev-parse", "--short", "HEAD"], {
+      timeout: 1000,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    if (result.status === 0 && result.stdout) {
+      return Buffer.from(result.stdout).toString().trim();
+    }
+  } catch {
+    // git not available
+  }
+  return "";
+}
+
+function formatVersion(): string {
+  const sha = getCommitSha();
+  return sha ? `${VERSION} (${sha})` : VERSION;
+}
+
+const USAGE = `gcp-authcalator v${formatVersion()} — GCP auth escalator for development environments
 
 Usage:
   gcp-authcalator <command> [options]
@@ -74,7 +99,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
   }
 
   if (values.version) {
-    console.log(VERSION);
+    console.log(formatVersion());
     process.exit(0);
   }
 
@@ -93,7 +118,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
   }
 
   if (subcommand === "version") {
-    console.log(VERSION);
+    console.log(formatVersion());
     process.exit(0);
   }
 
