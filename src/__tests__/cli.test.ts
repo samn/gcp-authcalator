@@ -235,6 +235,32 @@ describe("with-prod subcommand", () => {
 });
 
 // ---------------------------------------------------------------------------
+// --dumpable flag
+// ---------------------------------------------------------------------------
+
+describe("--dumpable flag", () => {
+  test("is accepted by the CLI parser without error", async () => {
+    const { stderr, exitCode } = await runCLI([
+      "with-prod",
+      "--project-id",
+      "test-proj",
+      "--dumpable",
+      "echo",
+      "hello",
+    ]);
+    // Token fetch will fail (no gate socket), but the flag itself shouldn't cause a parse error
+    expect(exitCode).toBe(1);
+    expect(stderr).not.toContain("Unknown option");
+    expect(stderr).toContain("failed to acquire prod token");
+  });
+
+  test("appears in help output", async () => {
+    const { stdout } = await runCLI(["--help"]);
+    expect(stdout).toContain("--dumpable");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Config file integration
 // ---------------------------------------------------------------------------
 

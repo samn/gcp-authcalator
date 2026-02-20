@@ -2,6 +2,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:f
 import { join } from "node:path";
 import type { Config } from "../config.ts";
 import { getDefaultRuntimeDir, WithProdConfigSchema } from "../config.ts";
+import { setNonDumpable } from "../prctl.ts";
 import { fetchProdToken, type FetchProdTokenOptions } from "../with-prod/fetch-prod-token.ts";
 import { createStaticTokenProvider } from "../with-prod/static-token-provider.ts";
 import { startMetadataProxyServer } from "../metadata-proxy/server.ts";
@@ -23,6 +24,10 @@ export interface WithProdOptions {
   fetchOptions?: FetchProdTokenOptions;
   /** Override Bun.spawn for testing. */
   spawnFn?: SpawnFn;
+  /** When true, skip prctl(PR_SET_DUMPABLE, 0) to allow debugging. Default: false. */
+  dumpable?: boolean;
+  /** @internal Override setNonDumpable for testing. */
+  setNonDumpableFn?: () => void;
 }
 
 /** Strip credential env vars that could bypass the metadata proxy. */
@@ -124,6 +129,13 @@ export async function runWithProd(
 
   // Normal flow: fetch a new prod token and start a fresh session.
   const wpConfig = WithProdConfigSchema.parse(config);
+
+  // Step 0: Protect process from inspection (ptrace, /proc/pid/environ)
+  if (!options.dumpable) {
+    const setNonDumpableFn = options.setNonDumpableFn ?? setNonDumpable;
+    setNonDumpableFn();
+    console.log("with-prod: process protection enabled (non-dumpable)");
+  }
 
   // Step 1: Fetch prod token + identity from gcp-gate
   console.log("with-prod: requesting prod-level token from gcp-gate...");

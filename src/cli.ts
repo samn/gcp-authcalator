@@ -54,6 +54,7 @@ Options:
   --socket-path <path>     Unix socket path (default: $XDG_RUNTIME_DIR/gcp-authcalator.sock)
   -p, --port <port>        Metadata proxy port (default: 8173)
   -c, --config <path>      Path to TOML config file
+  --dumpable               Allow process debugging (skip PR_SET_DUMPABLE protection, with-prod only)
   -h, --help               Show this help message
   -v, --version            Show version
 
@@ -88,6 +89,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       "socket-path": { type: "string" },
       port: { type: "string", short: "p" },
       config: { type: "string", short: "c" },
+      dumpable: { type: "boolean" },
       help: { type: "boolean", short: "h" },
       version: { type: "boolean", short: "v" },
     },
@@ -159,7 +161,9 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
         break;
       case "with-prod": {
         const wrappedCommand = positionals.slice(1);
-        await runWithProd(config, wrappedCommand);
+        await runWithProd(config, wrappedCommand, {
+          dumpable: values.dumpable,
+        });
         break;
       }
     }

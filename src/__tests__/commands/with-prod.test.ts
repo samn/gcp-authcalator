@@ -200,6 +200,7 @@ describe("runWithProd", () => {
         {
           fetchOptions: { fetchFn: mockFetchFn },
           spawnFn: mockSpawnFn,
+          dumpable: true,
         },
       ),
     ).rejects.toThrow("process.exit called");
@@ -257,6 +258,7 @@ describe("runWithProd", () => {
         {
           fetchOptions: { fetchFn: mockFetchFn },
           spawnFn: mockSpawnFn,
+          dumpable: true,
         },
       );
     } catch {
@@ -365,6 +367,7 @@ describe("runWithProd", () => {
         {
           fetchOptions: { fetchFn: mockFetchFn },
           spawnFn: mockSpawnFn,
+          dumpable: true,
         },
       );
     } catch {
@@ -407,6 +410,7 @@ describe("runWithProd", () => {
         {
           fetchOptions: { fetchFn: mockFetchFn },
           spawnFn: mockSpawnFn,
+          dumpable: true,
         },
       );
     } catch {
@@ -452,6 +456,7 @@ describe("runWithProd", () => {
         ["echo", "hello"],
         {
           fetchOptions: { fetchFn: mockFetchFn },
+          dumpable: true,
         },
       ),
     ).rejects.toThrow("process.exit called");
@@ -459,6 +464,83 @@ describe("runWithProd", () => {
     expect(exitSpy).toHaveBeenCalledWith(1);
     const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
     expect(errorOutput).toContain("failed to acquire prod token");
+  });
+
+  test("calls setNonDumpable by default", async () => {
+    const mockFetchFn = mockGateFetch();
+
+    let prctlCalled = false;
+    const mockSetNonDumpable = () => {
+      prctlCalled = true;
+    };
+
+    const mockSpawnFn = (_cmd: string[], _opts: { env: Record<string, string | undefined> }) => {
+      return {
+        exited: Promise.resolve(0),
+        kill: () => {},
+      } as unknown as Subprocess;
+    };
+
+    try {
+      await runWithProd(
+        {
+          project_id: "my-proj",
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+        },
+        ["echo", "test"],
+        {
+          fetchOptions: { fetchFn: mockFetchFn },
+          spawnFn: mockSpawnFn,
+          setNonDumpableFn: mockSetNonDumpable,
+        },
+      );
+    } catch {
+      // process.exit mock throws
+    }
+
+    expect(prctlCalled).toBe(true);
+    const logOutput = logSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
+    expect(logOutput).toContain("process protection enabled (non-dumpable)");
+  });
+
+  test("skips setNonDumpable when dumpable option is true", async () => {
+    const mockFetchFn = mockGateFetch();
+
+    let prctlCalled = false;
+    const mockSetNonDumpable = () => {
+      prctlCalled = true;
+    };
+
+    const mockSpawnFn = (_cmd: string[], _opts: { env: Record<string, string | undefined> }) => {
+      return {
+        exited: Promise.resolve(0),
+        kill: () => {},
+      } as unknown as Subprocess;
+    };
+
+    try {
+      await runWithProd(
+        {
+          project_id: "my-proj",
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+        },
+        ["echo", "test"],
+        {
+          fetchOptions: { fetchFn: mockFetchFn },
+          spawnFn: mockSpawnFn,
+          dumpable: true,
+          setNonDumpableFn: mockSetNonDumpable,
+        },
+      );
+    } catch {
+      // process.exit mock throws
+    }
+
+    expect(prctlCalled).toBe(false);
+    const logOutput = logSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
+    expect(logOutput).not.toContain("process protection enabled");
   });
 
   test("propagates non-zero exit code from child process", async () => {
@@ -482,6 +564,7 @@ describe("runWithProd", () => {
         {
           fetchOptions: { fetchFn: mockFetchFn },
           spawnFn: mockSpawnFn,
+          dumpable: true,
         },
       ),
     ).rejects.toThrow("process.exit called");
