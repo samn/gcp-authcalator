@@ -1,18 +1,18 @@
 {
   "name": "gcp-authcalator",
   "version": "0.1.4",
-  "license": "MIT",
-  "module": "index.ts",
-  "type": "module",
   "private": true,
+  "license": "MIT",
+  "type": "module",
+  "module": "index.ts",
   "scripts": {
     "start": "bun run index.ts",
     "test": "bun test",
     "typecheck": "bun run tsc --noEmit",
-    "lint": "bun --bun x eslint .",
-    "lint:fix": "bun --bun x eslint --fix .",
-    "format": "prettier --write .",
-    "format:check": "prettier --check .",
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix",
+    "format": "oxfmt",
+    "format:check": "oxfmt --check",
     "check": "bun run lint && bun run format:check",
     "build": "bun run scripts/build.ts",
     "build:linux-amd64": "bun run scripts/build.ts --target=bun-linux-x64 --outfile=gcp-authcalator-linux-amd64",
@@ -20,21 +20,17 @@
     "release": "bun run scripts/release.ts",
     "prepare": "prek install"
   },
-  "devDependencies": {
-    "@eslint/js": "^10.0.1",
-    "@types/bun": "latest",
-    "eslint": "^10.0.0",
-    "eslint-config-prettier": "^10.1.8",
-    "eslint-plugin-prettier": "^5.5.5",
-    "prettier": "^3.8.1",
-    "typescript-eslint": "^8.55.0"
-  },
-  "peerDependencies": {
-    "typescript": "^5"
-  },
   "dependencies": {
     "google-auth-library": "^10.5.0",
     "smol-toml": "^1.6.0",
     "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "oxfmt": "^0.35.0",
+    "oxlint": "^1.50.0"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
   }
 }

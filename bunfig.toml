@@ -12,5 +12,5 @@ coveragePathIgnorePatterns = [
   "src/commands/with-prod.ts",
   "src/gate/confirm.ts",
   "src/gate/server.ts",
-  "src/metadata-proxy/server.ts"
+  "src/metadata-proxy/server.ts",
 ]
