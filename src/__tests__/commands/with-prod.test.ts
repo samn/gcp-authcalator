@@ -210,7 +210,9 @@ describe("runWithProd", () => {
     // Verify metadata proxy env vars are set, raw tokens are NOT exposed
     expect(capturedEnv.GCE_METADATA_HOST).toMatch(/^127\.0\.0\.1:\d+$/);
     expect(capturedEnv.GCE_METADATA_IP).toMatch(/^127\.0\.0\.1:\d+$/);
+    expect(capturedEnv.GCE_METADATA_ROOT).toMatch(/^127\.0\.0\.1:\d+$/);
     expect(capturedEnv.GCE_METADATA_IP).toBe(capturedEnv.GCE_METADATA_HOST);
+    expect(capturedEnv.GCE_METADATA_ROOT).toBe(capturedEnv.GCE_METADATA_HOST);
     expect("CLOUDSDK_AUTH_ACCESS_TOKEN" in capturedEnv).toBe(false);
     expect("CPL_GS_BEARER" in capturedEnv).toBe(false);
 
@@ -432,7 +434,9 @@ describe("runWithProd", () => {
     // Verify metadata proxy env vars ARE set
     expect(capturedEnv.GCE_METADATA_HOST).toMatch(/^127\.0\.0\.1:\d+$/);
     expect(capturedEnv.GCE_METADATA_IP).toMatch(/^127\.0\.0\.1:\d+$/);
+    expect(capturedEnv.GCE_METADATA_ROOT).toMatch(/^127\.0\.0\.1:\d+$/);
     expect(capturedEnv.GCE_METADATA_IP).toBe(capturedEnv.GCE_METADATA_HOST);
+    expect(capturedEnv.GCE_METADATA_ROOT).toBe(capturedEnv.GCE_METADATA_HOST);
 
     // Restore original env
     process.env = originalEnv;
@@ -590,6 +594,7 @@ describe("runWithProd nested sessions", () => {
     const env = getCapturedEnv();
     expect(env.GCE_METADATA_HOST).toBe("127.0.0.1:54321");
     expect(env.GCE_METADATA_IP).toBe("127.0.0.1:54321");
+    expect(env.GCE_METADATA_ROOT).toBe("127.0.0.1:54321");
   });
 
   test("passes through CLOUDSDK_CONFIG from parent session", async () => {

@@ -108,6 +108,7 @@ export async function runWithProd(
         ...stripCredentialEnvVars(process.env),
         GCE_METADATA_HOST: nestedSession.metadataHost,
         GCE_METADATA_IP: nestedSession.metadataHost,
+        GCE_METADATA_ROOT: nestedSession.metadataHost,
         CLOUDSDK_CORE_ACCOUNT: nestedSession.email,
         CLOUDSDK_CORE_PROJECT: nestedSession.projectId,
         [PROD_SESSION_ENV_VAR]: nestedSession.metadataHost,
@@ -191,6 +192,7 @@ export async function runWithProd(
       ...stripCredentialEnvVars(process.env),
       GCE_METADATA_HOST: metadataHost,
       GCE_METADATA_IP: metadataHost,
+      GCE_METADATA_ROOT: metadataHost,
       CLOUDSDK_CONFIG: gcloudConfigDir,
       // Explicitly set gcloud-specific env vars so `gcloud auth list` and
       // other gcloud commands show the correct active account and project.
