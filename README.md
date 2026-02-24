@@ -155,7 +155,7 @@ gcp-authcalator metadata-proxy --project-id my-project
 
 **Required options:** `--project-id`
 
-Set `GCE_METADATA_HOST=127.0.0.1:8173 GCE_METADATA_IP=127.0.0.1:8173` in the container environment so client libraries discover the proxy automatically.
+Set `GCE_METADATA_HOST=127.0.0.1:8173 GCE_METADATA_IP=127.0.0.1:8173 GCE_METADATA_ROOT=127.0.0.1:8173` in the container environment so client libraries discover the proxy automatically.
 
 **Endpoints:**
 
@@ -194,7 +194,7 @@ This command:
 2. Starts a temporary metadata proxy on a random port serving that token
 3. Creates an isolated `CLOUDSDK_CONFIG` directory so `gcloud` doesn't reuse cached credentials
 4. Strips credential-related environment variables (`GOOGLE_APPLICATION_CREDENTIALS`, `CLOUDSDK_AUTH_ACCESS_TOKEN`, etc.) to force the child through the proxy
-5. Spawns the wrapped command with `GCE_METADATA_HOST` and `GCE_METADATA_IP` pointing at the temporary proxy
+5. Spawns the wrapped command with `GCE_METADATA_HOST`, `GCE_METADATA_IP`, and `GCE_METADATA_ROOT` pointing at the temporary proxy
 6. Forwards signals to the child process and propagates its exit code
 
 The temporary proxy uses PID-based process restriction — only the wrapped command and its descendants can request tokens from it.
@@ -289,7 +289,8 @@ To use gcp-authcalator in a devcontainer:
    ```json
    "remoteEnv": {
      "GCE_METADATA_HOST": "127.0.0.1:8173",
-     "GCE_METADATA_IP": "127.0.0.1:8173"
+     "GCE_METADATA_IP": "127.0.0.1:8173",
+     "GCE_METADATA_ROOT": "127.0.0.1:8173"
    }
    ```
 
