@@ -161,4 +161,55 @@ describe("fetchProdToken", () => {
     const headerValue = capturedHeaders!.get("X-Wrapped-Command");
     expect(headerValue).toBeNull();
   });
+
+  test("includes scopes in token URL query parameter when scopes provided", async () => {
+    let capturedTokenUrl = "";
+
+    const fetchFn = (async (url: string) => {
+      const parsed = new URL(url);
+      if (parsed.pathname === "/token") {
+        capturedTokenUrl = url;
+        return new Response(JSON.stringify({ access_token: "tok", expires_in: 1800 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ email: "eng@example.com" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof globalThis.fetch;
+
+    await fetchProdToken("/tmp/gate.sock", {
+      fetchFn,
+      scopes: ["https://www.googleapis.com/auth/sqlservice.login"],
+    });
+
+    expect(capturedTokenUrl).toContain("level=prod");
+    expect(capturedTokenUrl).toContain("scopes=https://www.googleapis.com/auth/sqlservice.login");
+  });
+
+  test("omits scopes from token URL when scopes not provided", async () => {
+    let capturedTokenUrl = "";
+
+    const fetchFn = (async (url: string) => {
+      const parsed = new URL(url);
+      if (parsed.pathname === "/token") {
+        capturedTokenUrl = url;
+        return new Response(JSON.stringify({ access_token: "tok", expires_in: 1800 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ email: "eng@example.com" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof globalThis.fetch;
+
+    await fetchProdToken("/tmp/gate.sock", { fetchFn });
+
+    expect(capturedTokenUrl).toBe("http://localhost/token?level=prod");
+    expect(capturedTokenUrl).not.toContain("scopes");
+  });
 });

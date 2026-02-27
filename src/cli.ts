@@ -53,6 +53,7 @@ Options:
   --service-account <email> Service account email to impersonate
   --socket-path <path>     Unix socket path (default: $XDG_RUNTIME_DIR/gcp-authcalator.sock)
   -p, --port <port>        Metadata proxy port (default: 8173)
+  --scopes <scopes>        Comma-separated OAuth scopes (default: cloud-platform)
   -c, --config <path>      Path to TOML config file
   -h, --help               Show this help message
   -v, --version            Show version
@@ -87,6 +88,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       "service-account": { type: "string" },
       "socket-path": { type: "string" },
       port: { type: "string", short: "p" },
+      scopes: { type: "string" },
       config: { type: "string", short: "c" },
       help: { type: "boolean", short: "h" },
       version: { type: "boolean", short: "v" },

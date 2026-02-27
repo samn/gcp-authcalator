@@ -1,7 +1,7 @@
 import { GoogleAuth } from "google-auth-library";
 import { Impersonated } from "google-auth-library";
 import type { AuthClient } from "google-auth-library";
-import type { GateConfig } from "../config.ts";
+import { DEFAULT_SCOPES, type GateConfig } from "../config.ts";
 import type { CachedToken } from "./types.ts";
 
 /** Minimum remaining lifetime before we re-mint a cached token (5 minutes). */
@@ -9,9 +9,6 @@ const CACHE_MARGIN_MS = 5 * 60 * 1000;
 
 /** Default token lifetime for impersonated tokens (1 hour). */
 const DEFAULT_LIFETIME = 3600;
-
-/** Default scopes for impersonated (dev) tokens. */
-const DEFAULT_SCOPES = ["https://www.googleapis.com/auth/cloud-platform"];
 
 export interface AuthModuleOptions {
   /** Pre-built source client (ADC) — for testing. */
@@ -23,8 +20,8 @@ export interface AuthModuleOptions {
 }
 
 export interface AuthModule {
-  mintDevToken: () => Promise<CachedToken>;
-  mintProdToken: () => Promise<CachedToken>;
+  mintDevToken: (scopes?: string[]) => Promise<CachedToken>;
+  mintProdToken: (scopes?: string[]) => Promise<CachedToken>;
   getIdentityEmail: () => Promise<string>;
   getProjectNumber: () => Promise<string>;
   getUniverseDomain: () => Promise<string>;
@@ -33,7 +30,7 @@ export interface AuthModule {
 /**
  * Create the authentication module.
  *
- * - mintDevToken: impersonated service account token (cached, re-minted at <5 min remaining)
+ * - mintDevToken: impersonated service account token (cached per scope set, re-minted at <5 min remaining)
  * - mintProdToken: engineer's own ADC token (uncached — always fresh)
  * - getIdentityEmail: email from the ADC identity (cached for daemon lifetime)
  * - getProjectNumber: numeric project ID from Cloud Resource Manager (cached permanently)
@@ -44,13 +41,23 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
 
   // Lazily initialized clients
   let sourceClient: AuthClient | null = options.sourceClient ?? null;
-  let impersonatedClient: AuthClient | null = options.impersonatedClient ?? null;
 
-  // Caches
-  let devTokenCache: CachedToken | null = null;
+  // Per-scope caches for dev tokens (impersonated)
+  const devTokenCaches = new Map<string, CachedToken>();
+  const impersonatedClients = new Map<string, AuthClient>();
+
+  // Default impersonated client (from options, for testing)
+  const defaultImpersonatedClient: AuthClient | null = options.impersonatedClient ?? null;
+
+  // Other caches
   let emailCache: string | null = null;
   let projectNumberCache: string | null = null;
   let universeDomainCache: string | null = null;
+
+  /** Build a stable cache key from a scope set. */
+  function scopeKey(scopes: string[]): string {
+    return [...scopes].sort().join(",");
+  }
 
   async function getSourceClient(): Promise<AuthClient> {
     if (!sourceClient) {
@@ -60,20 +67,29 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
     return sourceClient;
   }
 
-  async function getImpersonatedClient(): Promise<AuthClient> {
-    if (!impersonatedClient) {
+  async function getImpersonatedClient(scopes: string[]): Promise<AuthClient> {
+    const key = scopeKey(scopes);
+
+    // Use the injected client for default scopes (testing support)
+    if (defaultImpersonatedClient && key === scopeKey(DEFAULT_SCOPES)) {
+      return defaultImpersonatedClient;
+    }
+
+    let client = impersonatedClients.get(key);
+    if (!client) {
       const source = await getSourceClient();
-      impersonatedClient = new Impersonated({
+      client = new Impersonated({
         sourceClient: source,
         targetPrincipal: config.service_account,
-        targetScopes: DEFAULT_SCOPES,
+        targetScopes: scopes,
         lifetime: DEFAULT_LIFETIME,
       });
+      impersonatedClients.set(key, client);
     }
-    return impersonatedClient;
+    return client;
   }
 
-  function isCacheValid(cached: CachedToken | null): cached is CachedToken {
+  function isCacheValid(cached: CachedToken | null | undefined): cached is CachedToken {
     if (!cached) return false;
     return cached.expires_at.getTime() - Date.now() > CACHE_MARGIN_MS;
   }
@@ -85,29 +101,45 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
     return new Date(Date.now() + DEFAULT_LIFETIME * 1000);
   }
 
-  async function mintDevToken(): Promise<CachedToken> {
-    if (isCacheValid(devTokenCache)) {
-      return devTokenCache;
+  async function mintDevToken(scopes?: string[]): Promise<CachedToken> {
+    const effectiveScopes = scopes ?? DEFAULT_SCOPES;
+    const key = scopeKey(effectiveScopes);
+
+    const cached = devTokenCaches.get(key);
+    if (isCacheValid(cached)) {
+      return cached;
     }
 
-    const client = await getImpersonatedClient();
+    const client = await getImpersonatedClient(effectiveScopes);
     const { token } = await client.getAccessToken();
 
     if (!token) {
       throw new Error("Failed to mint dev token: no access token returned");
     }
 
-    devTokenCache = {
+    const result: CachedToken = {
       access_token: token,
       expires_at: expiryFromCredentials(client),
     };
-    return devTokenCache;
+    devTokenCaches.set(key, result);
+    return result;
   }
 
-  async function mintProdToken(): Promise<CachedToken> {
+  async function mintProdToken(scopes?: string[]): Promise<CachedToken> {
     // Prod tokens use the engineer's own ADC credentials (not impersonated).
     // Never cached — always mint a fresh one.
-    const client = await getSourceClient();
+    let client: AuthClient;
+    const effectiveScopes = scopes ?? DEFAULT_SCOPES;
+
+    if (scopeKey(effectiveScopes) === scopeKey(DEFAULT_SCOPES)) {
+      // Default scopes — reuse the cached source client
+      client = await getSourceClient();
+    } else {
+      // Custom scopes — create a fresh GoogleAuth with those scopes
+      const auth = new GoogleAuth({ scopes: effectiveScopes });
+      client = await auth.getClient();
+    }
+
     const { token } = await client.getAccessToken();
 
     if (!token) {

@@ -40,6 +40,13 @@ export function expandTilde(p: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/** Default OAuth scopes when none are configured. */
+export const DEFAULT_SCOPES = ["https://www.googleapis.com/auth/cloud-platform"];
+
+// ---------------------------------------------------------------------------
 // Schemas
 // ---------------------------------------------------------------------------
 
@@ -48,6 +55,7 @@ export const ConfigSchema = z.object({
   service_account: z.email().optional(),
   socket_path: z.string().min(1).default(getDefaultSocketPath).transform(expandTilde),
   port: z.coerce.number().int().min(1).max(65535).default(8173),
+  scopes: z.array(z.string().min(1)).optional(),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
@@ -83,6 +91,7 @@ const cliToConfigKey: Record<string, keyof Config> = {
   "service-account": "service_account",
   "socket-path": "socket_path",
   port: "port",
+  scopes: "scopes",
 };
 
 /** Convert a CLI-arg values object (kebab-case keys) to config keys (snake_case). */
@@ -94,7 +103,12 @@ export function mapCliArgs(
     if (value === undefined) continue;
     const configKey = cliToConfigKey[cliKey];
     if (configKey) {
-      mapped[configKey] = value;
+      // Split comma-separated scopes string into an array
+      if (configKey === "scopes" && typeof value === "string") {
+        mapped[configKey] = value.split(",").map((s) => s.trim());
+      } else {
+        mapped[configKey] = value;
+      }
     }
   }
   return mapped;

@@ -1,4 +1,4 @@
-import type { MetadataProxyConfig } from "../config.ts";
+import { DEFAULT_SCOPES, type MetadataProxyConfig } from "../config.ts";
 import type { MetadataProxyDeps, TokenProvider } from "./types.ts";
 import { createGateClient, type GateClientOptions } from "./gate-client.ts";
 import { handleRequest } from "./handlers.ts";
@@ -19,6 +19,8 @@ export interface StartMetadataProxyServerOptions {
   quiet?: boolean;
   /** If set, only processes that are descendants of this PID may request tokens. */
   allowedAncestorPid?: number;
+  /** OAuth scopes for token requests. Defaults to cloud-platform. */
+  scopes?: string[];
 }
 
 /**
@@ -33,9 +35,11 @@ export function startMetadataProxyServer(
   config: MetadataProxyConfig,
   options: StartMetadataProxyServerOptions = {},
 ): MetadataProxyServerResult {
+  const effectiveScopes = options.scopes ?? DEFAULT_SCOPES;
+  const gateClientOpts = { ...options.gateClientOptions, scopes: effectiveScopes };
   const gateClient = options.tokenProvider
     ? null
-    : createGateClient(config.socket_path, options.gateClientOptions);
+    : createGateClient(config.socket_path, gateClientOpts);
   const provider: TokenProvider = options.tokenProvider ?? gateClient!;
 
   const deps: MetadataProxyDeps = {
@@ -44,6 +48,7 @@ export function startMetadataProxyServer(
     getUniverseDomain: gateClient?.getUniverseDomain,
     projectId: config.project_id,
     serviceAccountEmail: config.service_account,
+    scopes: effectiveScopes,
     startTime: new Date(),
   };
 

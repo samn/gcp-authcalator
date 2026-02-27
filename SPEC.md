@@ -97,6 +97,8 @@ A small HTTP server using the `google-auth-library` library. Runs on the host ma
 | `GET /universe-domain`  | Returns the GCP universe domain (resolved via GoogleAuth)                |
 | `GET /health`           | Health check                                                             |
 
+Both token endpoints accept an optional `scopes` query parameter (comma-separated) to request tokens with specific OAuth scopes (e.g., `GET /token?scopes=https://www.googleapis.com/auth/sqlservice.login`). Defaults to `cloud-platform`.
+
 **Token generation** uses `[iamcredentials.generateAccessToken](https://cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/generateAccessToken)` for dev tokens (1-hour TTL). For prod tokens, it uses the engineer's own ADC (which stays on the host).
 
 **Confirmation flow** for prod tokens:
@@ -127,6 +129,9 @@ GET /computeMetadata/v1/project/numeric-project-id
 
 GET /computeMetadata/v1/instance/service-accounts/
   → directory listing of available service accounts (returns "default")
+
+GET /computeMetadata/v1/instance/service-accounts/default/scopes
+  → newline-delimited OAuth scopes (configurable via scopes setting)
 
 GET /computeMetadata/v1/universe/universe_domain
   → universe domain (e.g. "googleapis.com", resolved via gcp-gate)
