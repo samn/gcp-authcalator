@@ -15,9 +15,8 @@ devcontainer.json and docker-compose setups.
 | Version | Hardcode current version (0.1.5), offer override | Reliable without network; update on release |
 | socat | Check and install if missing | Support various base images |
 | Kube setup | Optional, ask user | Not all projects use GKE |
-| Binary location (host) | `~/.gcp-authcalator/bin/gcp-authcalator` | Shared across projects |
-| Binary location (container) | `/usr/local/bin/gcp-authcalator` | Outside mount (different arch) |
-| Gate config | `~/.gcp-authcalator/config.toml` | Shared across projects, mounted into container |
+| Binary storage | Both in `~/.gcp-authcalator/bin/` with platform names | Shared via volume mount, no container download |
+| Gate config | `~/.gcp-authcalator/config.toml` (created by skill) | Shared across projects, mounted into container |
 | GitHub repo | `samn/gcp-authcalator` | Official releases |
 
 ## Files Created
@@ -31,9 +30,10 @@ devcontainer.json and docker-compose setups.
 1. Analyze existing `.devcontainer/` setup (json, compose, scripts)
 2. Detect container user from `remoteUser` in devcontainer.json
 3. Verify host prerequisites (ADC, service account, config file)
-4. Create `initialize.sh` (host): download binary, start gate with crash recovery
-5. Create `post-start.sh` (container): download binary, install socat, start
-   metadata-proxy + socat with crash recovery
+4. Create `initialize.sh` (host): download both host + linux-amd64 binaries,
+   start gate with crash recovery
+5. Create `post-start.sh` (container): use shared linux-amd64 binary, install
+   socat, start metadata-proxy + socat with crash recovery
 6. Modify devcontainer.json (or docker-compose.yml) with volume mount, env vars,
    and lifecycle commands
 7. Optional: set up GKE kubectl integration
