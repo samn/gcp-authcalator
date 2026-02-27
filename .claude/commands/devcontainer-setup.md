@@ -327,15 +327,15 @@ Add or merge these properties into `.devcontainer/devcontainer.json`. Replace
 ```jsonc
 {
   "mounts": [
-    "source=${localEnv:HOME}/.gcp-authcalator,target=/home/<CONTAINER_USER>/.gcp-authcalator,type=bind"
+    "source=${localEnv:HOME}/.gcp-authcalator,target=/home/<CONTAINER_USER>/.gcp-authcalator,type=bind",
   ],
   "remoteEnv": {
     "GCE_METADATA_HOST": "127.0.0.1:8173",
     "GCE_METADATA_IP": "127.0.0.1:8173",
-    "GCE_METADATA_ROOT": "127.0.0.1:8173"
+    "GCE_METADATA_ROOT": "127.0.0.1:8173",
   },
   "initializeCommand": ".devcontainer/gcp-authcalator-initialize.sh",
-  "postStartCommand": ".devcontainer/gcp-authcalator-post-start.sh"
+  "postStartCommand": ".devcontainer/gcp-authcalator-post-start.sh",
 }
 ```
 
@@ -360,7 +360,7 @@ Lifecycle commands still go in devcontainer.json:
 ```jsonc
 {
   "initializeCommand": ".devcontainer/gcp-authcalator-initialize.sh",
-  "postStartCommand": ".devcontainer/gcp-authcalator-post-start.sh"
+  "postStartCommand": ".devcontainer/gcp-authcalator-post-start.sh",
 }
 ```
 
@@ -378,8 +378,8 @@ user which approach they prefer:
    {
      "initializeCommand": {
        "existing": "<existing command>",
-       "gcp-authcalator": ".devcontainer/gcp-authcalator-initialize.sh"
-     }
+       "gcp-authcalator": ".devcontainer/gcp-authcalator-initialize.sh",
+     },
    }
    ```
 3. **Replace entirely**: Only if the user explicitly confirms
