@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Claude Code skill (`/devcontainer-setup`) for adding gcp-authcalator to a project's devcontainer configuration. Supports plain devcontainer.json and docker-compose setups, with automatic daemon restart, version management, and optional GKE kubectl integration.
+
 ## [0.2.0] - 2026-03-09
 
 ### Added
@@ -21,7 +25,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - Upgrade Bun from 1.3.9 to 1.3.10
-
 ## [0.1.5] - 2026-02-24
 
 ### Fixed
