@@ -37,5 +37,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # Finder (MacOS) folder config
 .DS_Store
 
-.claude
+# Ignore local Claude settings but track commands (skills)
+.claude/settings.json
+.claude/settings.local.json
 .cursor
