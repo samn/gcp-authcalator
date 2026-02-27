@@ -9,15 +9,15 @@ devcontainer.json and docker-compose setups.
 
 ## Design Decisions
 
-| Decision | Choice | Rationale |
-| --- | --- | --- |
-| Container user | Detect from devcontainer.json, prompt if not found | Flexible for any setup |
-| Version | Hardcode current version (0.1.5), offer override | Reliable without network; update on release |
-| socat | Check and install if missing | Support various base images |
-| Kube setup | Optional, ask user | Not all projects use GKE |
+| Decision       | Choice                                                | Rationale                                      |
+| -------------- | ----------------------------------------------------- | ---------------------------------------------- |
+| Container user | Detect from devcontainer.json, prompt if not found    | Flexible for any setup                         |
+| Version        | Hardcode current version (0.1.5), offer override      | Reliable without network; update on release    |
+| socat          | Check and install if missing                          | Support various base images                    |
+| Kube setup     | Optional, ask user                                    | Not all projects use GKE                       |
 | Binary storage | Both in `~/.gcp-authcalator/bin/` with platform names | Shared via volume mount, no container download |
-| Gate config | `~/.gcp-authcalator/config.toml` (created by skill) | Shared across projects, mounted into container |
-| GitHub repo | `samn/gcp-authcalator` | Official releases |
+| Gate config    | `~/.gcp-authcalator/config.toml` (created by skill)   | Shared across projects, mounted into container |
+| GitHub repo    | `samn/gcp-authcalator`                                | Official releases                              |
 
 ## Files Created
 
