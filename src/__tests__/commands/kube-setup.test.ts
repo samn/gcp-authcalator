@@ -319,6 +319,9 @@ describe("runKubeSetup", () => {
   });
 
   test("exits 1 when kubeconfig is not writable", async () => {
+    // Root can write to read-only files, so this test cannot work as root
+    if (process.getuid?.() === 0) return;
+
     const { chmodSync } = await import("node:fs");
     const dir = mkdtempSync(join(tmpdir(), "kube-setup-"));
     const kubeconfigPath = join(dir, "config");
