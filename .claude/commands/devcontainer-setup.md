@@ -27,6 +27,7 @@ Read the project's devcontainer configuration:
    `postStartCommand`, `postCreateCommand`)
 
 **If there is no `.devcontainer/` directory**, ask the user if they want to:
+
 - Create a minimal devcontainer setup from scratch
 - Point you to where their devcontainer config lives
 - Abort and set things up manually
@@ -49,11 +50,15 @@ confirm each one or address any that are missing:
 The gate daemon needs a config file at `~/.gcp-authcalator/config.toml`. This
 file is shared between host and container via the volume mount.
 
-Check if the user already has this file. If not, ask them for:
-- `project_id`: Their GCP project ID
-- `service_account`: The service account email to impersonate
+Check if `~/.gcp-authcalator/config.toml` exists. If it does, read it and
+confirm the settings with the user.
 
-Then tell them to create `~/.gcp-authcalator/config.toml` with:
+If it does NOT exist:
+
+1. Ask the user for their `project_id` (GCP project ID) and `service_account`
+   (email of the service account to impersonate)
+2. Create the directory `~/.gcp-authcalator/` if it doesn't exist
+3. Write the config file at `~/.gcp-authcalator/config.toml`:
 
 ```toml
 project_id = "<project-id>"
@@ -66,14 +71,21 @@ Use version **0.1.5** by default. Ask the user if they want to use a different
 version.
 
 Binary download URLs:
+
 - macOS ARM64: `https://github.com/samn/gcp-authcalator/releases/download/v<VERSION>/gcp-authcalator-darwin-arm64`
 - Linux x86_64: `https://github.com/samn/gcp-authcalator/releases/download/v<VERSION>/gcp-authcalator-linux-amd64`
 
 ## Step 5: Create the initialize script (runs on host)
 
 Create `.devcontainer/gcp-authcalator-initialize.sh`. This script runs on the
-**host machine** before the container is built. It downloads the
-host-architecture binary and starts the gate daemon.
+**host machine** before the container is built. It downloads binaries for both
+the host architecture and linux-amd64 (for the container) into the shared
+`~/.gcp-authcalator/bin/` directory, then starts the gate daemon.
+
+Both binaries live in `~/.gcp-authcalator/bin/` with platform-specific names
+(e.g., `gcp-authcalator-darwin-arm64`, `gcp-authcalator-linux-amd64`). Since
+this directory is volume-mounted into the container, the container can use the
+linux-amd64 binary directly without a separate download.
 
 Replace `<VERSION>` with the chosen version.
 
@@ -83,9 +95,9 @@ set -euo pipefail
 
 AUTHCALATOR_VERSION="<VERSION>"
 AUTHCALATOR_DIR="$HOME/.gcp-authcalator"
-AUTHCALATOR_BIN="$AUTHCALATOR_DIR/bin/gcp-authcalator"
 AUTHCALATOR_CONFIG="$AUTHCALATOR_DIR/config.toml"
 SOCKET_PATH="$AUTHCALATOR_DIR/gcp-authcalator.sock"
+GITHUB_REPO="samn/gcp-authcalator"
 
 # Detect host platform
 detect_platform() {
@@ -101,28 +113,42 @@ detect_platform() {
   esac
 }
 
-# Download binary if missing or wrong version
-ensure_binary() {
-  mkdir -p "$AUTHCALATOR_DIR/bin"
+# Download a platform-specific binary if missing or wrong version
+ensure_platform_binary() {
+  local platform="$1"
+  local bin_path="$AUTHCALATOR_DIR/bin/gcp-authcalator-${platform}"
 
-  if [[ -x "$AUTHCALATOR_BIN" ]]; then
+  if [[ -x "$bin_path" ]]; then
     local current_version
-    current_version="$("$AUTHCALATOR_BIN" version 2>/dev/null | awk '{print $1}' || echo "")"
+    current_version="$("$bin_path" version 2>/dev/null | awk '{print $1}' || echo "")"
     if [[ "$current_version" == "$AUTHCALATOR_VERSION" ]]; then
-      echo "[gcp-authcalator] Binary v$AUTHCALATOR_VERSION already installed"
+      echo "[gcp-authcalator] $platform binary v$AUTHCALATOR_VERSION already installed"
       return
     fi
-    echo "[gcp-authcalator] Upgrading from $current_version to $AUTHCALATOR_VERSION"
+    echo "[gcp-authcalator] Upgrading $platform binary from $current_version to $AUTHCALATOR_VERSION"
   fi
 
-  local platform
-  platform="$(detect_platform)"
-  local url="https://github.com/samn/gcp-authcalator/releases/download/v${AUTHCALATOR_VERSION}/gcp-authcalator-${platform}"
-
+  local url="https://github.com/${GITHUB_REPO}/releases/download/v${AUTHCALATOR_VERSION}/gcp-authcalator-${platform}"
   echo "[gcp-authcalator] Downloading v$AUTHCALATOR_VERSION for $platform..."
-  curl -fsSL "$url" -o "$AUTHCALATOR_BIN"
-  chmod +x "$AUTHCALATOR_BIN"
-  echo "[gcp-authcalator] Installed to $AUTHCALATOR_BIN"
+  curl -fsSL "$url" -o "$bin_path"
+  chmod +x "$bin_path"
+  echo "[gcp-authcalator] Installed $platform binary to $bin_path"
+}
+
+# Download both host and container binaries
+ensure_binaries() {
+  mkdir -p "$AUTHCALATOR_DIR/bin"
+
+  local host_platform
+  host_platform="$(detect_platform)"
+
+  # Always download the host platform binary
+  ensure_platform_binary "$host_platform"
+
+  # Also download linux-amd64 for the container (if host isn't already linux-amd64)
+  if [[ "$host_platform" != "linux-amd64" ]]; then
+    ensure_platform_binary "linux-amd64"
+  fi
 }
 
 # Check if gate daemon is already running and healthy
@@ -133,10 +159,14 @@ is_gate_running() {
 
 # Start gate daemon with automatic restart on crash
 start_gate() {
+  local host_platform
+  host_platform="$(detect_platform)"
+  local gate_bin="$AUTHCALATOR_DIR/bin/gcp-authcalator-${host_platform}"
+
   if [[ ! -f "$AUTHCALATOR_CONFIG" ]]; then
     echo "[gcp-authcalator] ERROR: Config not found at $AUTHCALATOR_CONFIG" >&2
     echo "[gcp-authcalator] Create it with project_id and service_account." >&2
-    echo "[gcp-authcalator] See: https://github.com/samn/gcp-authcalator#configuration" >&2
+    echo "[gcp-authcalator] See: https://github.com/${GITHUB_REPO}#configuration" >&2
     exit 1
   fi
 
@@ -148,7 +178,7 @@ start_gate() {
   echo "[gcp-authcalator] Starting gate daemon..."
   (
     while true; do
-      "$AUTHCALATOR_BIN" gate \
+      "$gate_bin" gate \
         --config "$AUTHCALATOR_CONFIG" \
         --socket-path "$SOCKET_PATH" 2>&1 \
         | sed 's/^/[gcp-authcalator gate] /' || true
@@ -170,16 +200,17 @@ start_gate() {
   echo "[gcp-authcalator] WARNING: Gate daemon may not have started. Check logs." >&2
 }
 
-ensure_binary
+ensure_binaries
 start_gate
 ```
 
 ## Step 6: Create the post-start script (runs in container)
 
 Create `.devcontainer/gcp-authcalator-post-start.sh`. This script runs **inside
-the container** each time the container starts. It downloads the linux-amd64
-binary, ensures socat is installed, and starts the metadata proxy and socat
-forwarder.
+the container** each time the container starts. It uses the linux-amd64 binary
+from the shared `~/.gcp-authcalator/bin/` directory (downloaded by the
+initialize script on the host), ensures socat is installed, and starts the
+metadata proxy and socat forwarder.
 
 Replace `<VERSION>` with the chosen version.
 
@@ -188,27 +219,26 @@ Replace `<VERSION>` with the chosen version.
 set -euo pipefail
 
 AUTHCALATOR_VERSION="<VERSION>"
-AUTHCALATOR_BIN="/usr/local/bin/gcp-authcalator"
-AUTHCALATOR_CONFIG="$HOME/.gcp-authcalator/config.toml"
-SOCKET_PATH="$HOME/.gcp-authcalator/gcp-authcalator.sock"
+AUTHCALATOR_DIR="$HOME/.gcp-authcalator"
+AUTHCALATOR_BIN="$AUTHCALATOR_DIR/bin/gcp-authcalator-linux-amd64"
+AUTHCALATOR_CONFIG="$AUTHCALATOR_DIR/config.toml"
+SOCKET_PATH="$AUTHCALATOR_DIR/gcp-authcalator.sock"
 
-# Download container binary if missing or wrong version
-ensure_binary() {
-  if [[ -x "$AUTHCALATOR_BIN" ]]; then
-    local current_version
-    current_version="$("$AUTHCALATOR_BIN" version 2>/dev/null | awk '{print $1}' || echo "")"
-    if [[ "$current_version" == "$AUTHCALATOR_VERSION" ]]; then
-      echo "[gcp-authcalator] Container binary v$AUTHCALATOR_VERSION already installed"
-      return
-    fi
-    echo "[gcp-authcalator] Upgrading container binary to v$AUTHCALATOR_VERSION"
+# Verify the container binary exists and is the right version
+verify_binary() {
+  if [[ ! -x "$AUTHCALATOR_BIN" ]]; then
+    echo "[gcp-authcalator] ERROR: Binary not found at $AUTHCALATOR_BIN" >&2
+    echo "[gcp-authcalator] The initialize script should have downloaded it." >&2
+    echo "[gcp-authcalator] Check that ~/.gcp-authcalator is mounted correctly." >&2
+    return 1
   fi
 
-  local url="https://github.com/samn/gcp-authcalator/releases/download/v${AUTHCALATOR_VERSION}/gcp-authcalator-linux-amd64"
-  echo "[gcp-authcalator] Downloading v$AUTHCALATOR_VERSION for container..."
-  sudo curl -fsSL "$url" -o "$AUTHCALATOR_BIN"
-  sudo chmod +x "$AUTHCALATOR_BIN"
-  echo "[gcp-authcalator] Installed to $AUTHCALATOR_BIN"
+  local current_version
+  current_version="$("$AUTHCALATOR_BIN" version 2>/dev/null | awk '{print $1}' || echo "")"
+  if [[ "$current_version" != "$AUTHCALATOR_VERSION" ]]; then
+    echo "[gcp-authcalator] WARNING: Expected v$AUTHCALATOR_VERSION but found v$current_version" >&2
+  fi
+  echo "[gcp-authcalator] Using container binary v$current_version"
 }
 
 # Install socat if not present
@@ -276,7 +306,7 @@ start_socat() {
   disown
 }
 
-ensure_binary
+verify_binary
 ensure_socat
 start_metadata_proxy
 start_socat
@@ -361,6 +391,7 @@ it.
 
 If the compose file has multiple services, ask the user which service is their
 devcontainer service. Look for hints:
+
 - The `service` property in devcontainer.json
 - A service named `app`, `dev`, `devcontainer`, or similar
 - The service with the most configuration
@@ -385,7 +416,7 @@ done
 
 gcloud container clusters get-credentials <CLUSTER> \
   --region <REGION> --project <PROJECT>
-gcp-authcalator kube-setup
+"$AUTHCALATOR_BIN" kube-setup
 echo "[gcp-authcalator] kubectl configured for GKE"
 ```
 
@@ -393,19 +424,20 @@ echo "[gcp-authcalator] kubectl configured for GKE"
 
 After making all changes:
 
-1. Make the shell scripts executable: `chmod +x .devcontainer/gcp-authcalator-*.sh`
+1. Make the shell scripts executable:
+   `chmod +x .devcontainer/gcp-authcalator-*.sh`
 2. Present the user with a verification summary:
 
 ```
 gcp-authcalator devcontainer setup complete!
 
 Host side:
-  - Binary: ~/.gcp-authcalator/bin/gcp-authcalator (downloaded on first run)
+  - Binaries: ~/.gcp-authcalator/bin/ (host + linux-amd64, downloaded on first run)
   - Config: ~/.gcp-authcalator/config.toml
   - Gate daemon starts automatically via initializeCommand
 
 Container side:
-  - Binary: /usr/local/bin/gcp-authcalator (downloaded on first start)
+  - Binary: ~/.gcp-authcalator/bin/gcp-authcalator-linux-amd64 (shared via mount)
   - Metadata proxy on 127.0.0.1:8173
   - socat forwarding 127.0.0.1:80 -> 127.0.0.1:8173
   - Both restart automatically on crash
