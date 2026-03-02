@@ -5,7 +5,6 @@ keeps GCP credentials on the host machine and serves downscoped, time-limited
 tokens to the container via a metadata server emulator. Production access
 requires explicit human confirmation via a desktop dialog on the host.
 
-**Current version: 0.1.5**
 **GitHub: samn/gcp-authcalator**
 
 ## Step 1: Analyze the existing devcontainer setup
@@ -67,8 +66,10 @@ service_account = "<service-account-email>"
 
 ## Step 4: Version selection
 
-Use version **0.1.5** by default. Ask the user if they want to use a different
-version.
+By default, the initialize script automatically fetches the latest release
+version from the GitHub API at runtime — no hardcoded version needed. Ask the
+user if they want to pin a specific version instead (pass `--version X.Y.Z` to
+the initialize script).
 
 Binary download URLs:
 
@@ -87,17 +88,48 @@ Both binaries live in `~/.gcp-authcalator/bin/` with platform-specific names
 this directory is volume-mounted into the container, the container can use the
 linux-amd64 binary directly without a separate download.
 
-Replace `<VERSION>` with the chosen version.
+The script fetches the latest release version from GitHub automatically. To pin
+a specific version, pass `--version X.Y.Z` as an argument.
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
-AUTHCALATOR_VERSION="<VERSION>"
 AUTHCALATOR_DIR="$HOME/.gcp-authcalator"
 AUTHCALATOR_CONFIG="$AUTHCALATOR_DIR/config.toml"
 SOCKET_PATH="$AUTHCALATOR_DIR/gcp-authcalator.sock"
 GITHUB_REPO="samn/gcp-authcalator"
+
+# Parse arguments
+AUTHCALATOR_VERSION=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --version) AUTHCALATOR_VERSION="$2"; shift 2 ;;
+    *) echo "[gcp-authcalator] Unknown argument: $1" >&2; exit 1 ;;
+  esac
+done
+
+# Fetch the latest release version from GitHub if not pinned
+resolve_version() {
+  if [[ -n "$AUTHCALATOR_VERSION" ]]; then
+    echo "[gcp-authcalator] Using pinned version: $AUTHCALATOR_VERSION"
+    return
+  fi
+
+  echo "[gcp-authcalator] Fetching latest release from GitHub..."
+  local tag_name
+  tag_name="$(curl -fsSL "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" \
+    | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"v\([^"]*\)".*/\1/')"
+
+  if [[ -z "$tag_name" ]]; then
+    echo "[gcp-authcalator] ERROR: Could not determine latest version from GitHub API" >&2
+    echo "[gcp-authcalator] Pass --version X.Y.Z to specify a version manually" >&2
+    exit 1
+  fi
+
+  AUTHCALATOR_VERSION="$tag_name"
+  echo "[gcp-authcalator] Latest release: v$AUTHCALATOR_VERSION"
+}
 
 # Detect host platform
 detect_platform() {
@@ -200,6 +232,7 @@ start_gate() {
   echo "[gcp-authcalator] WARNING: Gate daemon may not have started. Check logs." >&2
 }
 
+resolve_version
 ensure_binaries
 start_gate
 ```
@@ -212,19 +245,16 @@ from the shared `~/.gcp-authcalator/bin/` directory (downloaded by the
 initialize script on the host), ensures socat is installed, and starts the
 metadata proxy and socat forwarder.
 
-Replace `<VERSION>` with the chosen version.
-
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
-AUTHCALATOR_VERSION="<VERSION>"
 AUTHCALATOR_DIR="$HOME/.gcp-authcalator"
 AUTHCALATOR_BIN="$AUTHCALATOR_DIR/bin/gcp-authcalator-linux-amd64"
 AUTHCALATOR_CONFIG="$AUTHCALATOR_DIR/config.toml"
 SOCKET_PATH="$AUTHCALATOR_DIR/gcp-authcalator.sock"
 
-# Verify the container binary exists and is the right version
+# Verify the container binary exists
 verify_binary() {
   if [[ ! -x "$AUTHCALATOR_BIN" ]]; then
     echo "[gcp-authcalator] ERROR: Binary not found at $AUTHCALATOR_BIN" >&2
@@ -235,9 +265,6 @@ verify_binary() {
 
   local current_version
   current_version="$("$AUTHCALATOR_BIN" version 2>/dev/null | awk '{print $1}' || echo "")"
-  if [[ "$current_version" != "$AUTHCALATOR_VERSION" ]]; then
-    echo "[gcp-authcalator] WARNING: Expected v$AUTHCALATOR_VERSION but found v$current_version" >&2
-  fi
   echo "[gcp-authcalator] Using container binary v$current_version"
 }
 
