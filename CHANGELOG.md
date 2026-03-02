@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - Upgrade Bun from 1.3.9 to 1.3.10
+
 ## [0.1.5] - 2026-02-24
 
 ### Fixed
