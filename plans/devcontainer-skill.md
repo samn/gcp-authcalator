@@ -12,7 +12,7 @@ devcontainer.json and docker-compose setups.
 | Decision       | Choice                                                | Rationale                                      |
 | -------------- | ----------------------------------------------------- | ---------------------------------------------- |
 | Container user | Detect from devcontainer.json, prompt if not found    | Flexible for any setup                         |
-| Version        | Hardcode current version (0.1.5), offer override      | Reliable without network; update on release    |
+| Version        | Fetch latest from GitHub API, allow `--version` pin   | No manual updates on release                   |
 | socat          | Check and install if missing                          | Support various base images                    |
 | Kube setup     | Optional, ask user                                    | Not all projects use GKE                       |
 | Binary storage | Both in `~/.gcp-authcalator/bin/` with platform names | Shared via volume mount, no container download |
