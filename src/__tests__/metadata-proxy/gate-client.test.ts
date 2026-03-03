@@ -135,6 +135,48 @@ describe("createGateClient", () => {
   });
 });
 
+describe("createGateClient — scopes", () => {
+  test("includes scopes query param in token URL when scopes configured", async () => {
+    let capturedUrl = "";
+    const fetchFn = (async (url: string) => {
+      capturedUrl = url;
+      return new Response(
+        JSON.stringify({ access_token: "tok", expires_in: 3600, token_type: "Bearer" }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as unknown as typeof globalThis.fetch;
+
+    const client = createGateClient("/tmp/test.sock", {
+      fetchFn,
+      scopes: [
+        "https://www.googleapis.com/auth/sqlservice.login",
+        "https://www.googleapis.com/auth/devstorage.read_only",
+      ],
+    });
+
+    await client.getToken();
+    expect(capturedUrl).toBe(
+      "http://localhost/token?scopes=https://www.googleapis.com/auth/sqlservice.login,https://www.googleapis.com/auth/devstorage.read_only",
+    );
+  });
+
+  test("uses bare /token URL when no scopes configured", async () => {
+    let capturedUrl = "";
+    const fetchFn = (async (url: string) => {
+      capturedUrl = url;
+      return new Response(
+        JSON.stringify({ access_token: "tok", expires_in: 3600, token_type: "Bearer" }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as unknown as typeof globalThis.fetch;
+
+    const client = createGateClient("/tmp/test.sock", { fetchFn });
+
+    await client.getToken();
+    expect(capturedUrl).toBe("http://localhost/token");
+  });
+});
+
 describe("createGateClient — getNumericProjectId", () => {
   test("fetches numeric project ID from gate daemon", async () => {
     const { fetchFn } = mockProjectNumberFetch("987654321098");

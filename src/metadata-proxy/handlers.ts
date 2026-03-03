@@ -83,7 +83,7 @@ export async function handleRequest(req: Request, deps: MetadataProxyDeps): Prom
       case "/computeMetadata/v1/instance/service-accounts/default/email":
         return handleEmail(deps);
       case "/computeMetadata/v1/instance/service-accounts/default/scopes":
-        return handleScopes();
+        return handleScopes(deps);
       case "/computeMetadata/v1/instance/service-accounts/default/identity":
         return handleIdentity(url);
       case "/computeMetadata/v1/instance/service-accounts/default":
@@ -162,8 +162,8 @@ function handleEmail(deps: MetadataProxyDeps): Response {
  * Returns the OAuth scopes granted to the service account as a
  * newline-delimited list (mirrors real GCE metadata behavior).
  */
-function handleScopes(): Response {
-  return textResponse("https://www.googleapis.com/auth/cloud-platform\n");
+function handleScopes(deps: MetadataProxyDeps): Response {
+  return textResponse(deps.scopes.join("\n") + "\n");
 }
 
 /**
@@ -206,7 +206,7 @@ function handleServiceAccounts(url: URL, deps: MetadataProxyDeps): Response {
   const saInfo = {
     aliases: ["default"],
     email: email ?? "default",
-    scopes: ["https://www.googleapis.com/auth/cloud-platform"],
+    scopes: deps.scopes,
   };
 
   if (recursive) {
@@ -241,7 +241,7 @@ function handleServiceAccountInfo(url: URL, deps: MetadataProxyDeps): Response {
     return jsonResponse({
       aliases: ["default"],
       email: deps.serviceAccountEmail ?? "default",
-      scopes: ["https://www.googleapis.com/auth/cloud-platform"],
+      scopes: deps.scopes,
     });
   }
 
