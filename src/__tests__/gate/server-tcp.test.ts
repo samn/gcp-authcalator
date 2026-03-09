@@ -205,6 +205,32 @@ describe("Gate TCP+mTLS server", () => {
     }
   });
 
+  test("fails with helpful error when TLS certs are missing", async () => {
+    const tempDir = makeTempDir();
+    const socketPath = join(tempDir, "gate.sock");
+    const tlsDir = join(tempDir, "tls"); // empty, no certs generated
+
+    const config: GateConfig = {
+      project_id: "test-project",
+      service_account: "sa@test-project.iam.gserviceaccount.com",
+      socket_path: socketPath,
+      port: 8173,
+      gate_tls_port: 0,
+      tls_dir: tlsDir,
+    };
+
+    await expect(
+      startGateServer(config, {
+        authOptions: {
+          sourceClient: mockClient("source-tok"),
+          impersonatedClient: mockClient("dev-tok"),
+          fetchFn: mockFetch("test@example.com"),
+        },
+        auditLogDir: join(tempDir, "audit"),
+      }),
+    ).rejects.toThrow(/init-tls/);
+  });
+
   test("does not start TCP server when gate_tls_port is not configured", async () => {
     const tempDir = makeTempDir();
     const socketPath = join(tempDir, "gate.sock");

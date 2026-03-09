@@ -7,7 +7,7 @@ import { createConfirmModule, type ConfirmOptions } from "./confirm.ts";
 import { createAuditModule } from "./audit.ts";
 import { createProdRateLimiter } from "./rate-limit.ts";
 import { handleRequest } from "./handlers.ts";
-import { ensureTlsFiles } from "../tls/store.ts";
+import { loadAndValidateTlsFiles } from "../tls/store.ts";
 import type { BunRequestInit } from "./connection.ts";
 
 export interface GateServerResult {
@@ -117,7 +117,7 @@ export async function startGateServer(
   // Optional TCP+mTLS server for remote devcontainer support
   let tcpServer: ReturnType<typeof Bun.serve> | undefined;
   if (config.gate_tls_port !== undefined) {
-    const tlsFiles = await ensureTlsFiles(config.tls_dir);
+    const tlsFiles = loadAndValidateTlsFiles(config.tls_dir);
     tcpServer = Bun.serve({
       hostname: "127.0.0.1",
       port: config.gate_tls_port,

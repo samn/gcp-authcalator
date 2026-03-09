@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import {
   ensureTlsFiles,
   loadTlsFiles,
+  loadAndValidateTlsFiles,
   loadClientBundle,
   loadClientBundleFromBase64,
   getClientBundleBase64,
@@ -139,6 +140,46 @@ describe("loadTlsFiles", () => {
 
   test("throws when files are missing", () => {
     expect(() => loadTlsFiles("/tmp/nonexistent-tls-dir")).toThrow();
+  });
+});
+
+describe("loadAndValidateTlsFiles", () => {
+  test("loads valid TLS files", async () => {
+    const dir = join(makeTempDir(), "tls");
+    await ensureTlsFiles(dir);
+
+    const files = loadAndValidateTlsFiles(dir);
+    expect(files.caCert).toContain("-----BEGIN CERTIFICATE-----");
+    expect(files.serverCert).toContain("-----BEGIN CERTIFICATE-----");
+    expect(files.clientCert).toContain("-----BEGIN CERTIFICATE-----");
+  });
+
+  test("throws with init-tls hint when certs are missing", () => {
+    const dir = join(makeTempDir(), "empty-tls");
+    expect(() => loadAndValidateTlsFiles(dir)).toThrow(/init-tls/);
+  });
+
+  test("throws with init-tls hint when CA cert is expired", async () => {
+    const dir = join(makeTempDir(), "tls");
+    await ensureTlsFiles(dir);
+
+    // Replace the CA cert with an expired one
+    const x509 = await import("@peculiar/x509");
+    const algorithm = { name: "ECDSA" as const, namedCurve: "P-256" as const };
+    const keys = await crypto.subtle.generateKey(algorithm, true, ["sign", "verify"]);
+    const expiredCert = await x509.X509CertificateGenerator.createSelfSigned({
+      serialNumber: "01",
+      name: "CN=expired",
+      notBefore: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000),
+      notAfter: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000),
+      keys,
+      signingAlgorithm: { name: "ECDSA", hash: "SHA-256" },
+      extensions: [new x509.BasicConstraintsExtension(true, 0, true)],
+    });
+    writeFileSync(join(dir, "ca.pem"), expiredCert.toString("pem"));
+
+    expect(() => loadAndValidateTlsFiles(dir)).toThrow(/CA certificate has expired/);
+    expect(() => loadAndValidateTlsFiles(dir)).toThrow(/init-tls/);
   });
 });
 

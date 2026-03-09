@@ -162,7 +162,7 @@ gcp-authcalator gate \
 
 **Required options:** `--project-id`, `--service-account`
 
-**Optional:** `--gate-tls-port` enables a TCP listener with mutual TLS, allowing remote devcontainers to connect. TLS certificates are auto-generated on first use and stored in `~/.gcp-authcalator/tls/`.
+**Optional:** `--gate-tls-port` enables a TCP listener with mutual TLS, allowing remote devcontainers to connect. TLS certificates must be generated first with `gcp-authcalator init-tls` and are stored in `~/.gcp-authcalator/tls/`.
 
 **API endpoints** (over Unix socket or TCP+mTLS):
 
@@ -258,7 +258,7 @@ gcp-authcalator init-tls --show-path
 
 The client bundle (CA cert + client cert + client key) is a single base64-encoded string that you distribute to remote environments via secrets or environment variables. It is **not** a GCP credential — it only authorizes communication with the gate daemon.
 
-Certificates are generated with ECDSA P-256 with a 90-day lifetime for all certificates (CA, server, and client). All certs are treated as ephemeral and regenerated together. Gate auto-regenerates expired certs on startup and warns you to update remote bundles.
+Certificates are generated with ECDSA P-256 with a 90-day lifetime for all certificates (CA, server, and client). All certs are treated as ephemeral and regenerated together. Gate requires certs to exist and be valid — it will refuse to start with `--gate-tls-port` if certs are missing or expired, directing you to run `init-tls`.
 
 ### `kube-setup` — Patch kubeconfig for GKE
 
@@ -371,61 +371,70 @@ For remote environments where the devcontainer runs on a different machine (SSH 
 ### SSH remote devcontainer
 
 ```bash
-# 1. On laptop — start gate with TCP:
+# 1. On laptop — generate TLS certificates (one-time):
+gcp-authcalator init-tls
+
+# 2. On laptop — start gate with TCP:
 gcp-authcalator gate --project-id my-project \
   --service-account dev@my-project.iam.gserviceaccount.com \
   --gate-tls-port 8174
 
-# 2. On laptop — get the client bundle:
+# 3. On laptop — get the client bundle:
 gcp-authcalator init-tls --bundle-b64
 # Copy the output
 
-# 3. SSH with port forwarding:
+# 4. SSH with port forwarding:
 ssh -R 8174:localhost:8174 remote-host
 
-# 4. On remote host — set env vars (e.g., in .bashrc or devcontainer.json):
+# 5. On remote host — set env vars (e.g., in .bashrc or devcontainer.json):
 export GCP_AUTHCALATOR_TLS_BUNDLE_B64="<paste>"
 export GCP_AUTHCALATOR_GATE_URL="https://localhost:8174"
 
-# 5. In devcontainer — metadata-proxy auto-detects env vars:
+# 6. In devcontainer — metadata-proxy auto-detects env vars:
 gcp-authcalator metadata-proxy --project-id my-project
 ```
 
 ### GitHub Codespaces
 
 ```bash
-# 1. On laptop — start gate with TCP:
+# 1. On laptop — generate TLS certificates (one-time):
+gcp-authcalator init-tls
+
+# 2. On laptop — start gate with TCP:
 gcp-authcalator gate --project-id my-project \
   --service-account dev@my-project.iam.gserviceaccount.com \
   --gate-tls-port 8174
 
-# 2. Set Codespace secrets (one-time):
+# 3. Set Codespace secrets (one-time):
 gcp-authcalator init-tls --bundle-b64 | gh secret set GCP_AUTHCALATOR_TLS_BUNDLE_B64
 gh secret set GCP_AUTHCALATOR_GATE_URL --body "https://localhost:8174"
 
-# 3. Forward port to Codespace:
+# 4. Forward port to Codespace:
 gh cs ports forward 8174:8174
 
-# 4. In Codespace — metadata-proxy auto-detects env vars:
+# 5. In Codespace — metadata-proxy auto-detects env vars:
 gcp-authcalator metadata-proxy --project-id my-project
 ```
 
 ### Coder
 
 ```bash
-# 1. On laptop — start gate with TCP:
+# 1. On laptop — generate TLS certificates (one-time):
+gcp-authcalator init-tls
+
+# 2. On laptop — start gate with TCP:
 gcp-authcalator gate --project-id my-project \
   --service-account dev@my-project.iam.gserviceaccount.com \
   --gate-tls-port 8174
 
-# 2. Set workspace env vars (via Coder UI or template):
+# 3. Set workspace env vars (via Coder UI or template):
 #    GCP_AUTHCALATOR_TLS_BUNDLE_B64=<from init-tls --bundle-b64>
 #    GCP_AUTHCALATOR_GATE_URL=https://localhost:8174
 
-# 3. Forward port to workspace:
+# 4. Forward port to workspace:
 coder port-forward my-workspace --tcp 8174:8174
 
-# 4. In workspace — metadata-proxy auto-detects env vars:
+# 5. In workspace — metadata-proxy auto-detects env vars:
 gcp-authcalator metadata-proxy --project-id my-project
 ```
 

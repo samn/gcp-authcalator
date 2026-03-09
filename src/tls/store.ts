@@ -51,13 +51,11 @@ export async function ensureTlsFiles(tlsDir?: string, force?: boolean): Promise<
     }
 
     if (caExpired) {
-      console.warn("gate: CA certificate expired — regenerating all TLS certificates");
-      console.warn("gate: Remote client bundles need updating!");
-      console.warn("gate: Run: gcp-authcalator init-tls --bundle-b64");
+      console.warn("tls: CA certificate expired — regenerating all TLS certificates");
+      console.warn("tls: Remote client bundles need updating!");
     } else {
-      console.warn("gate: TLS certificates regenerated (previous certs expired)");
-      console.warn("gate: Remote client bundles need updating!");
-      console.warn("gate: Run: gcp-authcalator init-tls --bundle-b64");
+      console.warn("tls: TLS certificates regenerated (previous certs expired)");
+      console.warn("tls: Remote client bundles need updating!");
     }
   }
 
@@ -85,6 +83,50 @@ export async function ensureTlsFiles(tlsDir?: string, force?: boolean): Promise<
     clientCert: client.cert,
     clientKey: client.key,
   };
+}
+
+/**
+ * Load and validate TLS files from disk.
+ *
+ * Unlike `ensureTlsFiles`, this does NOT generate certificates — it only loads
+ * existing ones and checks that they are not expired. Use this in the gate
+ * server so that certs are only created explicitly via `init-tls`.
+ *
+ * Throws actionable errors when files are missing or expired.
+ */
+export function loadAndValidateTlsFiles(tlsDir?: string): TlsFiles {
+  const dir = tlsDir ?? DEFAULT_TLS_DIR;
+
+  let files: TlsFiles;
+  try {
+    files = loadTlsFiles(dir);
+  } catch {
+    throw new Error(
+      `TLS certificates not found in ${dir}\n` +
+        `  Run 'gcp-authcalator init-tls' to generate them.`,
+    );
+  }
+
+  if (isCertExpired(files.caCert)) {
+    throw new Error(
+      `TLS CA certificate has expired in ${dir}\n` +
+        `  Run 'gcp-authcalator init-tls' to regenerate.`,
+    );
+  }
+  if (isCertExpired(files.serverCert)) {
+    throw new Error(
+      `TLS server certificate has expired in ${dir}\n` +
+        `  Run 'gcp-authcalator init-tls' to regenerate.`,
+    );
+  }
+  if (isCertExpired(files.clientCert)) {
+    throw new Error(
+      `TLS client certificate has expired in ${dir}\n` +
+        `  Run 'gcp-authcalator init-tls' to regenerate.`,
+    );
+  }
+
+  return files;
 }
 
 /** Load TLS files from disk. Throws if files are missing. */
