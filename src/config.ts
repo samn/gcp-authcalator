@@ -116,6 +116,34 @@ export function mapCliArgs(
 // Config loading
 // ---------------------------------------------------------------------------
 
+/** All config keys that can be set via environment variables. */
+const configKeys: readonly (keyof Config)[] = [
+  "project_id",
+  "service_account",
+  "socket_path",
+  "port",
+  "gate_tls_port",
+  "tls_dir",
+  "gate_url",
+  "tls_bundle",
+];
+
+/**
+ * Read config values from GCP_AUTHCALATOR_* environment variables.
+ * Each config key maps to GCP_AUTHCALATOR_{KEY_UPPERCASED}.
+ */
+export function loadEnvVars(): Record<string, unknown> {
+  const envValues: Record<string, unknown> = {};
+  for (const key of configKeys) {
+    const envKey = `GCP_AUTHCALATOR_${key.toUpperCase()}`;
+    const value = process.env[envKey];
+    if (value !== undefined) {
+      envValues[key] = value;
+    }
+  }
+  return envValues;
+}
+
 /** Read and parse a TOML config file. */
 export function loadTOML(configPath: string): Record<string, unknown> {
   const content = readFileSync(configPath, "utf-8");
@@ -123,26 +151,14 @@ export function loadTOML(configPath: string): Record<string, unknown> {
 }
 
 /**
- * Load configuration by merging TOML file values with CLI arg overrides,
- * then validating through the base ConfigSchema.
+ * Load configuration by merging TOML file values, CLI arg overrides, and
+ * environment variables, then validating through the base ConfigSchema.
  *
- * Precedence: CLI args > TOML file > schema defaults.
- */
-/**
- * Load configuration by merging env vars, TOML file values, and CLI arg overrides,
- * then validating through the base ConfigSchema.
- *
- * Precedence: CLI args > TOML file > env vars > schema defaults.
+ * Precedence: env vars > CLI args > TOML file > schema defaults.
  */
 export function loadConfig(cliValues: Record<string, unknown>, configPath?: string): Config {
-  const envValues: Record<string, unknown> = {};
-  if (process.env.GCP_AUTHCALATOR_GATE_URL) {
-    envValues.gate_url = process.env.GCP_AUTHCALATOR_GATE_URL;
-  }
-  if (process.env.GCP_AUTHCALATOR_TLS_BUNDLE) {
-    envValues.tls_bundle = process.env.GCP_AUTHCALATOR_TLS_BUNDLE;
-  }
+  const envValues = loadEnvVars();
   const fileValues = configPath ? loadTOML(configPath) : {};
-  const merged = { ...envValues, ...fileValues, ...cliValues };
+  const merged = { ...fileValues, ...cliValues, ...envValues };
   return ConfigSchema.parse(merged);
 }

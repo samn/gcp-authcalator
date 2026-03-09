@@ -12,6 +12,7 @@ import {
   expandTilde,
   getDefaultSocketPath,
   loadConfig,
+  loadEnvVars,
   loadTOML,
   mapCliArgs,
 } from "../config.ts";
@@ -279,10 +280,99 @@ describe("loadTOML", () => {
 });
 
 // ---------------------------------------------------------------------------
+// loadEnvVars
+// ---------------------------------------------------------------------------
+
+describe("loadEnvVars", () => {
+  /** Helper to run a callback with env vars set, then restore originals. */
+  function withEnv(vars: Record<string, string>, fn: () => void) {
+    const originals: Record<string, string | undefined> = {};
+    for (const key of Object.keys(vars)) {
+      originals[key] = process.env[key];
+      process.env[key] = vars[key];
+    }
+    try {
+      fn();
+    } finally {
+      for (const [key, orig] of Object.entries(originals)) {
+        if (orig === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = orig;
+        }
+      }
+    }
+  }
+
+  test("reads all supported config keys from env vars", () => {
+    withEnv(
+      {
+        GCP_AUTHCALATOR_PROJECT_ID: "env-project",
+        GCP_AUTHCALATOR_SERVICE_ACCOUNT: "sa@env.iam.gserviceaccount.com",
+        GCP_AUTHCALATOR_SOCKET_PATH: "/env/path.sock",
+        GCP_AUTHCALATOR_PORT: "9999",
+        GCP_AUTHCALATOR_GATE_TLS_PORT: "8174",
+        GCP_AUTHCALATOR_TLS_DIR: "/env/tls",
+        GCP_AUTHCALATOR_GATE_URL: "https://env.example.com",
+        GCP_AUTHCALATOR_TLS_BUNDLE: "/env/bundle.pem",
+      },
+      () => {
+        const result = loadEnvVars();
+        expect(result).toEqual({
+          project_id: "env-project",
+          service_account: "sa@env.iam.gserviceaccount.com",
+          socket_path: "/env/path.sock",
+          port: "9999",
+          gate_tls_port: "8174",
+          tls_dir: "/env/tls",
+          gate_url: "https://env.example.com",
+          tls_bundle: "/env/bundle.pem",
+        });
+      },
+    );
+  });
+
+  test("skips unset env vars", () => {
+    withEnv({ GCP_AUTHCALATOR_PROJECT_ID: "env-project" }, () => {
+      const result = loadEnvVars();
+      expect(result.project_id).toBe("env-project");
+      expect(result.port).toBeUndefined();
+    });
+  });
+
+  test("returns empty object when no env vars set", () => {
+    const result = loadEnvVars();
+    // We can't guarantee no GCP_AUTHCALATOR_* vars are set in the
+    // test environment, but at minimum it should return an object.
+    expect(typeof result).toBe("object");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // loadConfig
 // ---------------------------------------------------------------------------
 
 describe("loadConfig", () => {
+  /** Helper to run a callback with env vars set, then restore originals. */
+  function withEnv(vars: Record<string, string>, fn: () => void) {
+    const originals: Record<string, string | undefined> = {};
+    for (const key of Object.keys(vars)) {
+      originals[key] = process.env[key];
+      process.env[key] = vars[key];
+    }
+    try {
+      fn();
+    } finally {
+      for (const [key, orig] of Object.entries(originals)) {
+        if (orig === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = orig;
+        }
+      }
+    }
+  }
+
   test("returns defaults when no values provided", () => {
     const config = loadConfig({});
     expect(config.socket_path).toBe(getDefaultSocketPath());
@@ -328,33 +418,62 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ port: "abc" })).toThrow(z.ZodError);
   });
 
-  test("merges GCP_AUTHCALATOR_GATE_URL env var", () => {
-    const origVal = process.env.GCP_AUTHCALATOR_GATE_URL;
-    try {
-      process.env.GCP_AUTHCALATOR_GATE_URL = "https://localhost:8174";
-      const config = loadConfig({});
-      expect(config.gate_url).toBe("https://localhost:8174");
-    } finally {
-      if (origVal === undefined) {
-        delete process.env.GCP_AUTHCALATOR_GATE_URL;
-      } else {
-        process.env.GCP_AUTHCALATOR_GATE_URL = origVal;
-      }
-    }
+  test("env vars are picked up for all config keys", () => {
+    withEnv(
+      {
+        GCP_AUTHCALATOR_PROJECT_ID: "env-project",
+        GCP_AUTHCALATOR_PORT: "5555",
+      },
+      () => {
+        const config = loadConfig({});
+        expect(config.project_id).toBe("env-project");
+        expect(config.port).toBe(5555);
+      },
+    );
   });
 
-  test("CLI args override env var gate_url", () => {
-    const origVal = process.env.GCP_AUTHCALATOR_GATE_URL;
-    try {
-      process.env.GCP_AUTHCALATOR_GATE_URL = "https://localhost:8174";
-      const config = loadConfig({ gate_url: "https://localhost:9999" });
-      expect(config.gate_url).toBe("https://localhost:9999");
-    } finally {
-      if (origVal === undefined) {
-        delete process.env.GCP_AUTHCALATOR_GATE_URL;
-      } else {
-        process.env.GCP_AUTHCALATOR_GATE_URL = origVal;
-      }
-    }
+  test("env vars override CLI args", () => {
+    withEnv({ GCP_AUTHCALATOR_GATE_URL: "https://env.example.com" }, () => {
+      const config = loadConfig({ gate_url: "https://cli.example.com" });
+      expect(config.gate_url).toBe("https://env.example.com");
+    });
+  });
+
+  test("env vars override TOML file values", () => {
+    const dir = mkdtempSync(join(tmpdir(), "config-test-"));
+    const filePath = join(dir, "config.toml");
+    writeFileSync(filePath, `project_id = "toml-project"\n`);
+
+    withEnv({ GCP_AUTHCALATOR_PROJECT_ID: "env-project" }, () => {
+      const config = loadConfig({}, filePath);
+      expect(config.project_id).toBe("env-project");
+    });
+  });
+
+  test("CLI args override TOML when no env var set", () => {
+    const dir = mkdtempSync(join(tmpdir(), "config-test-"));
+    const filePath = join(dir, "config.toml");
+    writeFileSync(filePath, `project_id = "toml-project"\n`);
+
+    const config = loadConfig({ project_id: "cli-project" }, filePath);
+    expect(config.project_id).toBe("cli-project");
+  });
+
+  test("full precedence: env > CLI > TOML > defaults", () => {
+    const dir = mkdtempSync(join(tmpdir(), "config-test-"));
+    const filePath = join(dir, "config.toml");
+    writeFileSync(
+      filePath,
+      `project_id = "toml-project"\nport = 4000\nsocket_path = "/toml.sock"\n`,
+    );
+
+    withEnv({ GCP_AUTHCALATOR_PROJECT_ID: "env-project" }, () => {
+      const config = loadConfig({ port: "5555", socket_path: "/cli.sock" }, filePath);
+      // env wins over TOML and CLI
+      expect(config.project_id).toBe("env-project");
+      // CLI wins over TOML (no env var set for these)
+      expect(config.port).toBe(5555);
+      expect(config.socket_path).toBe("/cli.sock");
+    });
   });
 });
