@@ -148,15 +148,15 @@ describe("loadAndValidateTlsFiles", () => {
     const dir = join(makeTempDir(), "tls");
     await ensureTlsFiles(dir);
 
-    const files = loadAndValidateTlsFiles(dir);
+    const files = await loadAndValidateTlsFiles(dir);
     expect(files.caCert).toContain("-----BEGIN CERTIFICATE-----");
     expect(files.serverCert).toContain("-----BEGIN CERTIFICATE-----");
     expect(files.clientCert).toContain("-----BEGIN CERTIFICATE-----");
   });
 
-  test("throws with init-tls hint when certs are missing", () => {
+  test("throws with init-tls hint when certs are missing", async () => {
     const dir = join(makeTempDir(), "empty-tls");
-    expect(() => loadAndValidateTlsFiles(dir)).toThrow(/init-tls/);
+    await expect(loadAndValidateTlsFiles(dir)).rejects.toThrow(/init-tls/);
   });
 
   test("throws with init-tls hint when CA cert is expired", async () => {
@@ -178,8 +178,70 @@ describe("loadAndValidateTlsFiles", () => {
     });
     writeFileSync(join(dir, "ca.pem"), expiredCert.toString("pem"));
 
-    expect(() => loadAndValidateTlsFiles(dir)).toThrow(/CA certificate has expired/);
-    expect(() => loadAndValidateTlsFiles(dir)).toThrow(/init-tls/);
+    await expect(loadAndValidateTlsFiles(dir)).rejects.toThrow(/CA certificate has expired/);
+    await expect(loadAndValidateTlsFiles(dir)).rejects.toThrow(/init-tls/);
+  });
+
+  test("throws when server cert is not signed by the CA", async () => {
+    const dir = join(makeTempDir(), "tls");
+    await ensureTlsFiles(dir);
+
+    // Replace the server cert with one signed by a different CA
+    const { generateCA } = await import("../../tls/ca.ts");
+    const { generateServerCert } = await import("../../tls/certs.ts");
+    const wrongCA = await generateCA();
+    const wrongServerCert = await generateServerCert(wrongCA.caCert, wrongCA.caKey);
+    writeFileSync(join(dir, "server.pem"), wrongServerCert.cert);
+    writeFileSync(join(dir, "server-key.pem"), wrongServerCert.key);
+
+    await expect(loadAndValidateTlsFiles(dir)).rejects.toThrow(
+      /server certificate signature is invalid/,
+    );
+    await expect(loadAndValidateTlsFiles(dir)).rejects.toThrow(/init-tls/);
+  });
+
+  test("throws when client cert is not signed by the CA", async () => {
+    const dir = join(makeTempDir(), "tls");
+    await ensureTlsFiles(dir);
+
+    // Replace the client cert with one signed by a different CA
+    const { generateCA } = await import("../../tls/ca.ts");
+    const { generateClientCert } = await import("../../tls/certs.ts");
+    const wrongCA = await generateCA();
+    const wrongClientCert = await generateClientCert(wrongCA.caCert, wrongCA.caKey);
+    writeFileSync(join(dir, "client.pem"), wrongClientCert.cert);
+    writeFileSync(join(dir, "client-key.pem"), wrongClientCert.key);
+
+    await expect(loadAndValidateTlsFiles(dir)).rejects.toThrow(
+      /client certificate signature is invalid/,
+    );
+    await expect(loadAndValidateTlsFiles(dir)).rejects.toThrow(/init-tls/);
+  });
+
+  test("throws when CA cert is malformed", async () => {
+    const dir = join(makeTempDir(), "tls");
+    await ensureTlsFiles(dir);
+
+    writeFileSync(
+      join(dir, "ca.pem"),
+      "-----BEGIN CERTIFICATE-----\ngarbage\n-----END CERTIFICATE-----\n",
+    );
+
+    await expect(loadAndValidateTlsFiles(dir)).rejects.toThrow(/CA certificate is malformed/);
+    await expect(loadAndValidateTlsFiles(dir)).rejects.toThrow(/init-tls/);
+  });
+
+  test("throws when server cert is malformed", async () => {
+    const dir = join(makeTempDir(), "tls");
+    await ensureTlsFiles(dir);
+
+    writeFileSync(
+      join(dir, "server.pem"),
+      "-----BEGIN CERTIFICATE-----\ngarbage\n-----END CERTIFICATE-----\n",
+    );
+
+    await expect(loadAndValidateTlsFiles(dir)).rejects.toThrow(/server certificate is malformed/);
+    await expect(loadAndValidateTlsFiles(dir)).rejects.toThrow(/init-tls/);
   });
 });
 

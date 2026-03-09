@@ -117,7 +117,7 @@ export async function startGateServer(
   // Optional TCP+mTLS server for remote devcontainer support
   let tcpServer: ReturnType<typeof Bun.serve> | undefined;
   if (config.gate_tls_port !== undefined) {
-    const tlsFiles = loadAndValidateTlsFiles(config.tls_dir);
+    const tlsFiles = await loadAndValidateTlsFiles(config.tls_dir);
     tcpServer = Bun.serve({
       hostname: "127.0.0.1",
       port: config.gate_tls_port,

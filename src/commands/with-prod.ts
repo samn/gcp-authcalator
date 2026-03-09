@@ -131,7 +131,7 @@ export async function runWithProd(
   console.log("with-prod: requesting prod-level token from gcp-gate...");
   let tokenResult;
   try {
-    const conn = buildGateConnection(wpConfig);
+    const conn = await buildGateConnection(wpConfig);
     tokenResult = await fetchProdToken(conn, {
       ...options.fetchOptions,
       command: wrappedCommand,
