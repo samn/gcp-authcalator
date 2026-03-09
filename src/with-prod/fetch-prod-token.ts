@@ -1,3 +1,5 @@
+import type { GateConnection } from "../gate/connection.ts";
+
 export interface FetchProdTokenOptions {
   /** Override fetch for testing. */
   fetchFn?: typeof globalThis.fetch;
@@ -13,9 +15,31 @@ export interface ProdTokenResult {
 }
 
 /**
+ * Build the base URL and extra fetch options for a gate connection.
+ */
+function connectionFetchOpts(conn: GateConnection): { baseUrl: string; extraOpts: RequestInit } {
+  if (conn.mode === "unix") {
+    return {
+      baseUrl: "http://localhost",
+      extraOpts: { unix: conn.socketPath } as RequestInit,
+    };
+  }
+  return {
+    baseUrl: conn.gateUrl,
+    extraOpts: {
+      tls: {
+        cert: conn.clientCert,
+        key: conn.clientKey,
+        ca: conn.caCert,
+      },
+    } as RequestInit,
+  };
+}
+
+/**
  * One-shot fetch of a prod-level token and engineer identity from gcp-gate.
  *
- * 1. Hits `/token?level=prod` on the Unix socket (triggers host-side confirmation).
+ * 1. Hits `/token?level=prod` (triggers host-side confirmation).
  * 2. Hits `/identity` to retrieve the engineer's email address.
  *
  * The email is needed so the temporary metadata proxy can advertise a real
@@ -23,18 +47,21 @@ export interface ProdTokenResult {
  * recognises email-keyed accounts.
  */
 export async function fetchProdToken(
-  socketPath: string,
+  conn: GateConnection,
   options: FetchProdTokenOptions = {},
 ): Promise<ProdTokenResult> {
   const fetchFn = options.fetchFn ?? globalThis.fetch;
+  const { baseUrl, extraOpts } = connectionFetchOpts(conn);
+
   const headers: Record<string, string> = {};
   if (options.command && options.command.length > 0) {
     headers["X-Wrapped-Command"] = JSON.stringify(options.command);
   }
-  const unixOpts = { unix: socketPath, headers } as RequestInit;
+
+  const fetchOpts = { ...extraOpts, headers };
 
   // Fetch prod token (may trigger host-side confirmation dialog)
-  const tokenRes = await fetchFn("http://localhost/token?level=prod", unixOpts);
+  const tokenRes = await fetchFn(`${baseUrl}/token?level=prod`, fetchOpts);
 
   if (!tokenRes.ok) {
     const text = await tokenRes.text();
@@ -48,7 +75,7 @@ export async function fetchProdToken(
   }
 
   // Fetch engineer identity
-  const identityRes = await fetchFn("http://localhost/identity", unixOpts);
+  const identityRes = await fetchFn(`${baseUrl}/identity`, extraOpts);
 
   if (!identityRes.ok) {
     const text = await identityRes.text();

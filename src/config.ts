@@ -48,6 +48,14 @@ export const ConfigSchema = z.object({
   service_account: z.email().optional(),
   socket_path: z.string().min(1).default(getDefaultSocketPath).transform(expandTilde),
   port: z.coerce.number().int().min(1).max(65535).default(8173),
+  tcp_port: z.coerce.number().int().min(1).max(65535).optional(),
+  tls_dir: z.string().min(1).transform(expandTilde).optional(),
+  gate_url: z
+    .string()
+    .min(1)
+    .refine((v) => v.startsWith("https://"), { message: "gate_url must use https://" })
+    .optional(),
+  tls_bundle: z.string().min(1).transform(expandTilde).optional(),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
@@ -83,6 +91,10 @@ const cliToConfigKey: Record<string, keyof Config> = {
   "service-account": "service_account",
   "socket-path": "socket_path",
   port: "port",
+  "tcp-port": "tcp_port",
+  "tls-dir": "tls_dir",
+  "gate-url": "gate_url",
+  "tls-bundle": "tls_bundle",
 };
 
 /** Convert a CLI-arg values object (kebab-case keys) to config keys (snake_case). */
@@ -116,8 +128,21 @@ export function loadTOML(configPath: string): Record<string, unknown> {
  *
  * Precedence: CLI args > TOML file > schema defaults.
  */
+/**
+ * Load configuration by merging env vars, TOML file values, and CLI arg overrides,
+ * then validating through the base ConfigSchema.
+ *
+ * Precedence: CLI args > TOML file > env vars > schema defaults.
+ */
 export function loadConfig(cliValues: Record<string, unknown>, configPath?: string): Config {
+  const envValues: Record<string, unknown> = {};
+  if (process.env.GCP_AUTHCALATOR_GATE_URL) {
+    envValues.gate_url = process.env.GCP_AUTHCALATOR_GATE_URL;
+  }
+  if (process.env.GCP_AUTHCALATOR_TLS_BUNDLE) {
+    envValues.tls_bundle = process.env.GCP_AUTHCALATOR_TLS_BUNDLE;
+  }
   const fileValues = configPath ? loadTOML(configPath) : {};
-  const merged = { ...fileValues, ...cliValues };
+  const merged = { ...envValues, ...fileValues, ...cliValues };
   return ConfigSchema.parse(merged);
 }

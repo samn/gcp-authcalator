@@ -112,6 +112,45 @@ describe("ConfigSchema", () => {
     const config = ConfigSchema.parse({ socket_path: "~" });
     expect(config.socket_path).toBe(homedir());
   });
+
+  test("accepts valid tcp_port", () => {
+    const config = ConfigSchema.parse({ tcp_port: 8174 });
+    expect(config.tcp_port).toBe(8174);
+  });
+
+  test("tcp_port is optional", () => {
+    const config = ConfigSchema.parse({});
+    expect(config.tcp_port).toBeUndefined();
+  });
+
+  test("rejects invalid tcp_port", () => {
+    expect(() => ConfigSchema.parse({ tcp_port: 0 })).toThrow(z.ZodError);
+    expect(() => ConfigSchema.parse({ tcp_port: 70000 })).toThrow(z.ZodError);
+  });
+
+  test("gate_url must use https://", () => {
+    expect(() => ConfigSchema.parse({ gate_url: "http://localhost:8174" })).toThrow(z.ZodError);
+  });
+
+  test("accepts valid https gate_url", () => {
+    const config = ConfigSchema.parse({ gate_url: "https://localhost:8174" });
+    expect(config.gate_url).toBe("https://localhost:8174");
+  });
+
+  test("gate_url is optional", () => {
+    const config = ConfigSchema.parse({});
+    expect(config.gate_url).toBeUndefined();
+  });
+
+  test("expands ~ in tls_dir", () => {
+    const config = ConfigSchema.parse({ tls_dir: "~/.tls" });
+    expect(config.tls_dir).toBe(join(homedir(), ".tls"));
+  });
+
+  test("expands ~ in tls_bundle", () => {
+    const config = ConfigSchema.parse({ tls_bundle: "~/.tls/bundle.pem" });
+    expect(config.tls_bundle).toBe(join(homedir(), ".tls/bundle.pem"));
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -199,6 +238,21 @@ describe("mapCliArgs", () => {
     const result = mapCliArgs({ config: "/some/path", help: true });
     expect(result).toEqual({});
   });
+
+  test("maps new TLS-related CLI keys", () => {
+    const result = mapCliArgs({
+      "tcp-port": "8174",
+      "tls-dir": "~/.tls",
+      "gate-url": "https://localhost:8174",
+      "tls-bundle": "/path/to/bundle.pem",
+    });
+    expect(result).toEqual({
+      tcp_port: "8174",
+      tls_dir: "~/.tls",
+      gate_url: "https://localhost:8174",
+      tls_bundle: "/path/to/bundle.pem",
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -272,5 +326,35 @@ describe("loadConfig", () => {
 
   test("throws ZodError for invalid merged config", () => {
     expect(() => loadConfig({ port: "abc" })).toThrow(z.ZodError);
+  });
+
+  test("merges GCP_AUTHCALATOR_GATE_URL env var", () => {
+    const origVal = process.env.GCP_AUTHCALATOR_GATE_URL;
+    try {
+      process.env.GCP_AUTHCALATOR_GATE_URL = "https://localhost:8174";
+      const config = loadConfig({});
+      expect(config.gate_url).toBe("https://localhost:8174");
+    } finally {
+      if (origVal === undefined) {
+        delete process.env.GCP_AUTHCALATOR_GATE_URL;
+      } else {
+        process.env.GCP_AUTHCALATOR_GATE_URL = origVal;
+      }
+    }
+  });
+
+  test("CLI args override env var gate_url", () => {
+    const origVal = process.env.GCP_AUTHCALATOR_GATE_URL;
+    try {
+      process.env.GCP_AUTHCALATOR_GATE_URL = "https://localhost:8174";
+      const config = loadConfig({ gate_url: "https://localhost:9999" });
+      expect(config.gate_url).toBe("https://localhost:9999");
+    } finally {
+      if (origVal === undefined) {
+        delete process.env.GCP_AUTHCALATOR_GATE_URL;
+      } else {
+        process.env.GCP_AUTHCALATOR_GATE_URL = origVal;
+      }
+    }
   });
 });

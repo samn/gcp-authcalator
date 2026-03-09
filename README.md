@@ -15,9 +15,11 @@ gcp-authcalator solves this by keeping credentials on the host and making the co
 2. A **metadata server emulator** (`metadata-proxy`) runs inside the container, serving those downscoped tokens transparently to all Google Cloud client libraries. No application code changes needed.
 3. **Production-level access requires explicit human confirmation** — a desktop dialog or terminal prompt on the host — so no automated process can silently escalate privileges.
 
-Credentials never enter Docker. The Unix socket is the only channel, and the host daemon controls what tokens are issued.
+Credentials never enter Docker. The Unix socket (local) or TCP+mTLS connection (remote) is the only channel, and the host daemon controls what tokens are issued.
 
 ## Architecture
+
+### Local devcontainer (Unix socket)
 
 ```
 ┌─────────────────────────────────────────────┐
@@ -42,6 +44,21 @@ Credentials never enter Docker. The Unix socket is the only channel, and the hos
 │                    │ GCE_METADATA_HOST      │
 │               elevated process              │
 └─────────────────────────────────────────────┘
+```
+
+### Remote devcontainer (TCP + mTLS)
+
+For remote environments (SSH devcontainers, GitHub Codespaces, Coder), the gate daemon also listens on a TCP port secured with mutual TLS. Credentials still never leave the developer's machine.
+
+```
+Developer's Laptop                          Remote Host / Codespace / Coder
+┌─────────────────────┐                     ┌──────────────────────────────┐
+│  ADC credentials    │                     │  Devcontainer                │
+│  gcp-gate daemon    │◄── mTLS over ───────│  gcp-metadata-proxy          │
+│    TCP :8174        │    forwarded port    │    (127.0.0.1:8173)          │
+│  Confirmation UI    │                     │  with-prod                   │
+│  CA + server cert   │                     │  CA cert + client cert/key   │
+└─────────────────────┘                     └──────────────────────────────┘
 ```
 
 ## Prerequisites
@@ -79,8 +96,8 @@ This produces a single compiled `gcp-authcalator` binary.
 
 ## Configuration
 
-Settings can be provided via CLI flags, a TOML config file, or both.
-CLI flags take precedence over the config file, which takes precedence over defaults.
+Settings can be provided via CLI flags, a TOML config file, environment variables, or a combination.
+Precedence: CLI flags > TOML file > environment variables > defaults.
 
 ### CLI flags
 
@@ -89,8 +106,20 @@ CLI flags take precedence over the config file, which takes precedence over defa
 --service-account <email>  Service account email to impersonate
 --socket-path <path>       Unix socket path (default: $XDG_RUNTIME_DIR/gcp-authcalator.sock)
 -p, --port <port>          Metadata proxy port (default: 8173)
+--tcp-port <port>          Gate TCP+mTLS listener port (enables remote devcontainer support)
+--tls-dir <path>           TLS certificate directory (default: ~/.gcp-authcalator/tls/)
+--gate-url <url>           Gate URL for remote connections (must use https://)
+--tls-bundle <path>        Path to TLS client bundle file
 -c, --config <path>        Path to TOML config file
 ```
+
+### Environment variables
+
+| Variable                         | Description                                              |
+| -------------------------------- | -------------------------------------------------------- |
+| `GCP_AUTHCALATOR_GATE_URL`       | Gate URL for remote connections (same as `--gate-url`)   |
+| `GCP_AUTHCALATOR_TLS_BUNDLE`     | Path to TLS client bundle file (same as `--tls-bundle`)  |
+| `GCP_AUTHCALATOR_TLS_BUNDLE_B64` | Base64-encoded TLS client bundle (preferred for secrets) |
 
 ### TOML config file
 
@@ -100,6 +129,10 @@ service_account = "dev-runner@my-gcp-project.iam.gserviceaccount.com"
 # socket_path defaults to $XDG_RUNTIME_DIR/gcp-authcalator.sock
 # (or ~/.gcp-authcalator/gcp-authcalator.sock if XDG_RUNTIME_DIR is unset)
 port = 8173
+
+# Remote devcontainer support (optional):
+# tcp_port = 8174       # Enable TCP+mTLS listener on gate
+# gate_url = "https://localhost:8174"  # Point metadata-proxy at remote gate
 ```
 
 Pass the file with `--config`:
@@ -112,17 +145,26 @@ gcp-authcalator gate --config config.toml
 
 ### `gate` — Host-side token daemon
 
-Runs on the **host machine**. Listens on a Unix domain socket and mints GCP access tokens.
+Runs on the **host machine**. Listens on a Unix domain socket and mints GCP access tokens. Optionally also listens on a TCP port with mutual TLS for remote devcontainer support.
 
 ```bash
+# Local only (Unix socket):
 gcp-authcalator gate \
   --project-id my-project \
   --service-account dev-runner@my-project.iam.gserviceaccount.com
+
+# Local + remote (Unix socket + TCP+mTLS):
+gcp-authcalator gate \
+  --project-id my-project \
+  --service-account dev-runner@my-project.iam.gserviceaccount.com \
+  --tcp-port 8174
 ```
 
 **Required options:** `--project-id`, `--service-account`
 
-**API endpoints** (over Unix socket):
+**Optional:** `--tcp-port` enables a TCP listener with mutual TLS, allowing remote devcontainers to connect. TLS certificates are auto-generated on first use and stored in `~/.gcp-authcalator/tls/`.
+
+**API endpoints** (over Unix socket or TCP+mTLS):
 
 | Endpoint                | Behavior                                                         |
 | ----------------------- | ---------------------------------------------------------------- |
@@ -174,7 +216,7 @@ Endpoints returning "JSON or directory listing" respond with JSON when `?recursi
 
 Service account paths that use an email identifier (e.g., `.../service-accounts/sa@project.iam.gserviceaccount.com/token`) are automatically aliased to `default`, since the proxy serves a single set of credentials. This ensures compatibility with `gcloud` and other client libraries that resolve accounts by email.
 
-The proxy fetches tokens from the `gate` daemon via the Unix socket and caches them locally, re-fetching when less than 5 minutes of lifetime remain.
+The proxy fetches tokens from the `gate` daemon via a Unix socket (local) or TCP+mTLS (remote) and caches them locally, re-fetching when less than 5 minutes of lifetime remain. The transport is determined automatically based on whether `--gate-url` or `GCP_AUTHCALATOR_GATE_URL` is configured.
 
 ### `with-prod` — Elevation wrapper
 
@@ -198,6 +240,25 @@ This command:
 6. Forwards signals to the child process and propagates its exit code
 
 The temporary proxy uses PID-based process restriction — only the wrapped command and its descendants can request tokens from it.
+
+### `init-tls` — TLS certificate management
+
+Generates TLS certificates for remote devcontainer support. Run this on the **developer's laptop**.
+
+```bash
+# Generate all TLS certificates:
+gcp-authcalator init-tls
+
+# Print the base64-encoded client bundle (for setting as a secret):
+gcp-authcalator init-tls --bundle-b64
+
+# Print just the TLS directory path:
+gcp-authcalator init-tls --show-path
+```
+
+The client bundle (CA cert + client cert + client key) is a single base64-encoded string that you distribute to remote environments via secrets or environment variables. It is **not** a GCP credential — it only authorizes communication with the gate daemon.
+
+Certificates are generated with ECDSA P-256: 90-day lifetime for server/client certs, 1-year for the CA. Gate auto-regenerates expired certs on startup and warns you to update remote bundles.
 
 ### `kube-setup` — Patch kubeconfig for GKE
 
@@ -303,6 +364,79 @@ To use gcp-authcalator in a devcontainer:
 
    This ensures `kubectl` works correctly under both normal and `with-prod` usage.
 
+## Remote devcontainer setup
+
+For remote environments where the devcontainer runs on a different machine (SSH remote, GitHub Codespaces, Coder), use TCP+mTLS instead of a Unix socket.
+
+### SSH remote devcontainer
+
+```bash
+# 1. On laptop — start gate with TCP:
+gcp-authcalator gate --project-id my-project \
+  --service-account dev@my-project.iam.gserviceaccount.com \
+  --tcp-port 8174
+
+# 2. On laptop — get the client bundle:
+gcp-authcalator init-tls --bundle-b64
+# Copy the output
+
+# 3. SSH with port forwarding:
+ssh -R 8174:localhost:8174 remote-host
+
+# 4. On remote host — set env vars (e.g., in .bashrc or devcontainer.json):
+export GCP_AUTHCALATOR_TLS_BUNDLE_B64="<paste>"
+export GCP_AUTHCALATOR_GATE_URL="https://localhost:8174"
+
+# 5. In devcontainer — metadata-proxy auto-detects env vars:
+gcp-authcalator metadata-proxy --project-id my-project
+```
+
+### GitHub Codespaces
+
+```bash
+# 1. On laptop — start gate with TCP:
+gcp-authcalator gate --project-id my-project \
+  --service-account dev@my-project.iam.gserviceaccount.com \
+  --tcp-port 8174
+
+# 2. Set Codespace secrets (one-time):
+gcp-authcalator init-tls --bundle-b64 | gh secret set GCP_AUTHCALATOR_TLS_BUNDLE_B64
+gh secret set GCP_AUTHCALATOR_GATE_URL --body "https://localhost:8174"
+
+# 3. Forward port to Codespace:
+gh cs ports forward 8174:8174
+
+# 4. In Codespace — metadata-proxy auto-detects env vars:
+gcp-authcalator metadata-proxy --project-id my-project
+```
+
+### Coder
+
+```bash
+# 1. On laptop — start gate with TCP:
+gcp-authcalator gate --project-id my-project \
+  --service-account dev@my-project.iam.gserviceaccount.com \
+  --tcp-port 8174
+
+# 2. Set workspace env vars (via Coder UI or template):
+#    GCP_AUTHCALATOR_TLS_BUNDLE_B64=<from init-tls --bundle-b64>
+#    GCP_AUTHCALATOR_GATE_URL=https://localhost:8174
+
+# 3. Forward port to workspace:
+coder port-forward my-workspace --tcp 8174:8174
+
+# 4. In workspace — metadata-proxy auto-detects env vars:
+gcp-authcalator metadata-proxy --project-id my-project
+```
+
+### Port forwarding resilience
+
+When port forwarding drops (SSH disconnect, Codespace timeout):
+
+- **Dev tokens**: metadata-proxy continues serving cached tokens for up to 55 minutes. New token requests fail with a clear connection error.
+- **Prod tokens**: `with-prod` requests fail immediately with a descriptive error.
+- **Reconnection**: Automatic when port forwarding resumes — no restart of metadata-proxy required.
+
 ## Security model
 
 ### Threat model
@@ -313,6 +447,7 @@ gcp-authcalator is designed for environments where a coding agent (or other untr
 
 - **Credentials never enter the container.** The host daemon holds ADC; the container only receives short-lived, downscoped tokens. Even if the container is fully compromised, the attacker gets only a dev service account token — not the engineer's identity.
 - **Cross-user isolation.** The Unix socket is set to `0600` (owner-only) and lives in a `0700` directory (`$XDG_RUNTIME_DIR` or `~/.gcp-authcalator/`). Processes running as other OS users cannot connect. **For strongest isolation, run coding agents as a separate OS user** — they will be unable to access the socket at all.
+- **Mutual TLS for remote transport.** When using TCP for remote devcontainers, both gate and the client verify each other's identity via self-signed certificates. The gate only listens on localhost (port forwarding is required for remote access). The `gate_url` config option enforces `https://` — plaintext `http://` connections are rejected at config parse time.
 - **Human-in-the-loop for production access.** Prod tokens require explicit confirmation via a desktop dialog (`osascript` on macOS, `zenity` on Linux) or terminal prompt on the host. If no interactive method is available, access is denied.
 - **Rate limiting** prevents automated brute-forcing of the confirmation flow: one dialog at a time, a 5-second cooldown after denial, and a maximum of 5 attempts per minute.
 
@@ -328,6 +463,8 @@ gcp-authcalator is designed for environments where a coding agent (or other untr
 
 - A malicious process running as the **same user** with sufficient sophistication (e.g., `ptrace`, reading `/proc/*/mem`) can potentially extract tokens from a running process. Full same-user isolation requires OS-level sandboxing beyond what gcp-authcalator provides.
 - Once the engineer approves a prod token request, the elevated token is available to the approved process tree for its lifetime (~1 hour). gcp-authcalator cannot revoke it early.
+- **Stolen client bundle** (remote mode): An attacker with the client cert can authenticate to gate over a forwarded port. Mitigation: client bundle has 90-day expiry; bundle files are `0600`; gate only listens on localhost; prod tokens still require confirmation dialog.
+- **Bundle in env var**: `GCP_AUTHCALATOR_TLS_BUNDLE_B64` is cleared from `process.env` immediately after reading to limit exposure window. The bundle only authorizes gate communication, not GCP access directly.
 
 ## Development
 

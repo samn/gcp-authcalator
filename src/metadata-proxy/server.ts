@@ -1,4 +1,5 @@
 import type { MetadataProxyConfig } from "../config.ts";
+import type { GateConnection } from "../gate/connection.ts";
 import type { MetadataProxyDeps, TokenProvider } from "./types.ts";
 import { createGateClient, type GateClientOptions } from "./gate-client.ts";
 import { handleRequest } from "./handlers.ts";
@@ -19,6 +20,8 @@ export interface StartMetadataProxyServerOptions {
   quiet?: boolean;
   /** If set, only processes that are descendants of this PID may request tokens. */
   allowedAncestorPid?: number;
+  /** Gate connection config. If not provided, defaults to Unix socket from config.socket_path. */
+  gateConnection?: GateConnection;
 }
 
 /**
@@ -33,9 +36,14 @@ export function startMetadataProxyServer(
   config: MetadataProxyConfig,
   options: StartMetadataProxyServerOptions = {},
 ): MetadataProxyServerResult {
+  const conn: GateConnection = options.gateConnection ?? {
+    mode: "unix",
+    socketPath: config.socket_path,
+  };
+
   const gateClient = options.tokenProvider
     ? null
-    : createGateClient(config.socket_path, options.gateClientOptions);
+    : createGateClient(conn, options.gateClientOptions);
   const provider: TokenProvider = options.tokenProvider ?? gateClient!;
 
   const deps: MetadataProxyDeps = {
@@ -91,7 +99,11 @@ export function startMetadataProxyServer(
     console.log("metadata-proxy: starting GCE metadata server emulator");
     console.log(`  project:     ${config.project_id}`);
     console.log(`  port:        ${server.port}`);
-    console.log(`  socket path: ${config.socket_path}`);
+    if (conn.mode === "unix") {
+      console.log(`  gate:        Unix socket at ${conn.socketPath}`);
+    } else {
+      console.log(`  gate:        TCP+mTLS to ${conn.gateUrl}`);
+    }
     console.log("  endpoints:");
     console.log(
       "    GET /                                                        → detection ping",

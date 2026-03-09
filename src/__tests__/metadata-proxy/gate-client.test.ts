@@ -2,7 +2,16 @@ import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createGateClient, checkGateSocket } from "../../metadata-proxy/gate-client.ts";
+import {
+  createGateClient,
+  checkGateSocket,
+  checkGateConnection,
+} from "../../metadata-proxy/gate-client.ts";
+import type { GateConnection } from "../../gate/connection.ts";
+
+function unixConn(socketPath: string): GateConnection {
+  return { mode: "unix", socketPath };
+}
 
 function mockFetch(
   token: string,
@@ -50,7 +59,7 @@ function mockProjectNumberFetch(projectNumber: string): {
 describe("createGateClient", () => {
   test("fetches token from gate daemon", async () => {
     const { fetchFn } = mockFetch("test-token-abc");
-    const client = createGateClient("/tmp/test.sock", { fetchFn });
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
 
     const result = await client.getToken();
     expect(result.access_token).toBe("test-token-abc");
@@ -60,7 +69,7 @@ describe("createGateClient", () => {
 
   test("caches token on subsequent calls", async () => {
     const { fetchFn, callCount } = mockFetch("cached-token");
-    const client = createGateClient("/tmp/test.sock", { fetchFn });
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
 
     const first = await client.getToken();
     const second = await client.getToken();
@@ -87,7 +96,7 @@ describe("createGateClient", () => {
       );
     }) as unknown as typeof globalThis.fetch;
 
-    const client = createGateClient("/tmp/test.sock", { fetchFn });
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
 
     const first = await client.getToken();
     expect(first.access_token).toBe("token-1");
@@ -100,7 +109,7 @@ describe("createGateClient", () => {
 
   test("throws on non-OK response", async () => {
     const fetchFn = mockFetchError(500, '{"error":"internal error"}');
-    const client = createGateClient("/tmp/test.sock", { fetchFn });
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
 
     await expect(client.getToken()).rejects.toThrow("gcp-gate returned 500");
   });
@@ -112,7 +121,7 @@ describe("createGateClient", () => {
         headers: { "Content-Type": "application/json" },
       })) as unknown as typeof globalThis.fetch;
 
-    const client = createGateClient("/tmp/test.sock", { fetchFn });
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
 
     await expect(client.getToken()).rejects.toThrow("no access_token");
   });
@@ -124,7 +133,7 @@ describe("createGateClient", () => {
         headers: { "Content-Type": "application/json" },
       })) as unknown as typeof globalThis.fetch;
 
-    const client = createGateClient("/tmp/test.sock", { fetchFn });
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
 
     const result = await client.getToken();
     // Should expire roughly 1 hour from now
@@ -138,7 +147,7 @@ describe("createGateClient", () => {
 describe("createGateClient — getNumericProjectId", () => {
   test("fetches numeric project ID from gate daemon", async () => {
     const { fetchFn } = mockProjectNumberFetch("987654321098");
-    const client = createGateClient("/tmp/test.sock", { fetchFn });
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
 
     const result = await client.getNumericProjectId();
     expect(result).toBe("987654321098");
@@ -146,7 +155,7 @@ describe("createGateClient — getNumericProjectId", () => {
 
   test("caches numeric project ID on subsequent calls", async () => {
     const { fetchFn, callCount } = mockProjectNumberFetch("111222333444");
-    const client = createGateClient("/tmp/test.sock", { fetchFn });
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
 
     const first = await client.getNumericProjectId();
     const second = await client.getNumericProjectId();
@@ -158,7 +167,7 @@ describe("createGateClient — getNumericProjectId", () => {
 
   test("throws on non-OK response", async () => {
     const fetchFn = mockFetchError(500, '{"error":"CRM API failed"}');
-    const client = createGateClient("/tmp/test.sock", { fetchFn });
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
 
     await expect(client.getNumericProjectId()).rejects.toThrow("gcp-gate returned 500");
   });
@@ -170,7 +179,7 @@ describe("createGateClient — getNumericProjectId", () => {
         headers: { "Content-Type": "application/json" },
       })) as unknown as typeof globalThis.fetch;
 
-    const client = createGateClient("/tmp/test.sock", { fetchFn });
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
 
     await expect(client.getNumericProjectId()).rejects.toThrow("no project_number");
   });
@@ -249,5 +258,24 @@ describe("checkGateSocket", () => {
     } finally {
       tempServer.stop(true);
     }
+  });
+});
+
+describe("checkGateConnection", () => {
+  test("delegates to checkGateSocket for unix mode", async () => {
+    await expect(
+      checkGateConnection({ mode: "unix", socketPath: "/tmp/nonexistent.sock" }),
+    ).rejects.toThrow(/socket not found/);
+  });
+
+  test("throws on TCP connection failure", async () => {
+    const conn: GateConnection = {
+      mode: "tcp",
+      gateUrl: "https://localhost:19999",
+      caCert: "dummy",
+      clientCert: "dummy",
+      clientKey: "dummy",
+    };
+    await expect(checkGateConnection(conn)).rejects.toThrow(/Could not connect/);
   });
 });

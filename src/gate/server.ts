@@ -7,9 +7,11 @@ import { createConfirmModule, type ConfirmOptions } from "./confirm.ts";
 import { createAuditModule } from "./audit.ts";
 import { createProdRateLimiter } from "./rate-limit.ts";
 import { handleRequest } from "./handlers.ts";
+import { ensureTlsFiles } from "../tls/store.ts";
 
 export interface GateServerResult {
   server: ReturnType<typeof Bun.serve>;
+  tcpServer?: ReturnType<typeof Bun.serve>;
   stop: () => void;
 }
 
@@ -111,6 +113,26 @@ export async function startGateServer(
   // connect and request tokens.
   chmodSync(config.socket_path, 0o600);
 
+  // Optional TCP+mTLS server for remote devcontainer support
+  let tcpServer: ReturnType<typeof Bun.serve> | undefined;
+  if (config.tcp_port !== undefined) {
+    const tlsFiles = await ensureTlsFiles(config.tls_dir);
+    tcpServer = Bun.serve({
+      hostname: "127.0.0.1",
+      port: config.tcp_port,
+      tls: {
+        cert: tlsFiles.serverCert,
+        key: tlsFiles.serverKey,
+        ca: tlsFiles.caCert,
+        requestCert: true,
+        rejectUnauthorized: true,
+      },
+      fetch(req) {
+        return handleRequest(req, deps);
+      },
+    });
+  }
+
   // Capture the inode so stop() only removes the socket we created,
   // not one created by a replacement instance.
   const socketIno = lstatSync(config.socket_path).ino;
@@ -118,6 +140,11 @@ export async function startGateServer(
   function stop() {
     try {
       server.stop(true);
+    } catch {
+      // Already stopped
+    }
+    try {
+      tcpServer?.stop(true);
     } catch {
       // Already stopped
     }
@@ -146,6 +173,9 @@ export async function startGateServer(
   console.log(`  project:         ${config.project_id}`);
   console.log(`  service account: ${config.service_account}`);
   console.log(`  socket path:     ${config.socket_path}`);
+  if (tcpServer) {
+    console.log(`  tcp listener:    127.0.0.1:${config.tcp_port} (mTLS)`);
+  }
   console.log("  endpoints:");
   console.log("    GET /token            → dev-scoped access token");
   console.log("    GET /token?level=prod → prod token (with confirmation)");
@@ -154,5 +184,5 @@ export async function startGateServer(
   console.log("    GET /universe-domain  → GCP universe domain");
   console.log("    GET /health           → health check");
 
-  return { server, stop };
+  return { server, tcpServer, stop };
 }
