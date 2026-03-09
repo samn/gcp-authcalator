@@ -1,4 +1,9 @@
 import { existsSync, lstatSync } from "node:fs";
+import {
+  type GateConnection,
+  type BunRequestInit,
+  connectionFetchOpts,
+} from "../gate/connection.ts";
 import type { CachedToken, GateClient } from "./types.ts";
 
 /** Minimum remaining lifetime before we re-fetch a cached token (5 minutes). */
@@ -7,6 +12,47 @@ const CACHE_MARGIN_MS = 5 * 60 * 1000;
 export interface GateClientOptions {
   /** Override fetch for testing. */
   fetchFn?: typeof globalThis.fetch;
+}
+
+/**
+ * Verify that the gcp-gate daemon is reachable.
+ *
+ * For Unix mode: checks socket file exists on disk and sends GET /health.
+ * For TCP mode: sends GET /health with mTLS client certificate.
+ */
+export async function checkGateConnection(
+  conn: GateConnection,
+  fetchFn: typeof globalThis.fetch = globalThis.fetch,
+): Promise<void> {
+  if (conn.mode === "unix") {
+    return checkGateSocket(conn.socketPath, fetchFn);
+  }
+
+  // TCP mode — health check with mTLS
+  let res: Response;
+  try {
+    res = await fetchFn(`${conn.gateUrl}/health`, {
+      tls: {
+        cert: conn.clientCert,
+        key: conn.clientKey,
+        ca: conn.caCert,
+      },
+      signal: AbortSignal.timeout(3_000),
+    } as BunRequestInit);
+  } catch {
+    throw new Error(
+      `Could not connect to gcp-gate at ${conn.gateUrl}\n` +
+        `  Ensure gcp-gate is running with --gate-tls-port and port forwarding is active.`,
+    );
+  }
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(
+      `gcp-gate health check failed (HTTP ${res.status})${text ? `: ${text}` : ""}\n` +
+        `  The daemon may be in a bad state. Try restarting gcp-gate.`,
+    );
+  }
 }
 
 /**
@@ -41,7 +87,7 @@ export async function checkGateSocket(
     res = await fetchFn("http://localhost/health", {
       unix: socketPath,
       signal: AbortSignal.timeout(3_000),
-    } as RequestInit);
+    } as BunRequestInit);
   } catch {
     throw new Error(
       `Could not connect to gcp-gate at ${socketPath}\n` +
@@ -61,15 +107,19 @@ export async function checkGateSocket(
 
 /**
  * Create a gate client that fetches tokens and project metadata from the
- * gcp-gate daemon over a Unix socket.
+ * gcp-gate daemon over a Unix socket or TCP+mTLS connection.
  *
  * - Caches tokens in memory; re-fetches when remaining lifetime < 5 minutes
  * - Caches the numeric project ID permanently (immutable value)
  * - Caches the universe domain permanently (immutable value)
  * - Accepts an optional fetchFn for test injection
  */
-export function createGateClient(socketPath: string, options: GateClientOptions = {}): GateClient {
+export function createGateClient(
+  conn: GateConnection,
+  options: GateClientOptions = {},
+): GateClient {
   const fetchFn = options.fetchFn ?? globalThis.fetch;
+  const { baseUrl, extraOpts } = connectionFetchOpts(conn);
 
   let tokenCache: CachedToken | null = null;
   let numericProjectIdCache: string | null = null;
@@ -85,9 +135,7 @@ export function createGateClient(socketPath: string, options: GateClientOptions 
       return tokenCache;
     }
 
-    const res = await fetchFn("http://localhost/token", {
-      unix: socketPath,
-    } as RequestInit);
+    const res = await fetchFn(`${baseUrl}/token`, extraOpts);
 
     if (!res.ok) {
       const text = await res.text();
@@ -115,9 +163,7 @@ export function createGateClient(socketPath: string, options: GateClientOptions 
       return numericProjectIdCache;
     }
 
-    const res = await fetchFn("http://localhost/project-number", {
-      unix: socketPath,
-    } as RequestInit);
+    const res = await fetchFn(`${baseUrl}/project-number`, extraOpts);
 
     if (!res.ok) {
       const text = await res.text();
@@ -139,9 +185,7 @@ export function createGateClient(socketPath: string, options: GateClientOptions 
       return universeDomainCache;
     }
 
-    const res = await fetchFn("http://localhost/universe-domain", {
-      unix: socketPath,
-    } as RequestInit);
+    const res = await fetchFn(`${baseUrl}/universe-domain`, extraOpts);
 
     if (!res.ok) {
       const text = await res.text();

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { AuthClient } from "google-auth-library";
 import { GateConfigSchema } from "../../config.ts";
+import type { BunRequestInit } from "../../gate/connection.ts";
 import { startGateServer, type GateServerResult } from "../../gate/server.ts";
 
 function mockClient(token: string): AuthClient {
@@ -54,7 +55,7 @@ describe("runGate", () => {
     // Verify server is running by hitting health endpoint
     const res = await fetch("http://localhost/health", {
       unix: socketPath,
-    } as RequestInit);
+    } as BunRequestInit);
     expect(res.status).toBe(200);
   });
 

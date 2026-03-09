@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { startGateServer, type GateServerResult } from "../../gate/server.ts";
 import type { GateConfig } from "../../config.ts";
 import type { AuthClient } from "google-auth-library";
+import type { BunRequestInit } from "../../gate/connection.ts";
 
 function mockClient(token: string): AuthClient {
   return {
@@ -32,7 +33,7 @@ function makeConfig(socketPath: string): GateConfig {
 async function fetchUnix(socketPath: string, path: string): Promise<Response> {
   return fetch(`http://localhost${path}`, {
     unix: socketPath,
-  } as RequestInit);
+  } as BunRequestInit);
 }
 
 describe("startGateServer", () => {

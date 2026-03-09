@@ -6,6 +6,7 @@ import { fetchProdToken, type FetchProdTokenOptions } from "../with-prod/fetch-p
 import { createStaticTokenProvider } from "../with-prod/static-token-provider.ts";
 import { startMetadataProxyServer } from "../metadata-proxy/server.ts";
 import { detectNestedSession, PROD_SESSION_ENV_VAR } from "../with-prod/detect-nested-session.ts";
+import { buildGateConnection } from "../gate/connection.ts";
 import type { Subprocess } from "bun";
 
 type SpawnFn = (
@@ -130,7 +131,8 @@ export async function runWithProd(
   console.log("with-prod: requesting prod-level token from gcp-gate...");
   let tokenResult;
   try {
-    tokenResult = await fetchProdToken(wpConfig.socket_path, {
+    const conn = buildGateConnection(wpConfig);
+    tokenResult = await fetchProdToken(conn, {
       ...options.fetchOptions,
       command: wrappedCommand,
     });

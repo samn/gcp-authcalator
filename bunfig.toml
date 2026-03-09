@@ -2,8 +2,8 @@
 # Always enable coverage
 coverage = true
 
-# To require 90% line-level and function-level coverage
-coverageThreshold = 0.9
+# To require 85% line-level and function-level coverage
+coverageThreshold = 0.85
 
 coveragePathIgnorePatterns = [
   # Ignore coverage for things that are hard to

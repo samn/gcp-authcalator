@@ -1,7 +1,8 @@
 import type { Config } from "../config.ts";
 import { MetadataProxyConfigSchema } from "../config.ts";
 import { startMetadataProxyServer } from "../metadata-proxy/server.ts";
-import { checkGateSocket } from "../metadata-proxy/gate-client.ts";
+import { checkGateConnection } from "../metadata-proxy/gate-client.ts";
+import { buildGateConnection, type GateConnection } from "../gate/connection.ts";
 
 export interface RunMetadataProxyOptions {
   /** Override fetch for the connectivity check (testing). */
@@ -14,12 +15,14 @@ export async function runMetadataProxy(
 ): Promise<void> {
   const proxyConfig = MetadataProxyConfigSchema.parse(config);
 
+  const conn: GateConnection = buildGateConnection(proxyConfig);
+
   try {
-    await checkGateSocket(proxyConfig.socket_path, options.checkFetchFn);
+    await checkGateConnection(conn, options.checkFetchFn);
   } catch (err) {
     console.error(`metadata-proxy: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
   }
 
-  startMetadataProxyServer(proxyConfig);
+  startMetadataProxyServer(proxyConfig, { gateConnection: conn });
 }

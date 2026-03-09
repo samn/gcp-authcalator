@@ -2,7 +2,16 @@ import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createGateClient, checkGateSocket } from "../../metadata-proxy/gate-client.ts";
+import {
+  createGateClient,
+  checkGateSocket,
+  checkGateConnection,
+} from "../../metadata-proxy/gate-client.ts";
+import type { GateConnection } from "../../gate/connection.ts";
+
+function unixConn(socketPath: string): GateConnection {
+  return { mode: "unix", socketPath };
+}
 
 function mockFetch(
   token: string,
@@ -50,7 +59,7 @@ function mockProjectNumberFetch(projectNumber: string): {
 describe("createGateClient", () => {
   test("fetches token from gate daemon", async () => {
     const { fetchFn } = mockFetch("test-token-abc");
-    const client = createGateClient("/tmp/test.sock", { fetchFn });
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
 
     const result = await client.getToken();
     expect(result.access_token).toBe("test-token-abc");
@@ -60,7 +69,7 @@ describe("createGateClient", () => {
 
   test("caches token on subsequent calls", async () => {
     const { fetchFn, callCount } = mockFetch("cached-token");
-    const client = createGateClient("/tmp/test.sock", { fetchFn });
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
 
     const first = await client.getToken();
     const second = await client.getToken();
@@ -87,7 +96,7 @@ describe("createGateClient", () => {
       );
     }) as unknown as typeof globalThis.fetch;
 
-    const client = createGateClient("/tmp/test.sock", { fetchFn });
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
 
     const first = await client.getToken();
     expect(first.access_token).toBe("token-1");
@@ -100,7 +109,7 @@ describe("createGateClient", () => {
 
   test("throws on non-OK response", async () => {
     const fetchFn = mockFetchError(500, '{"error":"internal error"}');
-    const client = createGateClient("/tmp/test.sock", { fetchFn });
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
 
     await expect(client.getToken()).rejects.toThrow("gcp-gate returned 500");
   });
@@ -112,7 +121,7 @@ describe("createGateClient", () => {
         headers: { "Content-Type": "application/json" },
       })) as unknown as typeof globalThis.fetch;
 
-    const client = createGateClient("/tmp/test.sock", { fetchFn });
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
 
     await expect(client.getToken()).rejects.toThrow("no access_token");
   });
@@ -124,7 +133,7 @@ describe("createGateClient", () => {
         headers: { "Content-Type": "application/json" },
       })) as unknown as typeof globalThis.fetch;
 
-    const client = createGateClient("/tmp/test.sock", { fetchFn });
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
 
     const result = await client.getToken();
     // Should expire roughly 1 hour from now
@@ -138,7 +147,7 @@ describe("createGateClient", () => {
 describe("createGateClient — getNumericProjectId", () => {
   test("fetches numeric project ID from gate daemon", async () => {
     const { fetchFn } = mockProjectNumberFetch("987654321098");
-    const client = createGateClient("/tmp/test.sock", { fetchFn });
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
 
     const result = await client.getNumericProjectId();
     expect(result).toBe("987654321098");
@@ -146,7 +155,7 @@ describe("createGateClient — getNumericProjectId", () => {
 
   test("caches numeric project ID on subsequent calls", async () => {
     const { fetchFn, callCount } = mockProjectNumberFetch("111222333444");
-    const client = createGateClient("/tmp/test.sock", { fetchFn });
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
 
     const first = await client.getNumericProjectId();
     const second = await client.getNumericProjectId();
@@ -158,7 +167,7 @@ describe("createGateClient — getNumericProjectId", () => {
 
   test("throws on non-OK response", async () => {
     const fetchFn = mockFetchError(500, '{"error":"CRM API failed"}');
-    const client = createGateClient("/tmp/test.sock", { fetchFn });
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
 
     await expect(client.getNumericProjectId()).rejects.toThrow("gcp-gate returned 500");
   });
@@ -170,7 +179,7 @@ describe("createGateClient — getNumericProjectId", () => {
         headers: { "Content-Type": "application/json" },
       })) as unknown as typeof globalThis.fetch;
 
-    const client = createGateClient("/tmp/test.sock", { fetchFn });
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
 
     await expect(client.getNumericProjectId()).rejects.toThrow("no project_number");
   });
@@ -249,5 +258,206 @@ describe("checkGateSocket", () => {
     } finally {
       tempServer.stop(true);
     }
+  });
+});
+
+describe("checkGateConnection", () => {
+  test("delegates to checkGateSocket for unix mode", async () => {
+    await expect(
+      checkGateConnection({ mode: "unix", socketPath: "/tmp/nonexistent.sock" }),
+    ).rejects.toThrow(/socket not found/);
+  });
+
+  test("throws on TCP connection failure", async () => {
+    const conn: GateConnection = {
+      mode: "tcp",
+      gateUrl: "https://localhost:19999",
+      caCert: "dummy",
+      clientCert: "dummy",
+      clientKey: "dummy",
+    };
+    await expect(checkGateConnection(conn)).rejects.toThrow(/Could not connect/);
+  });
+
+  test("throws on TCP health check non-OK response", async () => {
+    const fetchFn = (async () =>
+      new Response("bad state", { status: 503 })) as unknown as typeof globalThis.fetch;
+
+    const conn: GateConnection = {
+      mode: "tcp",
+      gateUrl: "https://localhost:8174",
+      caCert: "ca",
+      clientCert: "cc",
+      clientKey: "ck",
+    };
+    await expect(checkGateConnection(conn, fetchFn)).rejects.toThrow(
+      /health check failed \(HTTP 503\)/,
+    );
+  });
+
+  test("succeeds on TCP health check OK response", async () => {
+    const fetchFn = (async () =>
+      new Response('{"status":"ok"}', { status: 200 })) as unknown as typeof globalThis.fetch;
+
+    const conn: GateConnection = {
+      mode: "tcp",
+      gateUrl: "https://localhost:8174",
+      caCert: "ca",
+      clientCert: "cc",
+      clientKey: "ck",
+    };
+    await expect(checkGateConnection(conn, fetchFn)).resolves.toBeUndefined();
+  });
+
+  test("passes mTLS client certs in TCP health check", async () => {
+    let capturedOpts: Record<string, unknown> | undefined;
+
+    const fetchFn = (async (_url: string, opts: Record<string, unknown>) => {
+      capturedOpts = opts;
+      return new Response('{"status":"ok"}', { status: 200 });
+    }) as unknown as typeof globalThis.fetch;
+
+    const conn: GateConnection = {
+      mode: "tcp",
+      gateUrl: "https://localhost:8174",
+      caCert: "ca-pem",
+      clientCert: "client-cert-pem",
+      clientKey: "client-key-pem",
+    };
+    await checkGateConnection(conn, fetchFn);
+
+    expect(capturedOpts).toBeDefined();
+    expect(capturedOpts!.tls).toEqual({
+      cert: "client-cert-pem",
+      key: "client-key-pem",
+      ca: "ca-pem",
+    });
+  });
+});
+
+function tcpConn(): GateConnection {
+  return {
+    mode: "tcp",
+    gateUrl: "https://localhost:8174",
+    caCert: "ca-cert-pem",
+    clientCert: "client-cert-pem",
+    clientKey: "client-key-pem",
+  };
+}
+
+describe("createGateClient — TCP mode", () => {
+  test("fetches token using TCP connection with TLS options", async () => {
+    let capturedUrl = "";
+    let capturedOpts: RequestInit | undefined;
+
+    const fetchFn = (async (url: string, opts: RequestInit) => {
+      capturedUrl = url;
+      capturedOpts = opts;
+      return new Response(JSON.stringify({ access_token: "tcp-token", expires_in: 3600 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof globalThis.fetch;
+
+    const client = createGateClient(tcpConn(), { fetchFn });
+    const result = await client.getToken();
+
+    expect(result.access_token).toBe("tcp-token");
+    expect(capturedUrl).toBe("https://localhost:8174/token");
+    expect((capturedOpts as Record<string, unknown>).tls).toEqual({
+      cert: "client-cert-pem",
+      key: "client-key-pem",
+      ca: "ca-cert-pem",
+    });
+  });
+
+  test("fetches numeric project ID using TCP connection", async () => {
+    const fetchFn = (async (url: string) => {
+      if (url.includes("/project-number")) {
+        return new Response(JSON.stringify({ project_number: "123456" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ access_token: "tok", expires_in: 3600 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof globalThis.fetch;
+
+    const client = createGateClient(tcpConn(), { fetchFn });
+    const result = await client.getNumericProjectId();
+    expect(result).toBe("123456");
+  });
+});
+
+describe("createGateClient — getUniverseDomain", () => {
+  function mockUniverseDomainFetch(domain: string): {
+    fetchFn: typeof globalThis.fetch;
+    callCount: () => number;
+  } {
+    let count = 0;
+    const fetchFn = (async (input: string | URL | Request) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      count++;
+      if (url.includes("/universe-domain")) {
+        return new Response(JSON.stringify({ universe_domain: domain }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(
+        JSON.stringify({ access_token: "tok", expires_in: 3600, token_type: "Bearer" }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as unknown as typeof globalThis.fetch;
+    return { fetchFn, callCount: () => count };
+  }
+
+  test("fetches universe domain from gate daemon", async () => {
+    const { fetchFn } = mockUniverseDomainFetch("googleapis.com");
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
+
+    const result = await client.getUniverseDomain();
+    expect(result).toBe("googleapis.com");
+  });
+
+  test("caches universe domain on subsequent calls", async () => {
+    const { fetchFn, callCount } = mockUniverseDomainFetch("googleapis.com");
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
+
+    const first = await client.getUniverseDomain();
+    const second = await client.getUniverseDomain();
+
+    expect(first).toBe("googleapis.com");
+    expect(second).toBe("googleapis.com");
+    expect(callCount()).toBe(1);
+  });
+
+  test("throws on non-OK response", async () => {
+    const fetchFn = mockFetchError(500, '{"error":"internal"}');
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
+
+    await expect(client.getUniverseDomain()).rejects.toThrow("gcp-gate returned 500");
+  });
+
+  test("throws when response has no universe_domain", async () => {
+    const fetchFn = (async () =>
+      new Response(JSON.stringify({ something: "else" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })) as unknown as typeof globalThis.fetch;
+
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
+
+    await expect(client.getUniverseDomain()).rejects.toThrow("no universe_domain");
+  });
+
+  test("fetches universe domain using TCP connection", async () => {
+    const { fetchFn } = mockUniverseDomainFetch("googleapis.com");
+    const client = createGateClient(tcpConn(), { fetchFn });
+
+    const result = await client.getUniverseDomain();
+    expect(result).toBe("googleapis.com");
   });
 });

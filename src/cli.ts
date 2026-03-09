@@ -7,6 +7,7 @@ import { runMetadataProxy } from "./commands/metadata-proxy.ts";
 import { runWithProd } from "./commands/with-prod.ts";
 import { runKubeToken } from "./commands/kube-token.ts";
 import { runKubeSetup } from "./commands/kube-setup.ts";
+import { runInitTls } from "./commands/init-tls.ts";
 import packageJson from "../package.json";
 
 const VERSION = packageJson.version;
@@ -44,6 +45,7 @@ Commands:
   gate              Start the host-side token daemon
   metadata-proxy    Start the GCE metadata server emulator
   with-prod         Wrap a command with prod credentials
+  init-tls          Generate TLS certificates for remote devcontainer support
   kube-token        kubectl exec credential plugin (outputs ExecCredential JSON)
   kube-setup        Patch kubeconfig to use gcp-authcalator instead of gke-gcloud-auth-plugin
   version           Show version
@@ -53,6 +55,12 @@ Options:
   --service-account <email> Service account email to impersonate
   --socket-path <path>     Unix socket path (default: $XDG_RUNTIME_DIR/gcp-authcalator.sock)
   -p, --port <port>        Metadata proxy port (default: 8173)
+  --gate-tls-port <port>        Gate TCP+mTLS listener port (enables remote devcontainer support)
+  --tls-dir <path>         TLS certificate directory (default: ~/.gcp-authcalator/tls/)
+  --gate-url <url>         Gate URL for remote connections (must use https://)
+  --tls-bundle <path>      Path to TLS client bundle file (PEM or base64-encoded)
+  --bundle-b64             Print base64-encoded client bundle (init-tls only)
+  --show-path              Print TLS directory path (init-tls only)
   -c, --config <path>      Path to TOML config file
   -h, --help               Show this help message
   -v, --version            Show version
@@ -67,6 +75,7 @@ const SUBCOMMANDS = [
   "gate",
   "metadata-proxy",
   "with-prod",
+  "init-tls",
   "kube-token",
   "kube-setup",
   "version",
@@ -87,6 +96,12 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       "service-account": { type: "string" },
       "socket-path": { type: "string" },
       port: { type: "string", short: "p" },
+      "gate-tls-port": { type: "string" },
+      "tls-dir": { type: "string" },
+      "gate-url": { type: "string" },
+      "tls-bundle": { type: "string" },
+      "bundle-b64": { type: "boolean" },
+      "show-path": { type: "boolean" },
       config: { type: "string", short: "c" },
       help: { type: "boolean", short: "h" },
       version: { type: "boolean", short: "v" },
@@ -130,6 +145,15 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
 
   if (subcommand === "kube-setup") {
     await runKubeSetup();
+    return;
+  }
+
+  if (subcommand === "init-tls") {
+    await runInitTls({
+      bundleB64: values["bundle-b64"],
+      showPath: values["show-path"],
+      tlsDir: values["tls-dir"],
+    });
     return;
   }
 

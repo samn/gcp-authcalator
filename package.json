@@ -21,6 +21,7 @@
     "prepare": "prek install"
   },
   "dependencies": {
+    "@peculiar/x509": "^1.14.3",
     "google-auth-library": "^10.5.0",
     "smol-toml": "^1.6.0",
     "zod": "^4.3.6"

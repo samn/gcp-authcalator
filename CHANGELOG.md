@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- TCP + mutual TLS transport for remote devcontainer support (SSH, Codespaces, Coder)
+- `init-tls` command for TLS certificate management
+- `--gate-tls-port` flag for gate to enable TCP listener alongside Unix socket
+- `--gate-url` and `--tls-bundle` flags for metadata-proxy and with-prod
+- `GCP_AUTHCALATOR_GATE_URL` and `GCP_AUTHCALATOR_TLS_BUNDLE_B64` env vars for zero-config remote setup
+- Auto-generation and rotation of TLS certificates (ECDSA P-256, 90-day lifetime)
+
 ### Changed
 
 - Upgrade Bun from 1.3.9 to 1.3.10

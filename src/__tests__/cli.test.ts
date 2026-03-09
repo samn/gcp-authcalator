@@ -208,6 +208,33 @@ describe("metadata-proxy subcommand", () => {
   });
 });
 
+describe("init-tls subcommand", () => {
+  test("prints TLS directory path with --show-path", async () => {
+    const { stdout, exitCode } = await runCLI(["init-tls", "--show-path"]);
+    expect(exitCode).toBe(0);
+    expect(stdout.trim()).toContain("gcp-authcalator/tls");
+  });
+
+  test("generates certs and prints info", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cli-init-tls-"));
+    const tlsDir = join(dir, "tls");
+    const { stdout, exitCode } = await runCLI(["init-tls", "--tls-dir", tlsDir]);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("TLS certificates generated");
+    expect(stdout).toContain("ca.pem");
+  });
+
+  test("prints base64 bundle with --bundle-b64", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cli-init-tls-b64-"));
+    const tlsDir = join(dir, "tls");
+    const { stdout, exitCode } = await runCLI(["init-tls", "--bundle-b64", "--tls-dir", tlsDir]);
+    expect(exitCode).toBe(0);
+    // Output should be a base64 string that decodes to PEM content
+    const decoded = Buffer.from(stdout.trim(), "base64").toString("utf-8");
+    expect(decoded).toContain("-----BEGIN CERTIFICATE-----");
+  });
+});
+
 describe("with-prod subcommand", () => {
   test("exits 1 when token fetch fails (no gate socket)", async () => {
     const { stderr, exitCode } = await runCLI([
