@@ -1,6 +1,19 @@
-- Use `mise` to manage the toolchain for this project to ensure a consistent development environment. Pin versions.
-- Install precommit checks when setting up a new environment (after installing tools with `mise`) by running `prek install`
-- Use `bun` to test and run this project
+## Environment setup
+
+**IMPORTANT: Always set up the development environment before doing any work.**
+Run these commands at the start of every session if tools are not yet available:
+
+```bash
+mise install        # Install pinned tool versions (bun, prek)
+bun install         # Install project dependencies
+prek install        # Install pre-commit hooks (runs automatically on git commit)
+```
+
+Use `mise` to manage the toolchain. Pin versions. Use `bun` to test and run
+this project.
+
+## Guidelines
+
 - Make sure that all types compile without warnings.
 - Write tests for all functionality that you create. The tests should be robust and reliable.
 - Minimize complexity wherever possible, simplicity is what makes this secure.
@@ -18,9 +31,13 @@ Deprecated, Removed, Fixed, Security.
 
 ## Pre-commit checks
 
-Before committing code, always run the full verification suite:
+**MANDATORY: Always run the full verification suite before every commit.** These
+are the same checks that CI runs — if you skip them, CI will fail.
 
 1. `bun run format` — auto-fix formatting with oxfmt
 2. `bun run lint` — run oxlint (also auto-fixes via prek)
 3. `bun run typecheck` — ensure no type errors
 4. `bun test` — ensure all tests pass and that coverage is adequate
+
+If `prek`, `bun`, or `oxfmt` are not available, run `mise install && bun install`
+first (see Environment setup above).

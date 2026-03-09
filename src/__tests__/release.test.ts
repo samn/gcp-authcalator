@@ -45,6 +45,8 @@ describe("release script", () => {
     await git(tempDir, "init", "-b", "main");
     await git(tempDir, "config", "user.email", "test@test.com");
     await git(tempDir, "config", "user.name", "Test");
+    await git(tempDir, "config", "commit.gpgsign", "false");
+    await git(tempDir, "config", "tag.gpgsign", "false");
   });
 
   afterEach(() => {
