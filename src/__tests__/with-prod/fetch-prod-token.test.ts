@@ -168,3 +168,61 @@ describe("fetchProdToken", () => {
     expect(headerValue).toBeNull();
   });
 });
+
+describe("fetchProdToken — TCP mode", () => {
+  const tcpConn = {
+    mode: "tcp" as const,
+    gateUrl: "https://localhost:8174",
+    caCert: "ca-cert-pem",
+    clientCert: "client-cert-pem",
+    clientKey: "client-key-pem",
+  };
+
+  test("fetches token and identity using TCP connection with TLS options", async () => {
+    const capturedUrls: string[] = [];
+    let capturedTls: unknown;
+
+    const fetchFn = (async (url: string, opts: RequestInit) => {
+      capturedUrls.push(url);
+      capturedTls = (opts as Record<string, unknown>).tls;
+      const parsed = new URL(url);
+      if (parsed.pathname === "/token") {
+        return new Response(JSON.stringify({ access_token: "tcp-prod-tok", expires_in: 900 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ email: "tcp-eng@corp.com" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof globalThis.fetch;
+
+    const result = await fetchProdToken(tcpConn, { fetchFn });
+
+    expect(capturedUrls).toContain("https://localhost:8174/token?level=prod");
+    expect(capturedUrls).toContain("https://localhost:8174/identity");
+    expect(result.access_token).toBe("tcp-prod-tok");
+    expect(result.expires_in).toBe(900);
+    expect(result.email).toBe("tcp-eng@corp.com");
+    expect(capturedTls).toEqual({
+      cert: "client-cert-pem",
+      key: "client-key-pem",
+      ca: "ca-cert-pem",
+    });
+  });
+
+  test("throws on non-OK token response in TCP mode", async () => {
+    const fetchFn = (async (url: string) => {
+      const parsed = new URL(url);
+      if (parsed.pathname === "/token") {
+        return new Response("denied", { status: 403 });
+      }
+      return new Response(JSON.stringify({ email: "a@b.com" }), { status: 200 });
+    }) as unknown as typeof globalThis.fetch;
+
+    await expect(fetchProdToken(tcpConn, { fetchFn })).rejects.toThrow(
+      "gcp-gate returned 403: denied",
+    );
+  });
+});

@@ -278,4 +278,161 @@ describe("checkGateConnection", () => {
     };
     await expect(checkGateConnection(conn)).rejects.toThrow(/Could not connect/);
   });
+
+  test("throws on TCP health check non-OK response", async () => {
+    const fetchFn = (async () =>
+      new Response("bad state", { status: 503 })) as unknown as typeof globalThis.fetch;
+
+    const conn: GateConnection = {
+      mode: "tcp",
+      gateUrl: "https://localhost:8174",
+      caCert: "ca",
+      clientCert: "cc",
+      clientKey: "ck",
+    };
+    await expect(checkGateConnection(conn, fetchFn)).rejects.toThrow(
+      /health check failed \(HTTP 503\)/,
+    );
+  });
+
+  test("succeeds on TCP health check OK response", async () => {
+    const fetchFn = (async () =>
+      new Response('{"status":"ok"}', { status: 200 })) as unknown as typeof globalThis.fetch;
+
+    const conn: GateConnection = {
+      mode: "tcp",
+      gateUrl: "https://localhost:8174",
+      caCert: "ca",
+      clientCert: "cc",
+      clientKey: "ck",
+    };
+    await expect(checkGateConnection(conn, fetchFn)).resolves.toBeUndefined();
+  });
+});
+
+function tcpConn(): GateConnection {
+  return {
+    mode: "tcp",
+    gateUrl: "https://localhost:8174",
+    caCert: "ca-cert-pem",
+    clientCert: "client-cert-pem",
+    clientKey: "client-key-pem",
+  };
+}
+
+describe("createGateClient — TCP mode", () => {
+  test("fetches token using TCP connection with TLS options", async () => {
+    let capturedUrl = "";
+    let capturedOpts: RequestInit | undefined;
+
+    const fetchFn = (async (url: string, opts: RequestInit) => {
+      capturedUrl = url;
+      capturedOpts = opts;
+      return new Response(JSON.stringify({ access_token: "tcp-token", expires_in: 3600 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof globalThis.fetch;
+
+    const client = createGateClient(tcpConn(), { fetchFn });
+    const result = await client.getToken();
+
+    expect(result.access_token).toBe("tcp-token");
+    expect(capturedUrl).toBe("https://localhost:8174/token");
+    expect((capturedOpts as Record<string, unknown>).tls).toEqual({
+      cert: "client-cert-pem",
+      key: "client-key-pem",
+      ca: "ca-cert-pem",
+    });
+  });
+
+  test("fetches numeric project ID using TCP connection", async () => {
+    const fetchFn = (async (url: string) => {
+      if (url.includes("/project-number")) {
+        return new Response(JSON.stringify({ project_number: "123456" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ access_token: "tok", expires_in: 3600 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof globalThis.fetch;
+
+    const client = createGateClient(tcpConn(), { fetchFn });
+    const result = await client.getNumericProjectId();
+    expect(result).toBe("123456");
+  });
+});
+
+describe("createGateClient — getUniverseDomain", () => {
+  function mockUniverseDomainFetch(domain: string): {
+    fetchFn: typeof globalThis.fetch;
+    callCount: () => number;
+  } {
+    let count = 0;
+    const fetchFn = (async (input: string | URL | Request) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      count++;
+      if (url.includes("/universe-domain")) {
+        return new Response(JSON.stringify({ universe_domain: domain }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(
+        JSON.stringify({ access_token: "tok", expires_in: 3600, token_type: "Bearer" }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as unknown as typeof globalThis.fetch;
+    return { fetchFn, callCount: () => count };
+  }
+
+  test("fetches universe domain from gate daemon", async () => {
+    const { fetchFn } = mockUniverseDomainFetch("googleapis.com");
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
+
+    const result = await client.getUniverseDomain();
+    expect(result).toBe("googleapis.com");
+  });
+
+  test("caches universe domain on subsequent calls", async () => {
+    const { fetchFn, callCount } = mockUniverseDomainFetch("googleapis.com");
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
+
+    const first = await client.getUniverseDomain();
+    const second = await client.getUniverseDomain();
+
+    expect(first).toBe("googleapis.com");
+    expect(second).toBe("googleapis.com");
+    expect(callCount()).toBe(1);
+  });
+
+  test("throws on non-OK response", async () => {
+    const fetchFn = mockFetchError(500, '{"error":"internal"}');
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
+
+    await expect(client.getUniverseDomain()).rejects.toThrow("gcp-gate returned 500");
+  });
+
+  test("throws when response has no universe_domain", async () => {
+    const fetchFn = (async () =>
+      new Response(JSON.stringify({ something: "else" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })) as unknown as typeof globalThis.fetch;
+
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
+
+    await expect(client.getUniverseDomain()).rejects.toThrow("no universe_domain");
+  });
+
+  test("fetches universe domain using TCP connection", async () => {
+    const { fetchFn } = mockUniverseDomainFetch("googleapis.com");
+    const client = createGateClient(tcpConn(), { fetchFn });
+
+    const result = await client.getUniverseDomain();
+    expect(result).toBe("googleapis.com");
+  });
 });
