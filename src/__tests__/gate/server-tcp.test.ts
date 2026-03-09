@@ -56,7 +56,7 @@ describe("Gate TCP+mTLS server", () => {
       service_account: "sa@test-project.iam.gserviceaccount.com",
       socket_path: socketPath,
       port: 8173,
-      tcp_port: 0, // random port
+      gate_tls_port: 0, // random port
       tls_dir: tlsDir,
     };
 
@@ -96,7 +96,7 @@ describe("Gate TCP+mTLS server", () => {
       service_account: "sa@test-project.iam.gserviceaccount.com",
       socket_path: socketPath,
       port: 8173,
-      tcp_port: 0,
+      gate_tls_port: 0,
       tls_dir: tlsDir,
     };
 
@@ -134,7 +134,7 @@ describe("Gate TCP+mTLS server", () => {
       service_account: "sa@test-project.iam.gserviceaccount.com",
       socket_path: socketPath,
       port: 8173,
-      tcp_port: 0,
+      gate_tls_port: 0,
       tls_dir: tlsDir,
     };
 
@@ -172,7 +172,7 @@ describe("Gate TCP+mTLS server", () => {
       service_account: "sa@test-project.iam.gserviceaccount.com",
       socket_path: socketPath,
       port: 8173,
-      tcp_port: 0,
+      gate_tls_port: 0,
       tls_dir: tlsDir,
     };
 
@@ -205,7 +205,7 @@ describe("Gate TCP+mTLS server", () => {
     }
   });
 
-  test("does not start TCP server when tcp_port is not configured", async () => {
+  test("does not start TCP server when gate_tls_port is not configured", async () => {
     const tempDir = makeTempDir();
     const socketPath = join(tempDir, "gate.sock");
 
@@ -214,7 +214,7 @@ describe("Gate TCP+mTLS server", () => {
       service_account: "sa@test-project.iam.gserviceaccount.com",
       socket_path: socketPath,
       port: 8173,
-      // No tcp_port
+      // No gate_tls_port
     };
 
     result = await startGateServer(config, {

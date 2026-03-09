@@ -116,11 +116,11 @@ export async function startGateServer(
 
   // Optional TCP+mTLS server for remote devcontainer support
   let tcpServer: ReturnType<typeof Bun.serve> | undefined;
-  if (config.tcp_port !== undefined) {
+  if (config.gate_tls_port !== undefined) {
     const tlsFiles = await ensureTlsFiles(config.tls_dir);
     tcpServer = Bun.serve({
       hostname: "127.0.0.1",
-      port: config.tcp_port,
+      port: config.gate_tls_port,
       tls: {
         cert: tlsFiles.serverCert,
         key: tlsFiles.serverKey,
@@ -175,7 +175,7 @@ export async function startGateServer(
   console.log(`  service account: ${config.service_account}`);
   console.log(`  socket path:     ${config.socket_path}`);
   if (tcpServer) {
-    console.log(`  tcp listener:    127.0.0.1:${config.tcp_port} (mTLS)`);
+    console.log(`  tcp listener:    127.0.0.1:${config.gate_tls_port} (mTLS)`);
   }
   console.log("  endpoints:");
   console.log("    GET /token            → dev-scoped access token");

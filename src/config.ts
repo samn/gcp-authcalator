@@ -48,7 +48,7 @@ export const ConfigSchema = z.object({
   service_account: z.email().optional(),
   socket_path: z.string().min(1).default(getDefaultSocketPath).transform(expandTilde),
   port: z.coerce.number().int().min(1).max(65535).default(8173),
-  tcp_port: z.coerce.number().int().min(1).max(65535).optional(),
+  gate_tls_port: z.coerce.number().int().min(1).max(65535).optional(),
   tls_dir: z.string().min(1).transform(expandTilde).optional(),
   gate_url: z
     .string()
@@ -91,7 +91,7 @@ const cliToConfigKey: Record<string, keyof Config> = {
   "service-account": "service_account",
   "socket-path": "socket_path",
   port: "port",
-  "tcp-port": "tcp_port",
+  "gate-tls-port": "gate_tls_port",
   "tls-dir": "tls_dir",
   "gate-url": "gate_url",
   "tls-bundle": "tls_bundle",

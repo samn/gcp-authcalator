@@ -42,7 +42,7 @@ export async function checkGateConnection(
   } catch {
     throw new Error(
       `Could not connect to gcp-gate at ${conn.gateUrl}\n` +
-        `  Ensure gcp-gate is running with --tcp-port and port forwarding is active.`,
+        `  Ensure gcp-gate is running with --gate-tls-port and port forwarding is active.`,
     );
   }
 

@@ -74,7 +74,7 @@ Developer's Laptop                          Remote Host / Codespace / Coder
 
 **Certificate management:**
 
-- Gate generates a private CA on first run with `--tcp-port` (or via `gcp-authcalator init-tls`)
+- Gate generates a private CA on first run with `--gate-tls-port` (or via `gcp-authcalator init-tls`)
 - Server cert (SAN: localhost, 127.0.0.1) and client cert signed by the CA
 - ECDSA P-256 algorithm (universally supported in WebCrypto)
 - 90-day lifetime for all certificates (CA, server, and client)
@@ -225,13 +225,13 @@ Certificates are stored in `~/.gcp-authcalator/tls/` with `0600` permissions (di
 
 New config options and env vars for remote devcontainer support:
 
-| Config option | CLI flag       | Env var                          | Description                              |
-| ------------- | -------------- | -------------------------------- | ---------------------------------------- |
-| `tcp_port`    | `--tcp-port`   | —                                | Gate TCP+mTLS listener port              |
-| `tls_dir`     | `--tls-dir`    | —                                | TLS certificate directory                |
-| `gate_url`    | `--gate-url`   | `GCP_AUTHCALATOR_GATE_URL`       | Gate URL (must use `https://`)           |
-| `tls_bundle`  | `--tls-bundle` | `GCP_AUTHCALATOR_TLS_BUNDLE`     | Path to TLS client bundle file           |
-| —             | —              | `GCP_AUTHCALATOR_TLS_BUNDLE_B64` | Base64-encoded client bundle (preferred) |
+| Config option   | CLI flag          | Env var                          | Description                              |
+| --------------- | ----------------- | -------------------------------- | ---------------------------------------- |
+| `gate_tls_port` | `--gate-tls-port` | —                                | Gate TCP+mTLS listener port              |
+| `tls_dir`       | `--tls-dir`       | —                                | TLS certificate directory                |
+| `gate_url`      | `--gate-url`      | `GCP_AUTHCALATOR_GATE_URL`       | Gate URL (must use `https://`)           |
+| `tls_bundle`    | `--tls-bundle`    | `GCP_AUTHCALATOR_TLS_BUNDLE`     | Path to TLS client bundle file           |
+| —               | —                 | `GCP_AUTHCALATOR_TLS_BUNDLE_B64` | Base64-encoded client bundle (preferred) |
 
 Config precedence: CLI args > TOML file > env vars > schema defaults.
 

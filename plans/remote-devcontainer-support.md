@@ -41,10 +41,10 @@ Ed25519 was the original choice for speed and simplicity. However, `@peculiar/x5
 
 Add a TCP listener mode to gate, secured with **self-signed mutual TLS (mTLS)**:
 
-1. Gate generates a private CA (on first run with `--tcp-port`, or via `gcp-authcalator init-tls`)
+1. Gate generates a private CA (on first run with `--gate-tls-port`, or via `gcp-authcalator init-tls`)
 2. Gate generates a server certificate signed by the CA
 3. Gate generates a client certificate signed by the CA (for metadata-proxy / with-prod)
-4. Gate listens on `127.0.0.1:<tcp-port>` with TLS, requiring a valid client certificate
+4. Gate listens on `127.0.0.1:<gate-tls-port>` with TLS, requiring a valid client certificate
 5. Metadata-proxy / with-prod connect using the client certificate, verifying the server against the CA
 
 The CA + client cert + client key form a **"client bundle"** — a single base64-encoded string that is distributed to remote environments via environment variables. This is **not** a GCP credential — it only authorizes communication with gate.
@@ -212,11 +212,11 @@ Uses Bun's built-in WebCrypto (`globalThis.crypto`) as the crypto provider — n
   const unixServer = Bun.serve({ unix: config.socket_path, fetch(req) { ... } });
 
   // New optional TCP+mTLS server
-  if (config.tcp_port) {
+  if (config.gate_tls_port) {
     const tlsFiles = await ensureTlsFiles(config.tls_dir);
     const tcpServer = Bun.serve({
       hostname: "127.0.0.1",
-      port: config.tcp_port,
+      port: config.gate_tls_port,
       tls: {
         cert: tlsFiles.serverCert,
         key: tlsFiles.serverKey,
@@ -230,7 +230,7 @@ Uses Bun's built-in WebCrypto (`globalThis.crypto`) as the crypto provider — n
   ```
 
 - Both listeners share the same `handleRequest` and `GateDeps`
-- TCP server only starts if `tcp_port` is configured
+- TCP server only starts if `gate_tls_port` is configured
 - Auto-generate TLS certificates on first TCP listen (call `ensureTlsFiles()`)
 - Return both servers from `startGateServer` for cleanup
 
@@ -238,7 +238,7 @@ Uses Bun's built-in WebCrypto (`globalThis.crypto`) as the crypto provider — n
 
 - Add to `ConfigSchema`:
   ```typescript
-  tcp_port: z.coerce.number().int().min(1).max(65535).optional(),
+  gate_tls_port: z.coerce.number().int().min(1).max(65535).optional(),
   tls_dir: z.string().min(1).optional().transform(v => v ? expandTilde(v) : v),
   gate_url: z.string().min(1).optional()
     .refine(v => !v || v.startsWith("https://"), { message: "gate_url must use https://" }),
@@ -246,7 +246,7 @@ Uses Bun's built-in WebCrypto (`globalThis.crypto`) as the crypto provider — n
   ```
 - `gate_url` **must** use `https://` — reject `http://` to prevent accidental plaintext connections to gate
 - Add CLI arg mappings in `cliToConfigKey`:
-  - `"tcp-port"` → `"tcp_port"`
+  - `"gate-tls-port"` → `"gate_tls_port"`
   - `"tls-dir"` → `"tls_dir"`
   - `"gate-url"` → `"gate_url"`
   - `"tls-bundle"` → `"tls_bundle"`
@@ -257,7 +257,7 @@ Uses Bun's built-in WebCrypto (`globalThis.crypto`) as the crypto provider — n
 
 #### 2.3 Modify `src/commands/gate.ts`
 
-- Wire `tcp_port` and `tls_dir` from config into `startGateServer`
+- Wire `gate_tls_port` and `tls_dir` from config into `startGateServer`
 - Print TCP listener info at startup (port, TLS status)
 - Print the client bundle base64 on first start for easy reference
 
@@ -328,7 +328,7 @@ Helper: `buildGateConnection(config, env)`:
 
 - Add `init-tls` subcommand to `SUBCOMMANDS`
 - Add new CLI options to `parseArgs`:
-  - `"tcp-port"`: `{ type: "string" }`
+  - `"gate-tls-port"`: `{ type: "string" }`
   - `"tls-dir"`: `{ type: "string" }`
   - `"gate-url"`: `{ type: "string" }`
   - `"tls-bundle"`: `{ type: "string" }`
@@ -344,7 +344,7 @@ Gate config (on laptop):
 ```toml
 project_id = "my-project"
 service_account = "dev@my-project.iam.gserviceaccount.com"
-tcp_port = 8174
+gate_tls_port = 8174
 ```
 
 Metadata-proxy config (in remote container):
@@ -366,7 +366,7 @@ Add a new "Remote Development" section after the current Architecture section:
 - Document the client bundle concept and distribution via env var
 - Update the architecture diagram to show both Unix socket (local) and TCP+mTLS (remote) paths
 - Document the `init-tls` command
-- Document new config options: `tcp_port`, `tls_dir`, `gate_url`, `tls_bundle`
+- Document new config options: `gate_tls_port`, `tls_dir`, `gate_url`, `tls_bundle`
 - Document new env vars: `GCP_AUTHCALATOR_GATE_URL`, `GCP_AUTHCALATOR_TLS_BUNDLE`, `GCP_AUTHCALATOR_TLS_BUNDLE_B64`
 - Add per-scenario setup guides:
 
@@ -376,7 +376,7 @@ Add a new "Remote Development" section after the current Architecture section:
 # 1. On laptop — start gate with TCP:
 gcp-authcalator gate --project-id my-project \
   --service-account dev@my-project.iam.gserviceaccount.com \
-  --tcp-port 8174
+  --gate-tls-port 8174
 
 # 2. On laptop — get the client bundle:
 gcp-authcalator init-tls --bundle-b64
@@ -399,7 +399,7 @@ gcp-authcalator metadata-proxy --project-id my-project
 # 1. On laptop — start gate with TCP:
 gcp-authcalator gate --project-id my-project \
   --service-account dev@my-project.iam.gserviceaccount.com \
-  --tcp-port 8174
+  --gate-tls-port 8174
 
 # 2. Set Codespace secrets (one-time, via GitHub UI or CLI):
 gcp-authcalator init-tls --bundle-b64 | gh secret set GCP_AUTHCALATOR_TLS_BUNDLE_B64
@@ -418,7 +418,7 @@ gcp-authcalator metadata-proxy --project-id my-project
 # 1. On laptop — start gate with TCP:
 gcp-authcalator gate --project-id my-project \
   --service-account dev@my-project.iam.gserviceaccount.com \
-  --tcp-port 8174
+  --gate-tls-port 8174
 
 # 2. Set workspace env vars (via Coder UI or template):
 #    GCP_AUTHCALATOR_TLS_BUNDLE_B64=<from init-tls --bundle-b64>
@@ -440,7 +440,7 @@ Under `[Unreleased]`:
 
 - TCP + mutual TLS transport for remote devcontainer support (SSH, Codespaces, Coder)
 - `init-tls` command for TLS certificate management
-- `--tcp-port` flag for gate to enable TCP listener alongside Unix socket
+- `--gate-tls-port` flag for gate to enable TCP listener alongside Unix socket
 - `--gate-url` and `--tls-bundle` flags for metadata-proxy and with-prod
 - `GCP_AUTHCALATOR_GATE_URL` and `GCP_AUTHCALATOR_TLS_BUNDLE_B64` env vars for zero-config remote setup
 - Auto-generation and rotation of TLS certificates (ECDSA P-256, 90-day lifetime)
@@ -518,23 +518,23 @@ Certificates are stored in `~/.gcp-authcalator/tls/` (not `$XDG_RUNTIME_DIR`). T
 
 ## File Change Summary
 
-| File                                | Change                                                                       |
-| ----------------------------------- | ---------------------------------------------------------------------------- |
-| `src/tls/ca.ts`                     | **New** — ECDSA P-256 CA generation using `@peculiar/x509`                   |
-| `src/tls/certs.ts`                  | **New** — server and client cert generation                                  |
-| `src/tls/store.ts`                  | **New** — cert storage, loading, expiry checking                             |
-| `src/tls/bundle.ts`                 | **New** — client bundle resolution (env var / file / none)                   |
-| `src/tls/__tests__/*.test.ts`       | **New** — unit tests for TLS module                                          |
-| `src/gate/connection.ts`            | **New** — `GateConnection` type and `buildGateConnection` helper             |
-| `src/commands/init-tls.ts`          | **New** — init-tls CLI command                                               |
-| `src/config.ts`                     | **Modify** — add tcp_port, tls_dir, gate_url (https-only), tls_bundle fields |
-| `src/cli.ts`                        | **Modify** — add init-tls subcommand, new CLI args                           |
-| `src/gate/server.ts`                | **Modify** — add optional TCP+mTLS listener                                  |
-| `src/commands/gate.ts`              | **Modify** — wire new config                                                 |
-| `src/metadata-proxy/gate-client.ts` | **Modify** — accept GateConnection, support TCP+mTLS                         |
-| `src/metadata-proxy/server.ts`      | **Modify** — accept GateConnection, clear bundle env var                     |
-| `src/commands/metadata-proxy.ts`    | **Modify** — build GateConnection, wire config                               |
-| `src/with-prod/fetch-prod-token.ts` | **Modify** — accept GateConnection                                           |
-| `src/commands/with-prod.ts`         | **Modify** — build GateConnection, wire config, clear bundle env var         |
-| `SPEC.md`                           | **Modify** — remote development section + setup guides                       |
-| `CHANGELOG.md`                      | **Modify** — document new features                                           |
+| File                                | Change                                                                            |
+| ----------------------------------- | --------------------------------------------------------------------------------- |
+| `src/tls/ca.ts`                     | **New** — ECDSA P-256 CA generation using `@peculiar/x509`                        |
+| `src/tls/certs.ts`                  | **New** — server and client cert generation                                       |
+| `src/tls/store.ts`                  | **New** — cert storage, loading, expiry checking                                  |
+| `src/tls/bundle.ts`                 | **New** — client bundle resolution (env var / file / none)                        |
+| `src/tls/__tests__/*.test.ts`       | **New** — unit tests for TLS module                                               |
+| `src/gate/connection.ts`            | **New** — `GateConnection` type and `buildGateConnection` helper                  |
+| `src/commands/init-tls.ts`          | **New** — init-tls CLI command                                                    |
+| `src/config.ts`                     | **Modify** — add gate_tls_port, tls_dir, gate_url (https-only), tls_bundle fields |
+| `src/cli.ts`                        | **Modify** — add init-tls subcommand, new CLI args                                |
+| `src/gate/server.ts`                | **Modify** — add optional TCP+mTLS listener                                       |
+| `src/commands/gate.ts`              | **Modify** — wire new config                                                      |
+| `src/metadata-proxy/gate-client.ts` | **Modify** — accept GateConnection, support TCP+mTLS                              |
+| `src/metadata-proxy/server.ts`      | **Modify** — accept GateConnection, clear bundle env var                          |
+| `src/commands/metadata-proxy.ts`    | **Modify** — build GateConnection, wire config                                    |
+| `src/with-prod/fetch-prod-token.ts` | **Modify** — accept GateConnection                                                |
+| `src/commands/with-prod.ts`         | **Modify** — build GateConnection, wire config, clear bundle env var              |
+| `SPEC.md`                           | **Modify** — remote development section + setup guides                            |
+| `CHANGELOG.md`                      | **Modify** — document new features                                                |

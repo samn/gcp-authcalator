@@ -113,19 +113,19 @@ describe("ConfigSchema", () => {
     expect(config.socket_path).toBe(homedir());
   });
 
-  test("accepts valid tcp_port", () => {
-    const config = ConfigSchema.parse({ tcp_port: 8174 });
-    expect(config.tcp_port).toBe(8174);
+  test("accepts valid gate_tls_port", () => {
+    const config = ConfigSchema.parse({ gate_tls_port: 8174 });
+    expect(config.gate_tls_port).toBe(8174);
   });
 
-  test("tcp_port is optional", () => {
+  test("gate_tls_port is optional", () => {
     const config = ConfigSchema.parse({});
-    expect(config.tcp_port).toBeUndefined();
+    expect(config.gate_tls_port).toBeUndefined();
   });
 
-  test("rejects invalid tcp_port", () => {
-    expect(() => ConfigSchema.parse({ tcp_port: 0 })).toThrow(z.ZodError);
-    expect(() => ConfigSchema.parse({ tcp_port: 70000 })).toThrow(z.ZodError);
+  test("rejects invalid gate_tls_port", () => {
+    expect(() => ConfigSchema.parse({ gate_tls_port: 0 })).toThrow(z.ZodError);
+    expect(() => ConfigSchema.parse({ gate_tls_port: 70000 })).toThrow(z.ZodError);
   });
 
   test("gate_url must use https://", () => {
@@ -241,13 +241,13 @@ describe("mapCliArgs", () => {
 
   test("maps new TLS-related CLI keys", () => {
     const result = mapCliArgs({
-      "tcp-port": "8174",
+      "gate-tls-port": "8174",
       "tls-dir": "~/.tls",
       "gate-url": "https://localhost:8174",
       "tls-bundle": "/path/to/bundle.pem",
     });
     expect(result).toEqual({
-      tcp_port: "8174",
+      gate_tls_port: "8174",
       tls_dir: "~/.tls",
       gate_url: "https://localhost:8174",
       tls_bundle: "/path/to/bundle.pem",

@@ -106,7 +106,7 @@ Precedence: CLI flags > TOML file > environment variables > defaults.
 --service-account <email>  Service account email to impersonate
 --socket-path <path>       Unix socket path (default: $XDG_RUNTIME_DIR/gcp-authcalator.sock)
 -p, --port <port>          Metadata proxy port (default: 8173)
---tcp-port <port>          Gate TCP+mTLS listener port (enables remote devcontainer support)
+--gate-tls-port <port>          Gate TCP+mTLS listener port (enables remote devcontainer support)
 --tls-dir <path>           TLS certificate directory (default: ~/.gcp-authcalator/tls/)
 --gate-url <url>           Gate URL for remote connections (must use https://)
 --tls-bundle <path>        Path to TLS client bundle file
@@ -131,7 +131,7 @@ service_account = "dev-runner@my-gcp-project.iam.gserviceaccount.com"
 port = 8173
 
 # Remote devcontainer support (optional):
-# tcp_port = 8174       # Enable TCP+mTLS listener on gate
+# gate_tls_port = 8174       # Enable TCP+mTLS listener on gate
 # gate_url = "https://localhost:8174"  # Point metadata-proxy at remote gate
 ```
 
@@ -157,12 +157,12 @@ gcp-authcalator gate \
 gcp-authcalator gate \
   --project-id my-project \
   --service-account dev-runner@my-project.iam.gserviceaccount.com \
-  --tcp-port 8174
+  --gate-tls-port 8174
 ```
 
 **Required options:** `--project-id`, `--service-account`
 
-**Optional:** `--tcp-port` enables a TCP listener with mutual TLS, allowing remote devcontainers to connect. TLS certificates are auto-generated on first use and stored in `~/.gcp-authcalator/tls/`.
+**Optional:** `--gate-tls-port` enables a TCP listener with mutual TLS, allowing remote devcontainers to connect. TLS certificates are auto-generated on first use and stored in `~/.gcp-authcalator/tls/`.
 
 **API endpoints** (over Unix socket or TCP+mTLS):
 
@@ -374,7 +374,7 @@ For remote environments where the devcontainer runs on a different machine (SSH 
 # 1. On laptop — start gate with TCP:
 gcp-authcalator gate --project-id my-project \
   --service-account dev@my-project.iam.gserviceaccount.com \
-  --tcp-port 8174
+  --gate-tls-port 8174
 
 # 2. On laptop — get the client bundle:
 gcp-authcalator init-tls --bundle-b64
@@ -397,7 +397,7 @@ gcp-authcalator metadata-proxy --project-id my-project
 # 1. On laptop — start gate with TCP:
 gcp-authcalator gate --project-id my-project \
   --service-account dev@my-project.iam.gserviceaccount.com \
-  --tcp-port 8174
+  --gate-tls-port 8174
 
 # 2. Set Codespace secrets (one-time):
 gcp-authcalator init-tls --bundle-b64 | gh secret set GCP_AUTHCALATOR_TLS_BUNDLE_B64
@@ -416,7 +416,7 @@ gcp-authcalator metadata-proxy --project-id my-project
 # 1. On laptop — start gate with TCP:
 gcp-authcalator gate --project-id my-project \
   --service-account dev@my-project.iam.gserviceaccount.com \
-  --tcp-port 8174
+  --gate-tls-port 8174
 
 # 2. Set workspace env vars (via Coder UI or template):
 #    GCP_AUTHCALATOR_TLS_BUNDLE_B64=<from init-tls --bundle-b64>
