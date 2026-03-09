@@ -55,7 +55,7 @@ Developer's Laptop                          Remote Host / Codespace / Coder
 ┌─────────────────────┐                     ┌──────────────────────────────┐
 │  ADC credentials    │                     │  Devcontainer                │
 │  gcp-gate daemon    │◄── mTLS over ───────│  gcp-metadata-proxy          │
-│    TCP :8174        │    forwarded port    │    (127.0.0.1:8173)          │
+│    TCP :8174        │    forwarded port   │    (127.0.0.1:8173)          │
 │  Confirmation UI    │                     │  with-prod                   │
 │  CA + server cert   │                     │  CA cert + client cert/key   │
 └─────────────────────┘                     └──────────────────────────────┘
@@ -109,7 +109,7 @@ Precedence: CLI flags > TOML file > environment variables > defaults.
 --gate-tls-port <port>          Gate TCP+mTLS listener port (enables remote devcontainer support)
 --tls-dir <path>           TLS certificate directory (default: ~/.gcp-authcalator/tls/)
 --gate-url <url>           Gate URL for remote connections (must use https://)
---tls-bundle <path>        Path to TLS client bundle file
+--tls-bundle <path>        Path to TLS client bundle file (PEM or base64-encoded)
 -c, --config <path>        Path to TOML config file
 ```
 

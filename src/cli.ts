@@ -58,7 +58,7 @@ Options:
   --gate-tls-port <port>        Gate TCP+mTLS listener port (enables remote devcontainer support)
   --tls-dir <path>         TLS certificate directory (default: ~/.gcp-authcalator/tls/)
   --gate-url <url>         Gate URL for remote connections (must use https://)
-  --tls-bundle <path>      Path to TLS client bundle file
+  --tls-bundle <path>      Path to TLS client bundle file (PEM or base64-encoded)
   --bundle-b64             Print base64-encoded client bundle (init-tls only)
   --show-path              Print TLS directory path (init-tls only)
   -c, --config <path>      Path to TOML config file

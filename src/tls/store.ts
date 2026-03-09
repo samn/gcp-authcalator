@@ -102,9 +102,18 @@ export function loadTlsFiles(tlsDir?: string): TlsFiles {
   };
 }
 
-/** Parse a client-bundle.pem into its three PEM sections. */
+/**
+ * Load a client bundle from a file.
+ *
+ * Accepts either a PEM file (containing -----BEGIN blocks) or a base64-encoded
+ * PEM file (as produced by `init-tls --bundle-b64`). Auto-detects the format.
+ */
 export function loadClientBundle(bundlePath: string): ClientBundle {
-  const content = readFileSync(bundlePath, "utf-8");
+  const raw = readFileSync(bundlePath, "utf-8").trim();
+
+  // If the file contains PEM headers, parse directly.
+  // Otherwise, assume base64-encoded PEM and decode first.
+  const content = raw.includes("-----BEGIN ") ? raw : Buffer.from(raw, "base64").toString("utf-8");
   return parseClientBundle(content);
 }
 

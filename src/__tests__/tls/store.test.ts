@@ -156,6 +156,28 @@ describe("loadClientBundle", () => {
     // CA cert should be different from client cert
     expect(bundle.caCert).not.toBe(bundle.clientCert);
   });
+
+  test("auto-detects and decodes a base64-encoded bundle file", async () => {
+    const dir = join(makeTempDir(), "tls");
+    await ensureTlsFiles(dir);
+
+    // Write a base64-encoded copy of the bundle
+    const b64 = getClientBundleBase64(dir);
+    const b64Path = join(dir, "client-bundle.b64");
+    writeFileSync(b64Path, b64);
+
+    const bundle = loadClientBundle(b64Path);
+
+    expect(bundle.caCert).toContain("-----BEGIN CERTIFICATE-----");
+    expect(bundle.clientCert).toContain("-----BEGIN CERTIFICATE-----");
+    expect(bundle.clientKey).toContain("-----BEGIN PRIVATE KEY-----");
+
+    // Should match the PEM-loaded bundle
+    const pemBundle = loadClientBundle(join(dir, "client-bundle.pem"));
+    expect(bundle.caCert).toBe(pemBundle.caCert);
+    expect(bundle.clientCert).toBe(pemBundle.clientCert);
+    expect(bundle.clientKey).toBe(pemBundle.clientKey);
+  });
 });
 
 describe("loadClientBundleFromBase64", () => {
