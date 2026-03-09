@@ -195,6 +195,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       }
       process.exit(1);
     }
-    throw err;
+    console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
   }
 }

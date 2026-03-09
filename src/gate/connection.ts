@@ -1,4 +1,5 @@
 import { resolveClientBundle } from "../tls/bundle.ts";
+import { validateClientBundle } from "../tls/store.ts";
 
 /** Bun-specific extension of RequestInit with `unix` and `tls` fields. */
 export type BunRequestInit = RequestInit & {
@@ -19,13 +20,13 @@ export type GateConnection =
  * environment variables.
  *
  * - If `gate_url` is configured (or `GCP_AUTHCALATOR_GATE_URL` env var):
- *   resolve the client bundle and return TCP mode.
+ *   resolve and validate the client bundle, then return TCP mode.
  * - Otherwise: return Unix socket mode.
  */
-export function buildGateConnection(
+export async function buildGateConnection(
   config: { socket_path: string; gate_url?: string; tls_bundle?: string },
   env: Record<string, string | undefined> = process.env,
-): GateConnection {
+): Promise<GateConnection> {
   const gateUrl = config.gate_url ?? env.GCP_AUTHCALATOR_GATE_URL;
 
   if (!gateUrl) {
@@ -40,6 +41,8 @@ export function buildGateConnection(
         "  Set GCP_AUTHCALATOR_TLS_BUNDLE_B64 env var or --tls-bundle config option.",
     );
   }
+
+  await validateClientBundle(bundle);
 
   return {
     mode: "tcp",

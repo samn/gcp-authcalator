@@ -15,7 +15,7 @@ export async function runMetadataProxy(
 ): Promise<void> {
   const proxyConfig = MetadataProxyConfigSchema.parse(config);
 
-  const conn: GateConnection = buildGateConnection(proxyConfig);
+  const conn: GateConnection = await buildGateConnection(proxyConfig);
 
   try {
     await checkGateConnection(conn, options.checkFetchFn);

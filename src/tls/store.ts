@@ -89,44 +89,155 @@ export async function ensureTlsFiles(tlsDir?: string, force?: boolean): Promise<
  * Load and validate TLS files from disk.
  *
  * Unlike `ensureTlsFiles`, this does NOT generate certificates — it only loads
- * existing ones and checks that they are not expired. Use this in the gate
- * server so that certs are only created explicitly via `init-tls`.
+ * existing ones and validates that they are well-formed, not expired, and that
+ * the server/client certificates are properly signed by the CA.
  *
- * Throws actionable errors when files are missing or expired.
+ * Throws actionable errors when files are missing, invalid, or expired.
  */
-export function loadAndValidateTlsFiles(tlsDir?: string): TlsFiles {
+export async function loadAndValidateTlsFiles(tlsDir?: string): Promise<TlsFiles> {
   const dir = tlsDir ?? DEFAULT_TLS_DIR;
+  const hint = `\n  Run 'gcp-authcalator init-tls' to regenerate the certificate chain.`;
 
   let files: TlsFiles;
   try {
     files = loadTlsFiles(dir);
   } catch {
-    throw new Error(
-      `TLS certificates not found in ${dir}\n` +
-        `  Run 'gcp-authcalator init-tls' to generate them.`,
-    );
+    throw new Error(`TLS certificates not found in ${dir}` + hint);
   }
 
-  if (isCertExpired(files.caCert)) {
+  // Validate that all PEM content is parseable as X.509 certificates
+  let caCert: x509.X509Certificate;
+  try {
+    caCert = new x509.X509Certificate(files.caCert);
+  } catch {
+    throw new Error(`TLS CA certificate is malformed in ${dir}` + hint);
+  }
+
+  let serverCert: x509.X509Certificate;
+  try {
+    serverCert = new x509.X509Certificate(files.serverCert);
+  } catch {
+    throw new Error(`TLS server certificate is malformed in ${dir}` + hint);
+  }
+
+  let clientCert: x509.X509Certificate;
+  try {
+    clientCert = new x509.X509Certificate(files.clientCert);
+  } catch {
+    throw new Error(`TLS client certificate is malformed in ${dir}` + hint);
+  }
+
+  // Validate the CA has BasicConstraints CA=true
+  const bcExt = caCert.getExtension("2.5.29.19"); // basicConstraints OID
+  if (!bcExt) {
+    throw new Error(`TLS CA certificate is missing BasicConstraints extension in ${dir}` + hint);
+  }
+
+  // Validate expiry
+  const now = Date.now();
+  if (caCert.notAfter.getTime() < now) {
+    throw new Error(`TLS CA certificate has expired in ${dir}` + hint);
+  }
+  if (serverCert.notAfter.getTime() < now) {
+    throw new Error(`TLS server certificate has expired in ${dir}` + hint);
+  }
+  if (clientCert.notAfter.getTime() < now) {
+    throw new Error(`TLS client certificate has expired in ${dir}` + hint);
+  }
+
+  // Validate that server and client certs were signed by this CA
+  const caPublicKey = await caCert.publicKey.export();
+  if (serverCert.issuer !== caCert.subject) {
     throw new Error(
-      `TLS CA certificate has expired in ${dir}\n` +
-        `  Run 'gcp-authcalator init-tls' to regenerate.`,
+      `TLS server certificate was not issued by the CA in ${dir}` +
+        `\n  Server issuer: ${serverCert.issuer}` +
+        `\n  CA subject:    ${caCert.subject}` +
+        hint,
     );
   }
-  if (isCertExpired(files.serverCert)) {
+  try {
+    const serverValid = await serverCert.verify({ publicKey: caPublicKey, signatureOnly: true });
+    if (!serverValid) {
+      throw new Error(`TLS server certificate signature is invalid in ${dir}` + hint);
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message.includes(dir)) throw err;
+    throw new Error(`TLS server certificate signature verification failed in ${dir}` + hint);
+  }
+
+  if (clientCert.issuer !== caCert.subject) {
     throw new Error(
-      `TLS server certificate has expired in ${dir}\n` +
-        `  Run 'gcp-authcalator init-tls' to regenerate.`,
+      `TLS client certificate was not issued by the CA in ${dir}` +
+        `\n  Client issuer: ${clientCert.issuer}` +
+        `\n  CA subject:    ${caCert.subject}` +
+        hint,
     );
   }
-  if (isCertExpired(files.clientCert)) {
-    throw new Error(
-      `TLS client certificate has expired in ${dir}\n` +
-        `  Run 'gcp-authcalator init-tls' to regenerate.`,
-    );
+  try {
+    const clientValid = await clientCert.verify({ publicKey: caPublicKey, signatureOnly: true });
+    if (!clientValid) {
+      throw new Error(`TLS client certificate signature is invalid in ${dir}` + hint);
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message.includes(dir)) throw err;
+    throw new Error(`TLS client certificate signature verification failed in ${dir}` + hint);
   }
 
   return files;
+}
+
+/**
+ * Validate a client bundle's certificates are well-formed, not expired, and
+ * that the client certificate is signed by the bundle's CA.
+ *
+ * Throws actionable errors with regeneration instructions.
+ */
+export async function validateClientBundle(bundle: ClientBundle): Promise<void> {
+  const hint =
+    "\n  On the host, run 'gcp-authcalator init-tls' to regenerate certificates," +
+    "\n  then update the client bundle (GCP_AUTHCALATOR_TLS_BUNDLE_B64 or --tls-bundle).";
+
+  let caCert: x509.X509Certificate;
+  try {
+    caCert = new x509.X509Certificate(bundle.caCert);
+  } catch {
+    throw new Error("TLS client bundle: CA certificate is malformed" + hint);
+  }
+
+  let clientCert: x509.X509Certificate;
+  try {
+    clientCert = new x509.X509Certificate(bundle.clientCert);
+  } catch {
+    throw new Error("TLS client bundle: client certificate is malformed" + hint);
+  }
+
+  const now = Date.now();
+  if (caCert.notAfter.getTime() < now) {
+    throw new Error("TLS client bundle: CA certificate has expired" + hint);
+  }
+  if (clientCert.notAfter.getTime() < now) {
+    throw new Error("TLS client bundle: client certificate has expired" + hint);
+  }
+
+  // Validate the client cert was signed by the bundle's CA
+  if (clientCert.issuer !== caCert.subject) {
+    throw new Error(
+      "TLS client bundle: client certificate was not issued by the bundle CA" +
+        `\n  Client issuer: ${clientCert.issuer}` +
+        `\n  CA subject:    ${caCert.subject}` +
+        hint,
+    );
+  }
+  try {
+    const caPublicKey = await caCert.publicKey.export();
+    const valid = await clientCert.verify({ publicKey: caPublicKey, signatureOnly: true });
+    if (!valid) {
+      throw new Error("TLS client bundle: client certificate signature is invalid" + hint);
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message.includes("TLS client bundle")) throw err;
+    throw new Error("TLS client bundle: client certificate signature verification failed" + hint);
+  }
 }
 
 /** Load TLS files from disk. Throws if files are missing. */
