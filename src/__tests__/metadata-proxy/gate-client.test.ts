@@ -308,6 +308,31 @@ describe("checkGateConnection", () => {
     };
     await expect(checkGateConnection(conn, fetchFn)).resolves.toBeUndefined();
   });
+
+  test("passes mTLS client certs in TCP health check", async () => {
+    let capturedOpts: Record<string, unknown> | undefined;
+
+    const fetchFn = (async (_url: string, opts: Record<string, unknown>) => {
+      capturedOpts = opts;
+      return new Response('{"status":"ok"}', { status: 200 });
+    }) as unknown as typeof globalThis.fetch;
+
+    const conn: GateConnection = {
+      mode: "tcp",
+      gateUrl: "https://localhost:8174",
+      caCert: "ca-pem",
+      clientCert: "client-cert-pem",
+      clientKey: "client-key-pem",
+    };
+    await checkGateConnection(conn, fetchFn);
+
+    expect(capturedOpts).toBeDefined();
+    expect(capturedOpts!.tls).toEqual({
+      cert: "client-cert-pem",
+      key: "client-key-pem",
+      ca: "ca-pem",
+    });
+  });
 });
 
 function tcpConn(): GateConnection {
