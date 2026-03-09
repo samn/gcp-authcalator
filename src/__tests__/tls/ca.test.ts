@@ -26,25 +26,25 @@ describe("generateCA", () => {
     expect(cert.issuer).toBe(cert.subject);
   });
 
-  test("CA cert has 1-year validity", async () => {
+  test("CA cert has 90-day validity", async () => {
     const { caCert } = await generateCA();
     const cert = new x509.X509Certificate(caCert);
 
     const validityMs = cert.notAfter.getTime() - cert.notBefore.getTime();
     const validityDays = validityMs / (24 * 60 * 60 * 1000);
 
-    // Allow 1 day tolerance
-    expect(validityDays).toBeGreaterThan(364);
-    expect(validityDays).toBeLessThan(366);
+    expect(validityDays).toBeGreaterThan(89);
+    expect(validityDays).toBeLessThan(91);
   });
 
-  test("CA cert has basicConstraints with cA=true", async () => {
+  test("CA cert has basicConstraints with cA=true and pathLength=0", async () => {
     const { caCert } = await generateCA();
     const cert = new x509.X509Certificate(caCert);
 
     const bc = cert.getExtension(x509.BasicConstraintsExtension);
     expect(bc).toBeDefined();
     expect(bc!.ca).toBe(true);
+    expect(bc!.pathLength).toBe(0);
   });
 
   test("CA cert has keyUsage with keyCertSign and cRLSign", async () => {

@@ -1,5 +1,9 @@
 import { existsSync, lstatSync } from "node:fs";
-import type { GateConnection } from "../gate/connection.ts";
+import {
+  type GateConnection,
+  type BunRequestInit,
+  connectionFetchOpts,
+} from "../gate/connection.ts";
 import type { CachedToken, GateClient } from "./types.ts";
 
 /** Minimum remaining lifetime before we re-fetch a cached token (5 minutes). */
@@ -34,7 +38,7 @@ export async function checkGateConnection(
         ca: conn.caCert,
       },
       signal: AbortSignal.timeout(3_000),
-    } as RequestInit);
+    } as BunRequestInit);
   } catch {
     throw new Error(
       `Could not connect to gcp-gate at ${conn.gateUrl}\n` +
@@ -83,7 +87,7 @@ export async function checkGateSocket(
     res = await fetchFn("http://localhost/health", {
       unix: socketPath,
       signal: AbortSignal.timeout(3_000),
-    } as RequestInit);
+    } as BunRequestInit);
   } catch {
     throw new Error(
       `Could not connect to gcp-gate at ${socketPath}\n` +
@@ -99,29 +103,6 @@ export async function checkGateSocket(
         `  The daemon may be in a bad state. Try restarting gcp-gate.`,
     );
   }
-}
-
-/**
- * Build fetch options for a given gate connection.
- * Returns the base URL and extra RequestInit options.
- */
-function connectionFetchOpts(conn: GateConnection): { baseUrl: string; extraOpts: RequestInit } {
-  if (conn.mode === "unix") {
-    return {
-      baseUrl: "http://localhost",
-      extraOpts: { unix: conn.socketPath } as RequestInit,
-    };
-  }
-  return {
-    baseUrl: conn.gateUrl,
-    extraOpts: {
-      tls: {
-        cert: conn.clientCert,
-        key: conn.clientKey,
-        ca: conn.caCert,
-      },
-    } as RequestInit,
-  };
 }
 
 /**

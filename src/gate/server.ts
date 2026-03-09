@@ -8,6 +8,7 @@ import { createAuditModule } from "./audit.ts";
 import { createProdRateLimiter } from "./rate-limit.ts";
 import { handleRequest } from "./handlers.ts";
 import { ensureTlsFiles } from "../tls/store.ts";
+import type { BunRequestInit } from "./connection.ts";
 
 export interface GateServerResult {
   server: ReturnType<typeof Bun.serve>;
@@ -86,7 +87,7 @@ export async function startGateServer(
       const probe = await fetch("http://localhost/health", {
         unix: config.socket_path,
         signal: AbortSignal.timeout(1000),
-      } as RequestInit);
+      } as BunRequestInit);
       if (probe.ok) {
         throw new Error(`gate: another instance is already running on ${config.socket_path}`);
       }

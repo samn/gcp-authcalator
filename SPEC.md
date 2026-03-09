@@ -77,7 +77,7 @@ Developer's Laptop                          Remote Host / Codespace / Coder
 - Gate generates a private CA on first run with `--tcp-port` (or via `gcp-authcalator init-tls`)
 - Server cert (SAN: localhost, 127.0.0.1) and client cert signed by the CA
 - ECDSA P-256 algorithm (universally supported in WebCrypto)
-- 90-day server/client certs, 1-year CA
+- 90-day lifetime for all certificates (CA, server, and client)
 - Auto-regeneration on gate startup when certs expire
 - Client bundle (CA cert + client cert + client key) distributed as base64-encoded env var
 
@@ -219,7 +219,7 @@ Generates and manages TLS certificates for remote devcontainer support:
 - `gcp-authcalator init-tls --bundle-b64` — Print base64-encoded client bundle to stdout
 - `gcp-authcalator init-tls --show-path` — Print TLS directory path
 
-Certificates are stored in `~/.gcp-authcalator/tls/` with `0600` permissions (directory `0700`). This is intentionally different from the socket directory — certificates must survive reboots (90-day / 1-year lifetimes), while the Unix socket is ephemeral runtime state.
+Certificates are stored in `~/.gcp-authcalator/tls/` with `0600` permissions (directory `0700`). This is intentionally different from the socket directory — certificates must survive reboots (90-day lifetime), while the Unix socket is ephemeral runtime state.
 
 ### 6. Remote Transport Configuration
 
@@ -237,4 +237,4 @@ Config precedence: CLI args > TOML file > env vars > schema defaults.
 
 `gate_url` is validated to require `https://` — `http://` URLs are rejected at config parse time, preventing accidental plaintext connections to gate.
 
-`GCP_AUTHCALATOR_TLS_BUNDLE_B64` is handled specially: after reading, it is deleted from `process.env` to mitigate exposure via `/proc/<pid>/environ`.
+`GCP_AUTHCALATOR_TLS_BUNDLE_B64` is handled specially: after reading, it is deleted from `process.env` to prevent inheritance by child processes.

@@ -1,5 +1,15 @@
 import { resolveClientBundle } from "../tls/bundle.ts";
 
+/** Bun-specific extension of RequestInit with `unix` and `tls` fields. */
+export type BunRequestInit = RequestInit & {
+  unix?: string;
+  tls?: {
+    cert?: string;
+    key?: string;
+    ca?: string;
+  };
+};
+
 export type GateConnection =
   | { mode: "unix"; socketPath: string }
   | { mode: "tcp"; gateUrl: string; caCert: string; clientCert: string; clientKey: string };
@@ -37,5 +47,31 @@ export function buildGateConnection(
     caCert: bundle.caCert,
     clientCert: bundle.clientCert,
     clientKey: bundle.clientKey,
+  };
+}
+
+/**
+ * Build fetch options for a given gate connection.
+ * Returns the base URL and extra RequestInit options (with Bun-specific fields).
+ */
+export function connectionFetchOpts(conn: GateConnection): {
+  baseUrl: string;
+  extraOpts: BunRequestInit;
+} {
+  if (conn.mode === "unix") {
+    return {
+      baseUrl: "http://localhost",
+      extraOpts: { unix: conn.socketPath },
+    };
+  }
+  return {
+    baseUrl: conn.gateUrl,
+    extraOpts: {
+      tls: {
+        cert: conn.clientCert,
+        key: conn.clientKey,
+        ca: conn.caCert,
+      },
+    },
   };
 }

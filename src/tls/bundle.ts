@@ -21,7 +21,7 @@ export function resolveClientBundle(
   const b64 = env[TLS_BUNDLE_B64_ENV];
   if (b64) {
     const bundle = loadClientBundleFromBase64(b64);
-    // Clear from process env to limit exposure via /proc/*/environ
+    // Clear from process env to prevent inheritance by child processes
     delete process.env[TLS_BUNDLE_B64_ENV];
     return bundle;
   }

@@ -18,8 +18,8 @@ export async function runInitTls(options: InitTlsOptions = {}): Promise<void> {
     return;
   }
 
-  // Always regenerate when init-tls is called explicitly
-  await ensureTlsFiles(tlsDir);
+  // Force-regenerate when init-tls is called explicitly
+  await ensureTlsFiles(tlsDir, true);
 
   if (options.bundleB64) {
     const b64 = getClientBundleBase64(tlsDir);

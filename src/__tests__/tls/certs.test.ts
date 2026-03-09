@@ -29,6 +29,16 @@ describe("generateServerCert", () => {
     expect(x509Cert.issuer).toBe(caCert.subject);
   });
 
+  test("server cert signature is cryptographically valid against CA public key", async () => {
+    const ca = await generateCA();
+    const { cert } = await generateServerCert(ca.caCert, ca.caKey);
+    const x509Cert = new x509.X509Certificate(cert);
+    const caCert = new x509.X509Certificate(ca.caCert);
+
+    const valid = await x509Cert.verify({ publicKey: await caCert.publicKey.export() });
+    expect(valid).toBe(true);
+  });
+
   test("server cert has SAN with localhost and 127.0.0.1", async () => {
     const ca = await generateCA();
     const { cert } = await generateServerCert(ca.caCert, ca.caKey);
@@ -135,6 +145,16 @@ describe("generateClientCert", () => {
     const caCert = new x509.X509Certificate(ca.caCert);
 
     expect(x509Cert.issuer).toBe(caCert.subject);
+  });
+
+  test("client cert signature is cryptographically valid against CA public key", async () => {
+    const ca = await generateCA();
+    const { cert } = await generateClientCert(ca.caCert, ca.caKey);
+    const x509Cert = new x509.X509Certificate(cert);
+    const caCert = new x509.X509Certificate(ca.caCert);
+
+    const valid = await x509Cert.verify({ publicKey: await caCert.publicKey.export() });
+    expect(valid).toBe(true);
   });
 
   test("client cert uses ECDSA P-256", async () => {

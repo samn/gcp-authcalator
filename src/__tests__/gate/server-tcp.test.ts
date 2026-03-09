@@ -6,6 +6,7 @@ import { startGateServer, type GateServerResult } from "../../gate/server.ts";
 import type { GateConfig } from "../../config.ts";
 import type { AuthClient } from "google-auth-library";
 import { ensureTlsFiles } from "../../tls/store.ts";
+import type { BunRequestInit } from "../../gate/connection.ts";
 import { generateCA } from "../../tls/ca.ts";
 import { generateClientCert } from "../../tls/certs.ts";
 
@@ -77,7 +78,7 @@ describe("Gate TCP+mTLS server", () => {
         key: tlsFiles.clientKey,
         ca: tlsFiles.caCert,
       },
-    } as RequestInit);
+    } as BunRequestInit);
 
     expect(res.status).toBe(200);
     const body = (await res.json()) as { status: string };
@@ -115,7 +116,7 @@ describe("Gate TCP+mTLS server", () => {
         key: tlsFiles.clientKey,
         ca: tlsFiles.caCert,
       },
-    } as RequestInit);
+    } as BunRequestInit);
 
     expect(res.status).toBe(200);
     const body = (await res.json()) as { access_token: string };
@@ -152,7 +153,7 @@ describe("Gate TCP+mTLS server", () => {
     try {
       await fetch(`https://localhost:${port}/health`, {
         tls: { ca: tlsFiles.caCert },
-      } as RequestInit);
+      } as BunRequestInit);
       // If it didn't throw, fail the test
       expect(true).toBe(false);
     } catch {
@@ -197,7 +198,7 @@ describe("Gate TCP+mTLS server", () => {
           key: wrongClient.key,
           ca: tlsFiles.caCert, // Trust the server's CA
         },
-      } as RequestInit);
+      } as BunRequestInit);
       expect(true).toBe(false);
     } catch {
       // Expected: connection rejected due to untrusted client cert

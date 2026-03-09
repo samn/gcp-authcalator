@@ -258,7 +258,7 @@ gcp-authcalator init-tls --show-path
 
 The client bundle (CA cert + client cert + client key) is a single base64-encoded string that you distribute to remote environments via secrets or environment variables. It is **not** a GCP credential — it only authorizes communication with the gate daemon.
 
-Certificates are generated with ECDSA P-256: 90-day lifetime for server/client certs, 1-year for the CA. Gate auto-regenerates expired certs on startup and warns you to update remote bundles.
+Certificates are generated with ECDSA P-256 with a 90-day lifetime for all certificates (CA, server, and client). All certs are treated as ephemeral and regenerated together. Gate auto-regenerates expired certs on startup and warns you to update remote bundles.
 
 ### `kube-setup` — Patch kubeconfig for GKE
 
@@ -464,7 +464,7 @@ gcp-authcalator is designed for environments where a coding agent (or other untr
 - A malicious process running as the **same user** with sufficient sophistication (e.g., `ptrace`, reading `/proc/*/mem`) can potentially extract tokens from a running process. Full same-user isolation requires OS-level sandboxing beyond what gcp-authcalator provides.
 - Once the engineer approves a prod token request, the elevated token is available to the approved process tree for its lifetime (~1 hour). gcp-authcalator cannot revoke it early.
 - **Stolen client bundle** (remote mode): An attacker with the client cert can authenticate to gate over a forwarded port. Mitigation: client bundle has 90-day expiry; bundle files are `0600`; gate only listens on localhost; prod tokens still require confirmation dialog.
-- **Bundle in env var**: `GCP_AUTHCALATOR_TLS_BUNDLE_B64` is cleared from `process.env` immediately after reading to limit exposure window. The bundle only authorizes gate communication, not GCP access directly.
+- **Bundle in env var**: `GCP_AUTHCALATOR_TLS_BUNDLE_B64` is cleared from `process.env` immediately after reading to prevent inheritance by child processes. The bundle only authorizes gate communication, not GCP access directly.
 
 ## Development
 

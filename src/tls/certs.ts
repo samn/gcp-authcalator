@@ -1,4 +1,5 @@
 import * as x509 from "@peculiar/x509";
+import { randomSerialNumber, keyToPem, pemToArrayBuffer } from "./utils.ts";
 
 /**
  * Generate a server certificate signed by the given CA.
@@ -95,26 +96,4 @@ export async function generateClientCert(
     cert: cert.toString("pem"),
     key: keyToPem(exportedKey),
   };
-}
-
-function randomSerialNumber(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
-  bytes[0]! &= 0x7f;
-  return Array.from(bytes)
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-function keyToPem(keyData: ArrayBuffer): string {
-  const b64 = Buffer.from(keyData).toString("base64");
-  const lines = b64.match(/.{1,64}/g) ?? [];
-  return `-----BEGIN PRIVATE KEY-----\n${lines.join("\n")}\n-----END PRIVATE KEY-----\n`;
-}
-
-function pemToArrayBuffer(pem: string): ArrayBuffer {
-  const b64 = pem
-    .replace(/-----BEGIN [A-Z ]+-----/, "")
-    .replace(/-----END [A-Z ]+-----/, "")
-    .replace(/\s/g, "");
-  return Buffer.from(b64, "base64").buffer as ArrayBuffer;
 }

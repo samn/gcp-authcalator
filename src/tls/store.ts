@@ -28,7 +28,7 @@ const DEFAULT_TLS_DIR = join(homedir(), ".gcp-authcalator", "tls");
  *
  * Returns the loaded PEM contents.
  */
-export async function ensureTlsFiles(tlsDir?: string): Promise<TlsFiles> {
+export async function ensureTlsFiles(tlsDir?: string, force?: boolean): Promise<TlsFiles> {
   const dir = tlsDir ?? DEFAULT_TLS_DIR;
   mkdirSync(dir, { recursive: true, mode: 0o700 });
 
@@ -36,7 +36,7 @@ export async function ensureTlsFiles(tlsDir?: string): Promise<TlsFiles> {
 
   const allExist = Object.values(paths).every((p) => existsSync(p));
 
-  if (allExist) {
+  if (allExist && !force) {
     // Check expiry
     const caCertPem = readFileSync(paths.caCert, "utf-8");
     const serverCertPem = readFileSync(paths.serverCert, "utf-8");
@@ -161,10 +161,28 @@ function parseClientBundle(content: string): ClientBundle {
     );
   }
 
-  // Order: CA cert, client cert, client key
-  const caCert = pemBlocks[0]! + "\n";
-  const clientCert = pemBlocks[1]! + "\n";
-  const clientKey = pemBlocks[2]! + "\n";
+  // Parse by PEM label type rather than assuming fixed order
+  const certs: string[] = [];
+  const keys: string[] = [];
 
-  return { caCert, clientCert, clientKey };
+  for (const block of pemBlocks) {
+    if (block.startsWith("-----BEGIN CERTIFICATE-----")) {
+      certs.push(block + "\n");
+    } else if (block.startsWith("-----BEGIN PRIVATE KEY-----")) {
+      keys.push(block + "\n");
+    } else {
+      throw new Error(`Invalid client bundle: unexpected PEM block type: ${block.slice(0, 40)}...`);
+    }
+  }
+
+  if (certs.length !== 2) {
+    throw new Error(
+      `Invalid client bundle: expected 2 CERTIFICATE blocks (CA + client), found ${certs.length}`,
+    );
+  }
+  if (keys.length !== 1) {
+    throw new Error(`Invalid client bundle: expected 1 PRIVATE KEY block, found ${keys.length}`);
+  }
+
+  return { caCert: certs[0]!, clientCert: certs[1]!, clientKey: keys[0]! };
 }

@@ -1,4 +1,4 @@
-import type { GateConnection } from "../gate/connection.ts";
+import { type GateConnection, connectionFetchOpts } from "../gate/connection.ts";
 
 export interface FetchProdTokenOptions {
   /** Override fetch for testing. */
@@ -12,28 +12,6 @@ export interface ProdTokenResult {
   expires_in: number;
   /** Engineer's email address (from gcp-gate /identity endpoint). */
   email: string;
-}
-
-/**
- * Build the base URL and extra fetch options for a gate connection.
- */
-function connectionFetchOpts(conn: GateConnection): { baseUrl: string; extraOpts: RequestInit } {
-  if (conn.mode === "unix") {
-    return {
-      baseUrl: "http://localhost",
-      extraOpts: { unix: conn.socketPath } as RequestInit,
-    };
-  }
-  return {
-    baseUrl: conn.gateUrl,
-    extraOpts: {
-      tls: {
-        cert: conn.clientCert,
-        key: conn.clientKey,
-        ca: conn.caCert,
-      },
-    } as RequestInit,
-  };
 }
 
 /**
