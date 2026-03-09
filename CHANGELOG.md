@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-03-09
+
 ### Added
 
 - TCP + mutual TLS transport for remote devcontainer support (SSH, Codespaces, Coder)
