@@ -109,6 +109,47 @@ describe("summarizeCommand", () => {
     expect(result).not.toContain("\x1f");
     expect(result).toBe("gcloud arg with nulls");
   });
+
+  test("redacts secret key with mixed case", () => {
+    const result = summarizeCommand(["tool", "--API_KEY=my-secret"]);
+
+    expect(result).toBeDefined();
+    expect(result).toContain("--API_KEY=***");
+    expect(result).not.toContain("my-secret");
+  });
+
+  test("redacts secret key with empty value after equals", () => {
+    const result = summarizeCommand(["tool", "--password="]);
+
+    expect(result).toBeDefined();
+    expect(result).toBe("tool --password=***");
+  });
+
+  test("does not redact secret key without equals sign", () => {
+    // SECRET_KEY_RE requires = or : at the end; bare --password is just a flag
+    const result = summarizeCommand(["tool", "--password"]);
+
+    expect(result).toBeDefined();
+    expect(result).toBe("tool --password");
+  });
+
+  test("does not redact values just below the 40-char threshold", () => {
+    const shortValue = "A".repeat(39);
+    const result = summarizeCommand(["curl", shortValue]);
+
+    expect(result).toBeDefined();
+    expect(result).not.toContain("***");
+    expect(result).toContain(shortValue);
+  });
+
+  test("redacts values exactly at the 40-char threshold", () => {
+    const exactValue = "A".repeat(40);
+    const result = summarizeCommand(["curl", exactValue]);
+
+    expect(result).toBeDefined();
+    expect(result).toContain("***");
+    expect(result).not.toContain(exactValue);
+  });
 });
 
 // ---------------------------------------------------------------------------
