@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Release test suite failing in environments with GPG commit signing enabled
 - Kube-setup read-only file test failing when running as root
 
+### Security
+
+- Prod token rate limiter: tighten denial cooldown from 1 s to 5 s and max attempts per window from 10 to 5, matching the documented security posture in SPEC.md
+
 ### Changed
 
 - Improved test coverage: overall line coverage from 97.65% to 98.34%, with new tests for TLS certificate validation, audit logging error paths, token expiry edge cases, `validateClientBundle`, and command summarization edge cases
