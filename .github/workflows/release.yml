@@ -35,16 +35,19 @@ jobs:
       - name: Build binary
         run: bun build --compile --target=${{ matrix.target }} index.ts --outfile ${{ matrix.artifact }}
 
+      - name: Compress binary
+        run: tar czf ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
+
       - name: Generate checksum
-        run: shasum -a 256 ${{ matrix.artifact }} > ${{ matrix.artifact }}.sha256
+        run: shasum -a 256 ${{ matrix.artifact }}.tar.gz > ${{ matrix.artifact }}.tar.gz.sha256
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: |
-            ${{ matrix.artifact }}
-            ${{ matrix.artifact }}.sha256
+            ${{ matrix.artifact }}.tar.gz
+            ${{ matrix.artifact }}.tar.gz.sha256
 
   release:
     name: Create Release
