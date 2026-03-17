@@ -168,8 +168,12 @@ describe("createGateClient — scopes", () => {
 
     await client.getToken();
     expect(capturedUrl).toContain("/token?scopes=");
-    expect(capturedUrl).toContain("https://www.googleapis.com/auth/sqlservice.login");
-    expect(capturedUrl).toContain("https://www.googleapis.com/auth/devstorage.read_only");
+    expect(capturedUrl).toContain(
+      encodeURIComponent("https://www.googleapis.com/auth/sqlservice.login"),
+    );
+    expect(capturedUrl).toContain(
+      encodeURIComponent("https://www.googleapis.com/auth/devstorage.read_only"),
+    );
   });
 
   test("uses bare /token URL when no scopes configured", async () => {

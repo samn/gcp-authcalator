@@ -138,7 +138,7 @@ export function createGateClient(
     }
 
     const tokenUrl = options.scopes
-      ? `${baseUrl}/token?scopes=${options.scopes.join(",")}`
+      ? `${baseUrl}/token?scopes=${options.scopes.map(encodeURIComponent).join(",")}`
       : `${baseUrl}/token`;
     const res = await fetchFn(tokenUrl, extraOpts);
 

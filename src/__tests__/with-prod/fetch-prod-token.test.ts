@@ -195,7 +195,9 @@ describe("fetchProdToken", () => {
     );
 
     expect(capturedTokenUrl).toContain("level=prod");
-    expect(capturedTokenUrl).toContain("scopes=https://www.googleapis.com/auth/sqlservice.login");
+    expect(capturedTokenUrl).toContain(
+      `scopes=${encodeURIComponent("https://www.googleapis.com/auth/sqlservice.login")}`,
+    );
   });
 
   test("omits scopes from token URL when scopes not provided", async () => {

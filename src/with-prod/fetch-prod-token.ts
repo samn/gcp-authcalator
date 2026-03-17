@@ -43,7 +43,7 @@ export async function fetchProdToken(
   // Fetch prod token (may trigger host-side confirmation dialog)
   let tokenUrl = `${baseUrl}/token?level=prod`;
   if (options.scopes && options.scopes.length > 0) {
-    tokenUrl += `&scopes=${options.scopes.join(",")}`;
+    tokenUrl += `&scopes=${options.scopes.map(encodeURIComponent).join(",")}`;
   }
   const tokenRes = await fetchFn(tokenUrl, fetchOpts);
 
