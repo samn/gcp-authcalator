@@ -121,6 +121,32 @@ describe("createAuthModule", () => {
 
       await expect(mintDevToken()).rejects.toThrow("Failed to mint dev token");
     });
+
+    test("re-mints token when cache expires within 5-minute margin", async () => {
+      let callCount = 0;
+      // Token that expires in 4 minutes (within the 5-minute CACHE_MARGIN_MS)
+      const nearExpiryMs = Date.now() + 4 * 60 * 1000;
+      const client = {
+        credentials: { expiry_date: nearExpiryMs },
+        getAccessToken: async () => {
+          callCount++;
+          return { token: `token-${callCount}`, res: null };
+        },
+      } as unknown as AuthClient;
+
+      const { mintDevToken } = createAuthModule(TEST_CONFIG, {
+        sourceClient: mockClient("source"),
+        impersonatedClient: client,
+      });
+
+      const first = await mintDevToken();
+      expect(first.access_token).toBe("token-1");
+
+      // Second call should re-mint because remaining lifetime < 5 minutes
+      const second = await mintDevToken();
+      expect(second.access_token).toBe("token-2");
+      expect(callCount).toBe(2);
+    });
   });
 
   describe("mintProdToken", () => {

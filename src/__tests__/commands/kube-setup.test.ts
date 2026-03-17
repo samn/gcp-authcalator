@@ -319,6 +319,11 @@ describe("runKubeSetup", () => {
   });
 
   test("exits 1 when kubeconfig is not writable", async () => {
+    // Skip when running as root since root bypasses file permission checks
+    if (process.getuid?.() === 0) {
+      console.log("skipping: root bypasses file permission checks");
+      return;
+    }
     const { chmodSync } = await import("node:fs");
     const dir = mkdtempSync(join(tmpdir(), "kube-setup-"));
     const kubeconfigPath = join(dir, "config");

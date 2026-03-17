@@ -543,3 +543,55 @@ describe("unknown path", () => {
     expect(body.error).toContain("Not found");
   });
 });
+
+// ---------------------------------------------------------------------------
+// expires_in edge cases
+// ---------------------------------------------------------------------------
+
+describe("expires_in edge cases", () => {
+  test("dev token expires_in is never negative", async () => {
+    const pastToken: CachedToken = {
+      access_token: "expired-token",
+      expires_at: new Date(Date.now() - 1000), // already expired
+    };
+    const deps = makeDeps({ mintDevToken: async () => pastToken });
+    const res = await handleRequest(makeRequest("/token"), deps);
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.expires_in).toBe(0);
+  });
+
+  test("prod token expires_in is never negative", async () => {
+    const pastToken: CachedToken = {
+      access_token: "expired-prod-token",
+      expires_at: new Date(Date.now() - 5000),
+    };
+    const deps = makeDeps({
+      mintProdToken: async () => pastToken,
+      confirmProdAccess: async () => true,
+    });
+    const res = await handleRequest(makeRequest("/token?level=prod"), deps);
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.expires_in).toBe(0);
+  });
+
+  test("dev token error audit handles non-Error thrown values", async () => {
+    const logs: AuditEntry[] = [];
+    const deps = makeDeps({
+      mintDevToken: async () => {
+        throw "string-error"; // eslint-disable-line no-throw-literal
+      },
+      writeAuditLog: (e) => logs.push(e),
+    });
+
+    const res = await handleRequest(makeRequest("/token"), deps);
+
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("Unknown error");
+    expect(logs[0]!.error).toBe("Unknown error");
+  });
+});

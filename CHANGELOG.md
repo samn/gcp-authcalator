@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Token `expires_in` could return negative values in gate and metadata-proxy handlers when a cached token was near expiry; now clamped to a minimum of 0
+- Release test suite failing in environments with GPG commit signing enabled
+- Kube-setup read-only file test failing when running as root
+
+### Changed
+
+- Improved test coverage: overall line coverage from 97.65% to 98.34%, with new tests for TLS certificate validation, audit logging error paths, token expiry edge cases, `validateClientBundle`, and command summarization edge cases
+
 ## [0.3.0] - 2026-03-09
 
 ### Added

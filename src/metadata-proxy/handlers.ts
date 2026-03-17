@@ -102,7 +102,7 @@ export async function handleRequest(req: Request, deps: MetadataProxyDeps): Prom
 async function handleToken(deps: MetadataProxyDeps): Promise<Response> {
   try {
     const cached = await deps.getToken();
-    const expiresIn = Math.floor((cached.expires_at.getTime() - Date.now()) / 1000);
+    const expiresIn = Math.max(0, Math.floor((cached.expires_at.getTime() - Date.now()) / 1000));
 
     const body: TokenResponse = {
       access_token: cached.access_token,

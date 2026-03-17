@@ -686,3 +686,41 @@ describe("unknown path", () => {
     expect(res.status).toBe(404);
   });
 });
+
+// ---------------------------------------------------------------------------
+// expires_in edge cases
+// ---------------------------------------------------------------------------
+
+describe("expires_in edge cases", () => {
+  test("token expires_in is never negative", async () => {
+    const pastToken: CachedToken = {
+      access_token: "expired-token",
+      expires_at: new Date(Date.now() - 1000),
+    };
+    const deps = makeDeps({ getToken: async () => pastToken });
+    const res = await handleRequest(
+      metadataRequest("/computeMetadata/v1/instance/service-accounts/default/token"),
+      deps,
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.expires_in).toBe(0);
+  });
+
+  test("token error handles non-Error thrown values", async () => {
+    const deps = makeDeps({
+      getToken: async () => {
+        throw "string-error"; // eslint-disable-line no-throw-literal
+      },
+    });
+    const res = await handleRequest(
+      metadataRequest("/computeMetadata/v1/instance/service-accounts/default/token"),
+      deps,
+    );
+
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("Unknown error");
+  });
+});

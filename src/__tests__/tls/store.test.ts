@@ -9,6 +9,7 @@ import {
   loadClientBundle,
   loadClientBundleFromBase64,
   getClientBundleBase64,
+  validateClientBundle,
 } from "../../tls/store.ts";
 
 // Shared temp directory tracking for all describe blocks
@@ -97,6 +98,62 @@ describe("ensureTlsFiles", () => {
     expect(first.caCert).not.toBe(second.caCert);
     expect(first.serverCert).not.toBe(second.serverCert);
     expect(first.clientCert).not.toBe(second.clientCert);
+  });
+
+  test("regenerates when server cert is expired (CA still valid)", async () => {
+    const dir = join(makeTempDir(), "tls");
+    await ensureTlsFiles(dir);
+
+    // Replace server cert with an expired one, keep CA valid
+    const x509 = await import("@peculiar/x509");
+    const algorithm = { name: "ECDSA" as const, namedCurve: "P-256" as const };
+    const keys = await crypto.subtle.generateKey(algorithm, true, ["sign", "verify"]);
+    const expiredCert = await x509.X509CertificateGenerator.createSelfSigned({
+      serialNumber: "01",
+      name: "CN=expired-server",
+      notBefore: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000),
+      notAfter: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000),
+      keys,
+      signingAlgorithm: { name: "ECDSA", hash: "SHA-256" },
+    });
+    writeFileSync(join(dir, "server.pem"), expiredCert.toString("pem"));
+
+    const warnSpy = await import("bun:test").then((m) =>
+      m.spyOn(console, "warn").mockImplementation(() => {}),
+    );
+    const second = await ensureTlsFiles(dir);
+    warnSpy.mockRestore();
+
+    // Should have regenerated all certs
+    expect(second.serverCert).not.toBe(expiredCert.toString("pem"));
+    expect(second.caCert).toBeDefined();
+  });
+
+  test("regenerates when client cert is expired (CA still valid)", async () => {
+    const dir = join(makeTempDir(), "tls");
+    await ensureTlsFiles(dir);
+
+    // Replace client cert with an expired one, keep CA valid
+    const x509 = await import("@peculiar/x509");
+    const algorithm = { name: "ECDSA" as const, namedCurve: "P-256" as const };
+    const keys = await crypto.subtle.generateKey(algorithm, true, ["sign", "verify"]);
+    const expiredCert = await x509.X509CertificateGenerator.createSelfSigned({
+      serialNumber: "01",
+      name: "CN=expired-client",
+      notBefore: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000),
+      notAfter: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000),
+      keys,
+      signingAlgorithm: { name: "ECDSA", hash: "SHA-256" },
+    });
+    writeFileSync(join(dir, "client.pem"), expiredCert.toString("pem"));
+
+    const warnSpy = await import("bun:test").then((m) =>
+      m.spyOn(console, "warn").mockImplementation(() => {}),
+    );
+    const second = await ensureTlsFiles(dir);
+    warnSpy.mockRestore();
+
+    expect(second.clientCert).not.toBe(expiredCert.toString("pem"));
   });
 
   test("regenerates when CA cert is expired", async () => {
@@ -243,6 +300,129 @@ describe("loadAndValidateTlsFiles", () => {
     await expect(loadAndValidateTlsFiles(dir)).rejects.toThrow(/server certificate is malformed/);
     await expect(loadAndValidateTlsFiles(dir)).rejects.toThrow(/init-tls/);
   });
+
+  test("throws when client cert is malformed", async () => {
+    const dir = join(makeTempDir(), "tls");
+    await ensureTlsFiles(dir);
+
+    writeFileSync(
+      join(dir, "client.pem"),
+      "-----BEGIN CERTIFICATE-----\ngarbage\n-----END CERTIFICATE-----\n",
+    );
+
+    await expect(loadAndValidateTlsFiles(dir)).rejects.toThrow(/client certificate is malformed/);
+    await expect(loadAndValidateTlsFiles(dir)).rejects.toThrow(/init-tls/);
+  });
+
+  test("throws when CA cert is missing BasicConstraints", async () => {
+    const dir = join(makeTempDir(), "tls");
+    await ensureTlsFiles(dir);
+
+    // Generate a self-signed cert WITHOUT BasicConstraints
+    const x509 = await import("@peculiar/x509");
+    const algorithm = { name: "ECDSA" as const, namedCurve: "P-256" as const };
+    const keys = await crypto.subtle.generateKey(algorithm, true, ["sign", "verify"]);
+    const noBcCert = await x509.X509CertificateGenerator.createSelfSigned({
+      serialNumber: "01",
+      name: "CN=no-bc",
+      notBefore: new Date(Date.now() - 1000),
+      notAfter: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
+      keys,
+      signingAlgorithm: { name: "ECDSA", hash: "SHA-256" },
+      extensions: [], // No BasicConstraints
+    });
+    writeFileSync(join(dir, "ca.pem"), noBcCert.toString("pem"));
+
+    await expect(loadAndValidateTlsFiles(dir)).rejects.toThrow(/BasicConstraints/);
+  });
+
+  test("throws when server cert has expired", async () => {
+    const dir = join(makeTempDir(), "tls");
+    await ensureTlsFiles(dir);
+
+    // Replace server cert with an expired one signed by the same CA
+    const x509 = await import("@peculiar/x509");
+    const algorithm = { name: "ECDSA" as const, namedCurve: "P-256" as const };
+    const keys = await crypto.subtle.generateKey(algorithm, true, ["sign", "verify"]);
+    const expiredCert = await x509.X509CertificateGenerator.createSelfSigned({
+      serialNumber: "02",
+      name: "CN=expired-server",
+      notBefore: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000),
+      notAfter: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000),
+      keys,
+      signingAlgorithm: { name: "ECDSA", hash: "SHA-256" },
+    });
+    writeFileSync(join(dir, "server.pem"), expiredCert.toString("pem"));
+
+    await expect(loadAndValidateTlsFiles(dir)).rejects.toThrow(/server certificate has expired/);
+  });
+
+  test("throws when client cert has expired", async () => {
+    const dir = join(makeTempDir(), "tls");
+    await ensureTlsFiles(dir);
+
+    // Replace client cert with an expired one
+    const x509 = await import("@peculiar/x509");
+    const algorithm = { name: "ECDSA" as const, namedCurve: "P-256" as const };
+    const keys = await crypto.subtle.generateKey(algorithm, true, ["sign", "verify"]);
+    const expiredCert = await x509.X509CertificateGenerator.createSelfSigned({
+      serialNumber: "03",
+      name: "CN=expired-client",
+      notBefore: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000),
+      notAfter: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000),
+      keys,
+      signingAlgorithm: { name: "ECDSA", hash: "SHA-256" },
+    });
+    writeFileSync(join(dir, "client.pem"), expiredCert.toString("pem"));
+
+    await expect(loadAndValidateTlsFiles(dir)).rejects.toThrow(/client certificate has expired/);
+  });
+
+  test("throws when server cert issuer doesn't match CA subject", async () => {
+    const dir = join(makeTempDir(), "tls");
+    await ensureTlsFiles(dir);
+
+    // Replace server cert with a self-signed cert (issuer != CA subject)
+    const x509 = await import("@peculiar/x509");
+    const algorithm = { name: "ECDSA" as const, namedCurve: "P-256" as const };
+    const keys = await crypto.subtle.generateKey(algorithm, true, ["sign", "verify"]);
+    const selfSigned = await x509.X509CertificateGenerator.createSelfSigned({
+      serialNumber: "04",
+      name: "CN=wrong-issuer-server",
+      notBefore: new Date(Date.now() - 1000),
+      notAfter: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
+      keys,
+      signingAlgorithm: { name: "ECDSA", hash: "SHA-256" },
+    });
+    writeFileSync(join(dir, "server.pem"), selfSigned.toString("pem"));
+
+    await expect(loadAndValidateTlsFiles(dir)).rejects.toThrow(
+      /server certificate was not issued by the CA/,
+    );
+  });
+
+  test("throws when client cert issuer doesn't match CA subject", async () => {
+    const dir = join(makeTempDir(), "tls");
+    await ensureTlsFiles(dir);
+
+    // Replace client cert with a self-signed cert (issuer != CA subject)
+    const x509 = await import("@peculiar/x509");
+    const algorithm = { name: "ECDSA" as const, namedCurve: "P-256" as const };
+    const keys = await crypto.subtle.generateKey(algorithm, true, ["sign", "verify"]);
+    const selfSigned = await x509.X509CertificateGenerator.createSelfSigned({
+      serialNumber: "05",
+      name: "CN=wrong-issuer-client",
+      notBefore: new Date(Date.now() - 1000),
+      notAfter: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
+      keys,
+      signingAlgorithm: { name: "ECDSA", hash: "SHA-256" },
+    });
+    writeFileSync(join(dir, "client.pem"), selfSigned.toString("pem"));
+
+    await expect(loadAndValidateTlsFiles(dir)).rejects.toThrow(
+      /client certificate was not issued by the CA/,
+    );
+  });
 });
 
 describe("loadClientBundle", () => {
@@ -353,5 +533,99 @@ describe("loadClientBundleFromBase64", () => {
     expect(bundle.caCert).toBe(originalBundle.caCert);
     expect(bundle.clientCert).toBe(originalBundle.clientCert);
     expect(bundle.clientKey).toBe(originalBundle.clientKey);
+  });
+});
+
+describe("validateClientBundle", () => {
+  test("accepts a valid client bundle", async () => {
+    const dir = join(makeTempDir(), "tls");
+    await ensureTlsFiles(dir);
+
+    const bundle = loadClientBundle(join(dir, "client-bundle.pem"));
+    await expect(validateClientBundle(bundle)).resolves.toBeUndefined();
+  });
+
+  test("throws when CA cert is malformed", async () => {
+    await expect(
+      validateClientBundle({
+        caCert: "-----BEGIN CERTIFICATE-----\ngarbage\n-----END CERTIFICATE-----\n",
+        clientCert: "-----BEGIN CERTIFICATE-----\nfoo\n-----END CERTIFICATE-----\n",
+        clientKey: "-----BEGIN PRIVATE KEY-----\nbar\n-----END PRIVATE KEY-----\n",
+      }),
+    ).rejects.toThrow(/CA certificate is malformed/);
+  });
+
+  test("throws when client cert is malformed", async () => {
+    const dir = join(makeTempDir(), "tls");
+    await ensureTlsFiles(dir);
+    const bundle = loadClientBundle(join(dir, "client-bundle.pem"));
+
+    await expect(
+      validateClientBundle({
+        ...bundle,
+        clientCert: "-----BEGIN CERTIFICATE-----\ngarbage\n-----END CERTIFICATE-----\n",
+      }),
+    ).rejects.toThrow(/client certificate is malformed/);
+  });
+
+  test("throws when CA cert has expired", async () => {
+    const dir = join(makeTempDir(), "tls");
+    await ensureTlsFiles(dir);
+    const bundle = loadClientBundle(join(dir, "client-bundle.pem"));
+
+    // Create an expired CA cert
+    const x509 = await import("@peculiar/x509");
+    const algorithm = { name: "ECDSA" as const, namedCurve: "P-256" as const };
+    const keys = await crypto.subtle.generateKey(algorithm, true, ["sign", "verify"]);
+    const expiredCert = await x509.X509CertificateGenerator.createSelfSigned({
+      serialNumber: "01",
+      name: "CN=expired-ca",
+      notBefore: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000),
+      notAfter: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000),
+      keys,
+      signingAlgorithm: { name: "ECDSA", hash: "SHA-256" },
+    });
+
+    await expect(
+      validateClientBundle({ ...bundle, caCert: expiredCert.toString("pem") }),
+    ).rejects.toThrow(/CA certificate has expired/);
+  });
+
+  test("throws when client cert has expired", async () => {
+    const dir = join(makeTempDir(), "tls");
+    await ensureTlsFiles(dir);
+    const bundle = loadClientBundle(join(dir, "client-bundle.pem"));
+
+    const x509 = await import("@peculiar/x509");
+    const algorithm = { name: "ECDSA" as const, namedCurve: "P-256" as const };
+    const keys = await crypto.subtle.generateKey(algorithm, true, ["sign", "verify"]);
+    const expiredCert = await x509.X509CertificateGenerator.createSelfSigned({
+      serialNumber: "02",
+      name: "CN=expired-client",
+      notBefore: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000),
+      notAfter: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000),
+      keys,
+      signingAlgorithm: { name: "ECDSA", hash: "SHA-256" },
+    });
+
+    await expect(
+      validateClientBundle({ ...bundle, clientCert: expiredCert.toString("pem") }),
+    ).rejects.toThrow(/client certificate has expired/);
+  });
+
+  test("throws when client cert was not signed by bundle CA", async () => {
+    const dir = join(makeTempDir(), "tls");
+    await ensureTlsFiles(dir);
+    const bundle = loadClientBundle(join(dir, "client-bundle.pem"));
+
+    // Generate a different CA and use its cert as the bundle CA.
+    // Since both CAs use the same subject (CN=gcp-authcalator CA), the issuer
+    // check passes but the signature verification fails.
+    const { generateCA } = await import("../../tls/ca.ts");
+    const wrongCA = await generateCA();
+
+    await expect(validateClientBundle({ ...bundle, caCert: wrongCA.caCert })).rejects.toThrow(
+      /client certificate signature is invalid/,
+    );
   });
 });

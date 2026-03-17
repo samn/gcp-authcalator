@@ -58,7 +58,7 @@ async function handleDevToken(deps: GateDeps): Promise<Response> {
 
   try {
     const cached = await deps.mintDevToken();
-    const expiresIn = Math.floor((cached.expires_at.getTime() - Date.now()) / 1000);
+    const expiresIn = Math.max(0, Math.floor((cached.expires_at.getTime() - Date.now()) / 1000));
 
     const body: TokenResponse = {
       access_token: cached.access_token,
@@ -128,7 +128,7 @@ async function handleProdToken(req: Request, deps: GateDeps): Promise<Response> 
     }
 
     const cached = await deps.mintProdToken();
-    const expiresIn = Math.floor((cached.expires_at.getTime() - Date.now()) / 1000);
+    const expiresIn = Math.max(0, Math.floor((cached.expires_at.getTime() - Date.now()) / 1000));
 
     deps.prodRateLimiter.release("granted");
 
