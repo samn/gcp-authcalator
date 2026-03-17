@@ -538,7 +538,9 @@ describe("runWithProd", () => {
       // process.exit mock throws
     }
 
-    expect(capturedTokenUrl).toContain("scopes=https://www.googleapis.com/auth/sqlservice.login");
+    expect(capturedTokenUrl).toContain(
+      `scopes=${encodeURIComponent("https://www.googleapis.com/auth/sqlservice.login")}`,
+    );
   });
 
   test("normal flow sets GCP_AUTHCALATOR_PROD_SESSION in child env", async () => {
