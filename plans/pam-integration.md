@@ -47,6 +47,7 @@ with-prod --pam-policy=my-entitlement -- command
 ### 1. Config (`src/config.ts`)
 
 Add to `ConfigSchema`:
+
 ```typescript
 pam_policy: z.string().min(1).optional(),              // default entitlement ID or full path
 pam_allowed_policies: z.array(z.string().min(1)).optional(), // additional allowed entitlements
@@ -54,6 +55,7 @@ pam_location: z.string().min(1).optional(),            // default: "global"
 ```
 
 Add to `cliToConfigKey`:
+
 - `"pam-policy": "pam_policy"`
 - `"pam-allowed-policies": "pam_allowed_policies"` (comma-separated on CLI, split like `scopes`)
 - `"pam-location": "pam_location"`
@@ -61,6 +63,7 @@ Add to `cliToConfigKey`:
 Add all three to `configKeys` array for env var support.
 
 **GateConfigSchema change**: Currently requires `service_account`. Make it conditional:
+
 - If `pam_policy` is set, `service_account` is optional (gate can operate with just PAM-elevated ADC for prod tokens; dev tokens disabled without service_account)
 - If `pam_policy` is not set, `service_account` remains required (current behavior)
 - Use a Zod `.refine()` or `.superRefine()` to express this: at least one of `service_account` or `pam_policy` must be provided.
@@ -68,6 +71,7 @@ Add all three to `configKeys` array for env var support.
 ### 2. CLI (`src/cli.ts`)
 
 Add to `parseArgs` options:
+
 - `--pam-policy` (string)
 - `--pam-allowed-policies` (string, comma-separated)
 - `--pam-location` (string)
@@ -90,13 +94,14 @@ export interface PamModule {
 }
 
 export interface PamGrantResult {
-  name: string;           // full grant resource path
-  state: string;          // "ACTIVATED"
-  cached: boolean;        // whether this was a cache hit
+  name: string; // full grant resource path
+  state: string; // "ACTIVATED"
+  cached: boolean; // whether this was a cache hit
 }
 ```
 
 Core functions:
+
 - `resolveEntitlementPath(policy, projectId, location)` — expand short ID to full resource path. Validates short-form against `^[a-z][a-z0-9-]*$`. Validates full paths against `projects/{projectId}/locations/*/entitlements/*` pattern.
 - `createPamModule(getAccessToken, options)` → `PamModule`
 - Grant cache: `Map<string, { grant: PamGrant; expiresAt: Date }>`, reuse active grants within 5-min margin
@@ -109,6 +114,7 @@ Core functions:
 ### 4. Gate Types (`src/gate/types.ts`)
 
 Add to `GateDeps`:
+
 ```typescript
 ensurePamGrant?: (entitlementPath: string, justification?: string) => Promise<PamGrantResult>;
 /** Allowlist of resolved entitlement paths. If set, pam_policy query params must match. */
@@ -118,6 +124,7 @@ pamDefaultPolicy?: string;
 ```
 
 Add to `AuditEntry`:
+
 ```typescript
 pam_policy?: string;       // resolved entitlement path
 pam_grant?: string;        // grant resource name
@@ -127,19 +134,23 @@ pam_cached?: boolean;      // whether the grant was a cache hit
 ### 5. Gate Handlers (`src/gate/handlers.ts`)
 
 In `handleToken`, parse `pam_policy` query param:
+
 ```typescript
 const pamPolicyParam = url.searchParams.get("pam_policy") ?? undefined;
 ```
 
 In `handleProdToken`:
+
 1. Resolve the effective PAM policy: query param `pam_policy` > `deps.pamDefaultPolicy` > none.
 2. **Allowlist check**: If a `pam_policy` is resolved and `deps.pamAllowedPolicies` exists, verify the resolved entitlement path is in the set. Return 403 `"PAM policy not in allowlist"` if not.
 3. **Misconfiguration check**: If `pam_policy` is resolved but `deps.ensurePamGrant` is undefined, return 500 `"PAM policy requested but PAM module not configured"` — never silently skip.
 4. Confirmation dialog: pass entitlement name to `confirmProdAccess` so the dialog shows it.
 5. After confirmation, before `mintProdToken`:
+
 ```typescript
 const grantResult = await deps.ensurePamGrant(resolvedEntitlementPath, justification);
 ```
+
 6. Include `pam_policy`, `pam_grant`, `pam_cached` in audit log entry.
 
 When `service_account` is not configured and no `pam_policy` is provided, `handleDevToken` should return 501 `"Dev tokens unavailable: no service_account configured"`.
@@ -155,6 +166,7 @@ When `service_account` is not configured and no `pam_policy` is provided, `handl
 ### 7. Confirmation dialog (`src/gate/confirm.ts`)
 
 Add optional `pamPolicy?: string` parameter to `confirmProdAccess`. Update dialog text:
+
 - With PAM: `"Grant prod-level GCP access to user@co.com via PAM entitlement 'my-entitlement'?\n\nReported command: ..."`
 - Without PAM: unchanged from current behavior.
 
@@ -193,22 +205,22 @@ In `runWithProd`, pass `config.pam_policy` through.
 
 ## File Changes
 
-| File | Type | Description |
-|------|------|-------------|
-| `src/config.ts` | Modify | Add pam_policy, pam_allowed_policies, pam_location fields; conditional GateConfigSchema |
-| `src/cli.ts` | Modify | Add --pam-policy, --pam-allowed-policies, --pam-location options |
-| `src/gate/pam.ts` | **New** | PAM grant creation, polling, caching, revocation |
-| `src/gate/types.ts` | Modify | Add PAM fields to GateDeps and AuditEntry |
-| `src/gate/handlers.ts` | Modify | Parse pam_policy, allowlist check, call PAM before minting |
-| `src/gate/server.ts` | Modify | Wire PAM module, build allowlist, revoke on shutdown |
-| `src/gate/confirm.ts` | Modify | Show entitlement name in confirmation dialog |
-| `src/with-prod/fetch-prod-token.ts` | Modify | Accept/pass pamPolicy |
-| `src/commands/with-prod.ts` | Modify | Pass config.pam_policy to fetchProdToken |
-| `config.example.toml` | Modify | Add PAM config examples |
-| `CHANGELOG.md` | Modify | Document new feature |
-| `SPEC.md` | Modify | Document PAM integration and security properties |
-| `src/__tests__/gate/pam.test.ts` | **New** | PAM module tests |
-| Existing test files | Modify | Add PAM-related test cases |
+| File                                | Type    | Description                                                                             |
+| ----------------------------------- | ------- | --------------------------------------------------------------------------------------- |
+| `src/config.ts`                     | Modify  | Add pam_policy, pam_allowed_policies, pam_location fields; conditional GateConfigSchema |
+| `src/cli.ts`                        | Modify  | Add --pam-policy, --pam-allowed-policies, --pam-location options                        |
+| `src/gate/pam.ts`                   | **New** | PAM grant creation, polling, caching, revocation                                        |
+| `src/gate/types.ts`                 | Modify  | Add PAM fields to GateDeps and AuditEntry                                               |
+| `src/gate/handlers.ts`              | Modify  | Parse pam_policy, allowlist check, call PAM before minting                              |
+| `src/gate/server.ts`                | Modify  | Wire PAM module, build allowlist, revoke on shutdown                                    |
+| `src/gate/confirm.ts`               | Modify  | Show entitlement name in confirmation dialog                                            |
+| `src/with-prod/fetch-prod-token.ts` | Modify  | Accept/pass pamPolicy                                                                   |
+| `src/commands/with-prod.ts`         | Modify  | Pass config.pam_policy to fetchProdToken                                                |
+| `config.example.toml`               | Modify  | Add PAM config examples                                                                 |
+| `CHANGELOG.md`                      | Modify  | Document new feature                                                                    |
+| `SPEC.md`                           | Modify  | Document PAM integration and security properties                                        |
+| `src/__tests__/gate/pam.test.ts`    | **New** | PAM module tests                                                                        |
+| Existing test files                 | Modify  | Add PAM-related test cases                                                              |
 
 ## Verification
 
