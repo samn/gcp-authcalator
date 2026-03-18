@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.4.0] - 2026-03-18
 
 ### Added
 
@@ -19,15 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- PAM policy query parameter (`pam_policy`) is now resolved and validated via `resolveEntitlementPath` before use, fixing allowlist comparison failures with short-form entitlement IDs and ensuring input validation against path traversal
-- PAM grant cache expiry is now derived from the grant's actual `createTime` and `requestedDuration` instead of assuming a full hour from cache-write time, preventing stale cached grants on the 409 conflict path
-
 - Token `expires_in` could return negative values in gate and metadata-proxy handlers when a cached token was near expiry; now clamped to a minimum of 0
 - Release test suite failing in environments with GPG commit signing enabled
 - Kube-setup read-only file test failing when running as root
-
-### Changed
-
 - Improved test coverage: overall line coverage from 97.65% to 98.34%, with new tests for TLS certificate validation, audit logging error paths, token expiry edge cases, `validateClientBundle`, and command summarization edge cases
 
 ## [0.3.0] - 2026-03-09
