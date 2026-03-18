@@ -20,3 +20,15 @@ service_account = "dev-runner@my-gcp-project.iam.gserviceaccount.com"
 # OAuth scopes for token requests
 # Default: ["https://www.googleapis.com/auth/cloud-platform"]
 # scopes = ["https://www.googleapis.com/auth/cloud-platform", "https://www.googleapis.com/auth/sqlservice.login"]
+
+# PAM (Privileged Access Manager) — just-in-time prod escalation
+# When set, prod token requests trigger a PAM grant before minting the token.
+# Can be an entitlement ID (short form) or full resource path.
+# pam_policy = "prod-db-admin"
+
+# Additional PAM entitlements that callers may request via query param.
+# The default pam_policy is always allowed; these are extras.
+# pam_allowed_policies = ["prod-readonly", "prod-migration"]
+
+# PAM entitlement location (default: global)
+# pam_location = "global"

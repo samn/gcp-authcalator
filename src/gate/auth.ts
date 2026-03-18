@@ -25,6 +25,8 @@ export interface AuthModule {
   getIdentityEmail: () => Promise<string>;
   getProjectNumber: () => Promise<string>;
   getUniverseDomain: () => Promise<string>;
+  /** Expose the ADC source client (needed for PAM API calls). */
+  getSourceClient: () => Promise<AuthClient>;
 }
 
 /**
@@ -224,5 +226,12 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
     return universeDomainCache;
   }
 
-  return { mintDevToken, mintProdToken, getIdentityEmail, getProjectNumber, getUniverseDomain };
+  return {
+    mintDevToken,
+    mintProdToken,
+    getIdentityEmail,
+    getProjectNumber,
+    getUniverseDomain,
+    getSourceClient,
+  };
 }

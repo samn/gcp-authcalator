@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- PAM (Privileged Access Manager) integration for just-in-time prod escalation via `--pam-policy`. When configured, the gate requests a temporary PAM grant before minting prod tokens, allowing the engineer's ADC to be downscoped by default. Includes entitlement allowlist enforcement, confirmation dialogs showing the entitlement name, audit logging of grant details, and best-effort grant revocation on shutdown.
 - Custom OAuth scopes via `scopes` config field (TOML array) and `--scopes` CLI flag (comma-separated). Tokens are now minted with the requested scopes instead of always using `cloud-platform`. Useful for tools requiring narrower scopes like `sqlservice.login`.
 
 ### Changed
@@ -16,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Release artifacts are now compressed with gzip (`.tar.gz`), significantly reducing download size
 
 ### Fixed
+
+- PAM policy query parameter (`pam_policy`) is now resolved and validated via `resolveEntitlementPath` before use, fixing allowlist comparison failures with short-form entitlement IDs and ensuring input validation against path traversal
+- PAM grant cache expiry is now derived from the grant's actual `createTime` and `requestedDuration` instead of assuming a full hour from cache-write time, preventing stale cached grants on the 409 conflict path
 
 - Token `expires_in` could return negative values in gate and metadata-proxy handlers when a cached token was near expiry; now clamped to a minimum of 0
 - Release test suite failing in environments with GPG commit signing enabled

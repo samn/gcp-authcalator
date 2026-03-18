@@ -3,6 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import type { ProdRateLimiter } from "./rate-limit.ts";
+import type { PamGrantResult } from "./pam.ts";
 
 /** A cached GCP access token with its expiry time. */
 export interface CachedToken {
@@ -51,6 +52,9 @@ export interface AuditEntry {
   result: "granted" | "denied" | "error" | "rate_limited";
   email?: string;
   error?: string;
+  pam_policy?: string;
+  pam_grant?: string;
+  pam_cached?: boolean;
 }
 
 /**
@@ -63,8 +67,16 @@ export interface GateDeps {
   getIdentityEmail: () => Promise<string>;
   getProjectNumber: () => Promise<string>;
   getUniverseDomain: () => Promise<string>;
-  confirmProdAccess: (email: string, command?: string) => Promise<boolean>;
+  confirmProdAccess: (email: string, command?: string, pamPolicy?: string) => Promise<boolean>;
   writeAuditLog: (entry: AuditEntry) => void;
   prodRateLimiter: ProdRateLimiter;
   startTime: Date;
+  /** Ensure a PAM grant is active for the given entitlement path. */
+  ensurePamGrant?: (entitlementPath: string, justification?: string) => Promise<PamGrantResult>;
+  /** Allowlist of resolved entitlement paths. Query param values must be in this set. */
+  pamAllowedPolicies?: Set<string>;
+  /** Default resolved entitlement path from config. */
+  pamDefaultPolicy?: string;
+  /** Resolve a raw PAM policy value (short-form or full path) to a validated full entitlement path. */
+  resolvePamPolicy?: (policy: string) => string;
 }
