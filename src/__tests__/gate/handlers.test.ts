@@ -23,6 +23,7 @@ function makeDeps(overrides: Partial<GateDeps> = {}): GateDeps {
     writeAuditLog: () => {},
     prodRateLimiter: createProdRateLimiter(),
     startTime: new Date(Date.now() - 60_000),
+    defaultTokenTtlSeconds: 3600,
     ...overrides,
   };
 }
@@ -860,5 +861,117 @@ describe("expires_in edge cases", () => {
     const body = (await res.json()) as Record<string, unknown>;
     expect(body.error).toBe("Unknown error");
     expect(logs[0]!.error).toBe("Unknown error");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// token_ttl_seconds query param
+// ---------------------------------------------------------------------------
+
+describe("token_ttl_seconds query param", () => {
+  test("passes ttlSeconds to mintDevToken when param is present", async () => {
+    let capturedTtl: number | undefined;
+    const deps = makeDeps({
+      mintDevToken: async (_scopes, ttlSeconds) => {
+        capturedTtl = ttlSeconds;
+        return { access_token: "t", expires_at: new Date(Date.now() + 1800 * 1000) };
+      },
+    });
+
+    const res = await handleRequest(makeRequest("/token?token_ttl_seconds=1800"), deps);
+    expect(res.status).toBe(200);
+    expect(capturedTtl).toBe(1800);
+  });
+
+  test("passes ttlSeconds to mintProdToken when param is present", async () => {
+    let capturedTtl: number | undefined;
+    const deps = makeDeps({
+      mintProdToken: async (_scopes, ttlSeconds) => {
+        capturedTtl = ttlSeconds;
+        return { access_token: "t", expires_at: new Date(Date.now() + 900 * 1000) };
+      },
+    });
+
+    const res = await handleRequest(makeRequest("/token?level=prod&token_ttl_seconds=900"), deps);
+    expect(res.status).toBe(200);
+    expect(capturedTtl).toBe(900);
+  });
+
+  test("does not pass ttlSeconds when param is absent", async () => {
+    let capturedTtl: number | undefined = 9999;
+    const deps = makeDeps({
+      mintDevToken: async (_scopes, ttlSeconds) => {
+        capturedTtl = ttlSeconds;
+        return { access_token: "t", expires_at: new Date(Date.now() + 3600 * 1000) };
+      },
+    });
+
+    await handleRequest(makeRequest("/token"), deps);
+    expect(capturedTtl).toBeUndefined();
+  });
+
+  test("returns 400 when ttl exceeds configured default", async () => {
+    const deps = makeDeps({ defaultTokenTtlSeconds: 1800 });
+
+    const res = await handleRequest(makeRequest("/token?token_ttl_seconds=3600"), deps);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toContain("exceeds configured maximum");
+    expect(body.error).toContain("3600");
+    expect(body.error).toContain("1800");
+  });
+
+  test("accepts ttl equal to configured default", async () => {
+    const deps = makeDeps({ defaultTokenTtlSeconds: 1800 });
+
+    const res = await handleRequest(makeRequest("/token?token_ttl_seconds=1800"), deps);
+    expect(res.status).toBe(200);
+  });
+
+  test("returns 400 when ttl is below 60", async () => {
+    const res = await handleRequest(makeRequest("/token?token_ttl_seconds=30"), makeDeps());
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toContain(">= 60");
+  });
+
+  test("returns 400 for non-integer value", async () => {
+    const res = await handleRequest(makeRequest("/token?token_ttl_seconds=3.5"), makeDeps());
+    expect(res.status).toBe(400);
+  });
+
+  test("returns 400 for non-numeric value", async () => {
+    const res = await handleRequest(makeRequest("/token?token_ttl_seconds=abc"), makeDeps());
+    expect(res.status).toBe(400);
+  });
+
+  test("returns 400 for trailing-text value like '3600abc'", async () => {
+    const res = await handleRequest(makeRequest("/token?token_ttl_seconds=3600abc"), makeDeps());
+    expect(res.status).toBe(400);
+  });
+
+  test("returns 400 for empty string value", async () => {
+    const res = await handleRequest(makeRequest("/token?token_ttl_seconds="), makeDeps());
+    expect(res.status).toBe(400);
+  });
+
+  test("includes token_ttl_seconds in audit entry when non-default TTL is used", async () => {
+    const logs: AuditEntry[] = [];
+    const deps = makeDeps({ writeAuditLog: (e) => logs.push(e) });
+
+    await handleRequest(makeRequest("/token?token_ttl_seconds=1800"), deps);
+
+    expect(logs).toHaveLength(1);
+    expect(logs[0]!.token_ttl_seconds).toBe(1800);
+  });
+
+  test("audit entry omits token_ttl_seconds when param is absent", async () => {
+    const logs: AuditEntry[] = [];
+    const deps = makeDeps({ writeAuditLog: (e) => logs.push(e) });
+
+    await handleRequest(makeRequest("/token"), deps);
+
+    expect(logs).toHaveLength(1);
+    expect(logs[0]!.token_ttl_seconds).toBeUndefined();
   });
 });

@@ -67,6 +67,7 @@ export const ConfigSchema = z.object({
   pam_policy: z.string().min(1).optional(),
   pam_allowed_policies: z.array(z.string().min(1)).optional(),
   pam_location: z.string().min(1).optional(),
+  token_ttl_seconds: z.coerce.number().int().min(60).max(43200).optional(),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
@@ -116,6 +117,7 @@ const cliToConfigKey: Record<string, keyof Config> = {
   "pam-policy": "pam_policy",
   "pam-allowed-policies": "pam_allowed_policies",
   "pam-location": "pam_location",
+  "token-ttl-seconds": "token_ttl_seconds",
 };
 
 /** Convert a CLI-arg values object (kebab-case keys) to config keys (snake_case). */
@@ -157,6 +159,7 @@ const configKeys: readonly (keyof Config)[] = [
   "tls_bundle",
   "pam_policy",
   "pam_location",
+  "token_ttl_seconds",
 ];
 
 /**

@@ -113,6 +113,26 @@ describe("createAuthModule", () => {
       expect(result.expires_at.getTime()).toBeLessThanOrEqual(after + 3600_000);
     });
 
+    test("falls back to configured TTL when credentials lack expiry_date", async () => {
+      const before = Date.now();
+      const client = {
+        credentials: {},
+        getAccessToken: async () => ({ token: "dev-token", res: null }),
+      } as unknown as AuthClient;
+
+      const configWithTtl: GateConfig = { ...TEST_CONFIG, token_ttl_seconds: 1800 };
+      const { mintDevToken } = createAuthModule(configWithTtl, {
+        sourceClient: mockClient("source"),
+        impersonatedClient: client,
+      });
+
+      const result = await mintDevToken();
+      const after = Date.now();
+      // Should fall back to ~30 min from now (configured TTL)
+      expect(result.expires_at.getTime()).toBeGreaterThanOrEqual(before + 1800_000);
+      expect(result.expires_at.getTime()).toBeLessThanOrEqual(after + 1800_000);
+    });
+
     test("throws when no token is returned", async () => {
       const { mintDevToken } = createAuthModule(TEST_CONFIG, {
         sourceClient: mockClient("source"),
@@ -202,6 +222,50 @@ describe("createAuthModule", () => {
       });
 
       await expect(mintProdToken()).rejects.toThrow("Failed to mint prod token");
+    });
+
+    test("caps expires_at to configured TTL", async () => {
+      const before = Date.now();
+      // Source client returns a token expiring far in the future
+      const farFuture = Date.now() + 7200_000; // 2 hours
+      const configWithTtl: GateConfig = { ...TEST_CONFIG, token_ttl_seconds: 900 };
+      const { mintProdToken } = createAuthModule(configWithTtl, {
+        sourceClient: mockClient("prod-token", farFuture),
+        impersonatedClient: mockClient("dev-token"),
+      });
+
+      const result = await mintProdToken();
+      const after = Date.now();
+      // Should be capped to ~900s from now, not 7200s
+      expect(result.expires_at.getTime()).toBeGreaterThanOrEqual(before + 900_000);
+      expect(result.expires_at.getTime()).toBeLessThanOrEqual(after + 900_000);
+    });
+
+    test("caps expires_at to per-request TTL override", async () => {
+      const before = Date.now();
+      const farFuture = Date.now() + 7200_000;
+      const { mintProdToken } = createAuthModule(TEST_CONFIG, {
+        sourceClient: mockClient("prod-token", farFuture),
+        impersonatedClient: mockClient("dev-token"),
+      });
+
+      const result = await mintProdToken(undefined, 600);
+      const after = Date.now();
+      // Should be capped to ~600s from now
+      expect(result.expires_at.getTime()).toBeGreaterThanOrEqual(before + 600_000);
+      expect(result.expires_at.getTime()).toBeLessThanOrEqual(after + 600_000);
+    });
+
+    test("uses credential expiry when it is shorter than TTL cap", async () => {
+      const shortExpiry = Date.now() + 300_000; // 5 min
+      const { mintProdToken } = createAuthModule(TEST_CONFIG, {
+        sourceClient: mockClient("prod-token", shortExpiry),
+        impersonatedClient: mockClient("dev-token"),
+      });
+
+      const result = await mintProdToken();
+      // Credential expiry (5 min) is shorter than default TTL (1 hr), so use credential expiry
+      expect(result.expires_at.getTime()).toBe(shortExpiry);
     });
   });
 

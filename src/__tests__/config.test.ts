@@ -178,6 +178,43 @@ describe("ConfigSchema", () => {
   test("rejects non-array scopes", () => {
     expect(() => ConfigSchema.parse({ scopes: "not-an-array" })).toThrow(z.ZodError);
   });
+
+  test("accepts token_ttl_seconds within valid range", () => {
+    const config = ConfigSchema.parse({ token_ttl_seconds: 1800 });
+    expect(config.token_ttl_seconds).toBe(1800);
+  });
+
+  test("coerces string token_ttl_seconds to number", () => {
+    const config = ConfigSchema.parse({ token_ttl_seconds: "900" });
+    expect(config.token_ttl_seconds).toBe(900);
+  });
+
+  test("allows undefined token_ttl_seconds", () => {
+    const config = ConfigSchema.parse({});
+    expect(config.token_ttl_seconds).toBeUndefined();
+  });
+
+  test("accepts minimum token_ttl_seconds of 60", () => {
+    const config = ConfigSchema.parse({ token_ttl_seconds: 60 });
+    expect(config.token_ttl_seconds).toBe(60);
+  });
+
+  test("accepts maximum token_ttl_seconds of 43200", () => {
+    const config = ConfigSchema.parse({ token_ttl_seconds: 43200 });
+    expect(config.token_ttl_seconds).toBe(43200);
+  });
+
+  test("rejects token_ttl_seconds below 60", () => {
+    expect(() => ConfigSchema.parse({ token_ttl_seconds: 30 })).toThrow(z.ZodError);
+  });
+
+  test("rejects token_ttl_seconds above 43200", () => {
+    expect(() => ConfigSchema.parse({ token_ttl_seconds: 50000 })).toThrow(z.ZodError);
+  });
+
+  test("rejects non-integer token_ttl_seconds", () => {
+    expect(() => ConfigSchema.parse({ token_ttl_seconds: 3.5 })).toThrow(z.ZodError);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -302,6 +339,11 @@ describe("mapCliArgs", () => {
       scopes: ["https://www.googleapis.com/auth/sqlservice.login"],
     });
   });
+
+  test("maps token-ttl-seconds to token_ttl_seconds", () => {
+    const result = mapCliArgs({ "token-ttl-seconds": "1800" });
+    expect(result).toEqual({ token_ttl_seconds: "1800" });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -363,6 +405,7 @@ describe("loadEnvVars", () => {
         GCP_AUTHCALATOR_TLS_DIR: "/env/tls",
         GCP_AUTHCALATOR_GATE_URL: "https://env.example.com",
         GCP_AUTHCALATOR_TLS_BUNDLE: "/env/bundle.pem",
+        GCP_AUTHCALATOR_TOKEN_TTL_SECONDS: "1800",
       },
       () => {
         const result = loadEnvVars();
@@ -375,6 +418,7 @@ describe("loadEnvVars", () => {
           tls_dir: "/env/tls",
           gate_url: "https://env.example.com",
           tls_bundle: "/env/bundle.pem",
+          token_ttl_seconds: "1800",
         });
       },
     );

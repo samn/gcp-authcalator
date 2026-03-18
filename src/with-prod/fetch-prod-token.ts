@@ -9,6 +9,8 @@ export interface FetchProdTokenOptions {
   scopes?: string[];
   /** PAM entitlement to escalate to (passed to gate as query param). */
   pamPolicy?: string;
+  /** Token TTL override in seconds (must be LTE gate's configured default). */
+  tokenTtlSeconds?: number;
 }
 
 export interface ProdTokenResult {
@@ -49,6 +51,9 @@ export async function fetchProdToken(
   }
   if (options.pamPolicy) {
     tokenUrl += `&pam_policy=${encodeURIComponent(options.pamPolicy)}`;
+  }
+  if (options.tokenTtlSeconds !== undefined) {
+    tokenUrl += `&token_ttl_seconds=${options.tokenTtlSeconds}`;
   }
   const tokenRes = await fetchFn(tokenUrl, fetchOpts);
 

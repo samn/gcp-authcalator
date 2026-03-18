@@ -137,6 +137,7 @@ export async function runWithProd(
       command: wrappedCommand,
       scopes: wpConfig.scopes,
       pamPolicy: wpConfig.pam_policy,
+      tokenTtlSeconds: wpConfig.token_ttl_seconds,
     });
   } catch (err) {
     console.error(
