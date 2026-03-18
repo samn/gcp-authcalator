@@ -45,9 +45,7 @@ export function startMetadataProxyServer(
 
   const effectiveScopes = options.scopes ?? DEFAULT_SCOPES;
   const gateClientOpts = { ...options.gateClientOptions, scopes: effectiveScopes };
-  const gateClient = options.tokenProvider
-    ? null
-    : createGateClient(conn, gateClientOpts);
+  const gateClient = options.tokenProvider ? null : createGateClient(conn, gateClientOpts);
   const provider: TokenProvider = options.tokenProvider ?? gateClient!;
 
   const deps: MetadataProxyDeps = {
