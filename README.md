@@ -110,6 +110,7 @@ Precedence: CLI flags > TOML file > environment variables > defaults.
 --tls-dir <path>           TLS certificate directory (default: ~/.gcp-authcalator/tls/)
 --gate-url <url>           Gate URL for remote connections (must use https://)
 --tls-bundle <path>        Path to TLS client bundle file (PEM or base64-encoded)
+--scopes <scopes>          Comma-separated OAuth scopes (default: cloud-platform)
 -c, --config <path>        Path to TOML config file
 ```
 
@@ -133,6 +134,7 @@ port = 8173
 # Remote devcontainer support (optional):
 # gate_tls_port = 8174       # Enable TCP+mTLS listener on gate
 # gate_url = "https://localhost:8174"  # Point metadata-proxy at remote gate
+# scopes = ["https://www.googleapis.com/auth/cloud-platform"]
 ```
 
 Pass the file with `--config`:
@@ -175,6 +177,8 @@ gcp-authcalator gate \
 | `GET /universe-domain`  | Returns the GCP universe domain                                  |
 | `GET /health`           | Returns `{ "status": "ok", "uptime_seconds": N }`                |
 
+Both `/token` and `/token?level=prod` accept an optional `scopes` query parameter (comma-separated) to request tokens with specific OAuth scopes. For example: `/token?scopes=https://www.googleapis.com/auth/sqlservice.login`. When omitted, tokens are minted with the default `cloud-platform` scope.
+
 **Dev tokens** are minted by impersonating the configured service account. They are cached and re-minted when less than 5 minutes of lifetime remain.
 
 **Prod tokens** use the engineer's own ADC credentials. Before issuing a prod token, the daemon:
@@ -201,16 +205,17 @@ Set `GCE_METADATA_HOST=127.0.0.1:8173 GCE_METADATA_IP=127.0.0.1:8173 GCE_METADAT
 
 **Endpoints:**
 
-| Path                                                              | Response                               | `Metadata-Flavor: Google` required? |
-| ----------------------------------------------------------------- | -------------------------------------- | ----------------------------------- |
-| `GET /`                                                           | `200 ok` (detection ping)              | No                                  |
-| `GET /computeMetadata/v1/instance/service-accounts/default/token` | Token JSON                             | Yes                                 |
-| `GET /computeMetadata/v1/project/project-id`                      | Plain text project ID                  | Yes                                 |
-| `GET /computeMetadata/v1/project/numeric-project-id`              | Plain text numeric project ID          | Yes                                 |
-| `GET /computeMetadata/v1/universe/universe_domain`                | Plain text universe domain             | Yes                                 |
-| `GET /computeMetadata/v1/instance/service-accounts/default/email` | Plain text SA email                    | Yes                                 |
-| `GET /computeMetadata/v1/instance/service-accounts/default`       | SA info (JSON or directory listing)    | Yes                                 |
-| `GET /computeMetadata/v1/instance/service-accounts`               | SA listing (JSON or directory listing) | Yes                                 |
+| Path                                                               | Response                               | `Metadata-Flavor: Google` required? |
+| ------------------------------------------------------------------ | -------------------------------------- | ----------------------------------- |
+| `GET /`                                                            | `200 ok` (detection ping)              | No                                  |
+| `GET /computeMetadata/v1/instance/service-accounts/default/token`  | Token JSON                             | Yes                                 |
+| `GET /computeMetadata/v1/project/project-id`                       | Plain text project ID                  | Yes                                 |
+| `GET /computeMetadata/v1/project/numeric-project-id`               | Plain text numeric project ID          | Yes                                 |
+| `GET /computeMetadata/v1/universe/universe_domain`                 | Plain text universe domain             | Yes                                 |
+| `GET /computeMetadata/v1/instance/service-accounts/default/email`  | Plain text SA email                    | Yes                                 |
+| `GET /computeMetadata/v1/instance/service-accounts/default/scopes` | Newline-delimited OAuth scopes         | Yes                                 |
+| `GET /computeMetadata/v1/instance/service-accounts/default`        | SA info (JSON or directory listing)    | Yes                                 |
+| `GET /computeMetadata/v1/instance/service-accounts`                | SA listing (JSON or directory listing) | Yes                                 |
 
 Endpoints returning "JSON or directory listing" respond with JSON when `?recursive=true` is passed, and a text directory listing otherwise. This matches real GCE metadata server behavior.
 
@@ -226,6 +231,7 @@ Wraps a shell command with production-level GCP credentials. Runs **inside the d
 gcp-authcalator with-prod -- python some/script.py
 gcp-authcalator with-prod -- gcloud sql instances list
 gcp-authcalator with-prod -- alembic upgrade head
+gcp-authcalator with-prod --scopes="https://www.googleapis.com/auth/sqlservice.login" -- cloud-sql-proxy my-project:us-central1:my-instance
 ```
 
 **Required options:** `--project-id`

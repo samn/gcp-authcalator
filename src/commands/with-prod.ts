@@ -135,6 +135,7 @@ export async function runWithProd(
     tokenResult = await fetchProdToken(conn, {
       ...options.fetchOptions,
       command: wrappedCommand,
+      scopes: wpConfig.scopes,
     });
   } catch (err) {
     console.error(
@@ -161,6 +162,7 @@ export async function runWithProd(
       installSignalHandlers: false,
       quiet: true,
       allowedAncestorPid: process.pid,
+      scopes: wpConfig.scopes,
     },
   );
 

@@ -5,6 +5,8 @@ export interface FetchProdTokenOptions {
   fetchFn?: typeof globalThis.fetch;
   /** The command being wrapped, sent to gcp-gate for display in the confirmation dialog. */
   command?: string[];
+  /** OAuth scopes for the prod token. */
+  scopes?: string[];
 }
 
 export interface ProdTokenResult {
@@ -39,7 +41,11 @@ export async function fetchProdToken(
   const fetchOpts = { ...extraOpts, headers };
 
   // Fetch prod token (may trigger host-side confirmation dialog)
-  const tokenRes = await fetchFn(`${baseUrl}/token?level=prod`, fetchOpts);
+  let tokenUrl = `${baseUrl}/token?level=prod`;
+  if (options.scopes && options.scopes.length > 0) {
+    tokenUrl += `&scopes=${options.scopes.map(encodeURIComponent).join(",")}`;
+  }
+  const tokenRes = await fetchFn(tokenUrl, fetchOpts);
 
   if (!tokenRes.ok) {
     const text = await tokenRes.text();

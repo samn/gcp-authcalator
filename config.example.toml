@@ -16,3 +16,7 @@ service_account = "dev-runner@my-gcp-project.iam.gserviceaccount.com"
 # TCP port for the metadata proxy
 # Default: 8173
 # port = 8173
+
+# OAuth scopes for token requests
+# Default: ["https://www.googleapis.com/auth/cloud-platform"]
+# scopes = ["https://www.googleapis.com/auth/cloud-platform", "https://www.googleapis.com/auth/sqlservice.login"]

@@ -40,6 +40,13 @@ export function expandTilde(p: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/** Default OAuth scopes when none are configured. */
+export const DEFAULT_SCOPES = ["https://www.googleapis.com/auth/cloud-platform"];
+
+// ---------------------------------------------------------------------------
 // Schemas
 // ---------------------------------------------------------------------------
 
@@ -56,6 +63,7 @@ export const ConfigSchema = z.object({
     .refine((v) => v.startsWith("https://"), { message: "gate_url must use https://" })
     .optional(),
   tls_bundle: z.string().min(1).transform(expandTilde).optional(),
+  scopes: z.array(z.string().min(1)).optional(),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
@@ -95,6 +103,7 @@ const cliToConfigKey: Record<string, keyof Config> = {
   "tls-dir": "tls_dir",
   "gate-url": "gate_url",
   "tls-bundle": "tls_bundle",
+  scopes: "scopes",
 };
 
 /** Convert a CLI-arg values object (kebab-case keys) to config keys (snake_case). */
@@ -106,7 +115,12 @@ export function mapCliArgs(
     if (value === undefined) continue;
     const configKey = cliToConfigKey[cliKey];
     if (configKey) {
-      mapped[configKey] = value;
+      // Split comma-separated scopes string into an array
+      if (configKey === "scopes" && typeof value === "string") {
+        mapped[configKey] = value.split(",").map((s) => s.trim());
+      } else {
+        mapped[configKey] = value;
+      }
     }
   }
   return mapped;
