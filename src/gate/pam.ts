@@ -24,6 +24,13 @@ const ENTITLEMENT_ID_PATTERN = /^[a-z][a-z0-9-]*$/;
 /** Expected full resource path pattern. */
 const ENTITLEMENT_PATH_PATTERN = /^projects\/([^/]+)\/locations\/([^/]+)\/entitlements\/([^/]+)$/;
 
+/** Parse a GCP duration string (e.g. "3600s") to seconds. Returns 0 on failure. */
+function parseDurationSeconds(duration?: string): number {
+  if (!duration) return 0;
+  const match = /^(\d+)s$/.exec(duration);
+  return match ? Number(match[1]) : 0;
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -251,12 +258,26 @@ export function createPamModule(
     );
   }
 
-  function cacheGrant(entitlementPath: string, grantName: string, state: string): void {
+  function computeGrantExpiry(grant: PamGrantResponse): Date {
+    // Derive expiry from the grant's actual creation time + requested duration.
+    // This is critical for the 409 conflict path where we reuse a pre-existing
+    // grant that may have been created well before this process found it.
+    const durationMs = parseDurationSeconds(grant.requestedDuration) * 1000;
+    const createMs = grant.createTime ? new Date(grant.createTime).getTime() : NaN;
+
+    if (durationMs > 0 && !isNaN(createMs)) {
+      return new Date(createMs + durationMs);
+    }
+
+    // Fallback: conservative 15-minute TTL when API fields are missing
+    return new Date(now() + 15 * 60 * 1000);
+  }
+
+  function cacheGrant(entitlementPath: string, grant: PamGrantResponse): void {
     grantCache.set(entitlementPath, {
-      name: grantName,
-      state,
-      // Grant lifetime is 1 hour from creation
-      expiresAt: new Date(now() + 3600 * 1000),
+      name: grant.name!,
+      state: grant.state!,
+      expiresAt: computeGrantExpiry(grant),
     });
   }
 
@@ -286,7 +307,7 @@ export function createPamModule(
       activated = await pollGrant(grant.name);
     }
 
-    cacheGrant(entitlementPath, activated.name!, activated.state!);
+    cacheGrant(entitlementPath, activated);
 
     return { name: activated.name!, state: activated.state!, cached: false };
   }

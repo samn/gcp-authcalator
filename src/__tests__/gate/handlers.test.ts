@@ -651,6 +651,54 @@ describe("GET /token?level=prod with PAM", () => {
     expect(capturedPam).toBe("my-entitlement");
   });
 
+  test("resolves pam_policy query param via resolvePamPolicy before allowlist check", async () => {
+    let capturedPath: string | undefined;
+    const resolvedPath = "projects/p/locations/global/entitlements/short-id";
+    const deps = makeDeps({
+      pamAllowedPolicies: new Set([resolvedPath]),
+      resolvePamPolicy: (_policy) => resolvedPath,
+      ensurePamGrant: async (path) => {
+        capturedPath = path;
+        return { name: "grants/g1", state: "ACTIVATED", cached: false };
+      },
+    });
+
+    const res = await handleRequest(makeRequest("/token?level=prod&pam_policy=short-id"), deps);
+
+    expect(res.status).toBe(200);
+    expect(capturedPath).toBe(resolvedPath);
+  });
+
+  test("returns 400 when resolvePamPolicy rejects invalid query param", async () => {
+    const deps = makeDeps({
+      pamAllowedPolicies: new Set(["valid"]),
+      resolvePamPolicy: () => {
+        throw new Error('Invalid PAM entitlement ID: "BAD!"');
+      },
+      ensurePamGrant: async () => ({ name: "g", state: "ACTIVATED", cached: false }),
+    });
+
+    const res = await handleRequest(makeRequest("/token?level=prod&pam_policy=BAD!"), deps);
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toContain("Invalid PAM entitlement ID");
+  });
+
+  test("returns 403 when resolved pam_policy not in allowlist", async () => {
+    const deps = makeDeps({
+      pamAllowedPolicies: new Set(["projects/p/locations/global/entitlements/allowed"]),
+      resolvePamPolicy: (policy) => `projects/p/locations/global/entitlements/${policy}`,
+      ensurePamGrant: async () => ({ name: "g", state: "ACTIVATED", cached: false }),
+    });
+
+    const res = await handleRequest(makeRequest("/token?level=prod&pam_policy=forbidden"), deps);
+
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toContain("not in allowlist");
+  });
+
   test("returns 500 when ensurePamGrant fails", async () => {
     const logs: AuditEntry[] = [];
     const deps = makeDeps({

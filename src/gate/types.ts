@@ -77,4 +77,6 @@ export interface GateDeps {
   pamAllowedPolicies?: Set<string>;
   /** Default resolved entitlement path from config. */
   pamDefaultPolicy?: string;
+  /** Resolve a raw PAM policy value (short-form or full path) to a validated full entitlement path. */
+  resolvePamPolicy?: (policy: string) => string;
 }

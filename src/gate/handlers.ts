@@ -97,7 +97,21 @@ async function handleProdToken(
   pamPolicyParam?: string,
 ): Promise<Response> {
   // Resolve effective PAM policy: query param > config default > none
-  const effectivePamPolicy = pamPolicyParam ?? deps.pamDefaultPolicy;
+  // Query params must be resolved to full entitlement paths (with validation)
+  let effectivePamPolicy: string | undefined;
+  if (pamPolicyParam && deps.resolvePamPolicy) {
+    try {
+      effectivePamPolicy = deps.resolvePamPolicy(pamPolicyParam);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Invalid PAM policy";
+      return jsonResponse({ error: message }, 400);
+    }
+  } else if (pamPolicyParam) {
+    // PAM policy requested but no resolver available (PAM not configured)
+    effectivePamPolicy = pamPolicyParam;
+  } else {
+    effectivePamPolicy = deps.pamDefaultPolicy;
+  }
 
   const auditBase: Pick<AuditEntry, "endpoint" | "level" | "pam_policy"> = {
     endpoint: "/token?level=prod",

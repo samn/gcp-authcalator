@@ -79,6 +79,10 @@ export async function startGateServer(
     ensurePamGrant: pam?.ensureGrant,
     pamAllowedPolicies,
     pamDefaultPolicy,
+    resolvePamPolicy: config.pam_policy
+      ? (policy: string) =>
+          resolveEntitlementPath(policy, config.project_id, config.pam_location ?? "global")
+      : undefined,
   };
 
   // Ensure the socket directory exists with owner-only permissions (0o700).

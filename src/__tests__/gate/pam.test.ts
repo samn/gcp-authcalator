@@ -67,11 +67,11 @@ describe("resolveEntitlementPath", () => {
 // createPamModule
 // ---------------------------------------------------------------------------
 
-function makeActivatedGrant(name: string) {
+function makeActivatedGrant(name: string, createTime?: string) {
   return {
     name,
     state: "ACTIVATED",
-    createTime: new Date().toISOString(),
+    createTime: createTime ?? new Date().toISOString(),
     requestedDuration: "3600s",
   };
 }
@@ -136,11 +136,12 @@ describe("ensureGrant", () => {
     const grantName1 = `${entitlementPath}/grants/grant-1`;
     const grantName2 = `${entitlementPath}/grants/grant-2`;
     let currentTime = 1000000;
+    const createTime = new Date(currentTime).toISOString();
 
     const { pam } = makeModule(
       [
-        { status: 200, body: makeActivatedGrant(grantName1) },
-        { status: 200, body: makeActivatedGrant(grantName2) },
+        { status: 200, body: makeActivatedGrant(grantName1, createTime) },
+        { status: 200, body: makeActivatedGrant(grantName2, createTime) },
       ],
       () => currentTime,
     );
@@ -293,6 +294,85 @@ describe("ensureGrant", () => {
       justification?: { unstructuredJustification?: string };
     };
     expect(parsed.justification?.unstructuredJustification).toBe("running migration");
+  });
+
+  test("cache expiry is derived from grant createTime, not current time", async () => {
+    const grantName1 = `${entitlementPath}/grants/grant-1`;
+    const grantName2 = `${entitlementPath}/grants/grant-2`;
+    let currentTime = 1_000_000;
+
+    // Grant was created 50 minutes ago (only 10 minutes of lifetime remain)
+    const createdAt = currentTime - 50 * 60 * 1000;
+    const oldGrant = {
+      name: grantName1,
+      state: "ACTIVATED",
+      createTime: new Date(createdAt).toISOString(),
+      requestedDuration: "3600s",
+    };
+
+    const { pam } = makeModule(
+      [
+        // 409 on create, then find the old grant
+        { status: 409, body: { error: { message: "Already exists" } } },
+        { status: 200, body: { grants: [oldGrant] } },
+        // Second call gets a fresh grant
+        {
+          status: 200,
+          body: makeActivatedGrant(grantName2, new Date(currentTime + 7 * 60 * 1000).toISOString()),
+        },
+      ],
+      () => currentTime,
+    );
+
+    const first = await pam.ensureGrant(entitlementPath);
+    expect(first.name).toBe(grantName1);
+    expect(first.cached).toBe(false);
+
+    // Advance 7 minutes — past the old grant's real expiry (10 min remaining
+    // minus 5 min cache margin = should be expired after ~5 min)
+    currentTime += 7 * 60 * 1000;
+
+    const second = await pam.ensureGrant(entitlementPath);
+    // Should NOT be cached because the grant's real expiry was derived from createTime
+    expect(second.name).toBe(grantName2);
+    expect(second.cached).toBe(false);
+  });
+
+  test("falls back to conservative TTL when grant lacks createTime", async () => {
+    const grantName1 = `${entitlementPath}/grants/grant-1`;
+    const grantName2 = `${entitlementPath}/grants/grant-2`;
+    let currentTime = 1_000_000;
+
+    // Grant without createTime
+    const grantNoTime = {
+      name: grantName1,
+      state: "ACTIVATED",
+      // no createTime, no requestedDuration
+    };
+
+    const { pam } = makeModule(
+      [
+        { status: 200, body: grantNoTime },
+        {
+          status: 200,
+          body: makeActivatedGrant(
+            grantName2,
+            new Date(currentTime + 16 * 60 * 1000).toISOString(),
+          ),
+        },
+      ],
+      () => currentTime,
+    );
+
+    const first = await pam.ensureGrant(entitlementPath);
+    expect(first.name).toBe(grantName1);
+
+    // Advance past the conservative 15-minute fallback TTL (minus 5 min margin = 10 min)
+    currentTime += 11 * 60 * 1000;
+
+    const second = await pam.ensureGrant(entitlementPath);
+    expect(second.name).toBe(grantName2);
+    expect(second.cached).toBe(false);
   });
 });
 
