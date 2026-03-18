@@ -25,18 +25,22 @@ export function createConfirmModule(options: ConfirmOptions = {}): {
   const platform = options.platform ?? process.platform;
   const isTTY = options.isTTY ?? !!process.stdin.isTTY;
 
-  async function confirmProdAccess(email: string, command?: string): Promise<boolean> {
+  async function confirmProdAccess(
+    email: string,
+    command?: string,
+    pamPolicy?: string,
+  ): Promise<boolean> {
     const tryGui = platform === "darwin" ? tryOsascript : tryZenity;
 
     try {
-      const result = await tryGui(email, spawnFn, command);
+      const result = await tryGui(email, spawnFn, command, pamPolicy);
       if (result !== null) return result;
     } catch {
       // GUI not available, fall through to terminal
     }
 
     // Fallback to terminal prompt
-    return tryTerminalPrompt(email, isTTY, command);
+    return tryTerminalPrompt(email, isTTY, command, pamPolicy);
   }
 
   return { confirmProdAccess };
@@ -46,10 +50,14 @@ async function tryZenity(
   email: string,
   spawnFn: SpawnFn,
   command?: string,
+  pamPolicy?: string,
 ): Promise<boolean | null> {
-  const text = command
-    ? `Grant prod-level GCP access to ${email}?\n\nReported command: ${command}`
+  let text = pamPolicy
+    ? `Grant prod-level GCP access to ${email} via PAM entitlement '${pamPolicy}'?`
     : `Grant prod-level GCP access to ${email}?`;
+  if (command) {
+    text += `\n\nReported command: ${command}`;
+  }
 
   const proc = spawnFn([
     "zenity",
@@ -77,14 +85,19 @@ async function tryOsascript(
   email: string,
   spawnFn: SpawnFn,
   command?: string,
+  pamPolicy?: string,
 ): Promise<boolean | null> {
   // Escape backslashes and double quotes to prevent AppleScript injection
   const escaped = email.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
   const escapedCommand = command?.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  const escapedPam = pamPolicy?.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 
-  const message = escapedCommand
-    ? `Grant prod-level GCP access to ${escaped}?\\n\\nReported command: ${escapedCommand}`
+  let message = escapedPam
+    ? `Grant prod-level GCP access to ${escaped} via PAM entitlement '${escapedPam}'?`
     : `Grant prod-level GCP access to ${escaped}?`;
+  if (escapedCommand) {
+    message += `\\n\\nReported command: ${escapedCommand}`;
+  }
 
   const proc = spawnFn([
     "osascript",
@@ -107,6 +120,7 @@ async function tryTerminalPrompt(
   email: string,
   isTTY: boolean,
   command?: string,
+  pamPolicy?: string,
 ): Promise<boolean> {
   if (!isTTY) {
     console.error("confirm: no interactive method available, denying prod access");
@@ -116,7 +130,8 @@ async function tryTerminalPrompt(
   if (command) {
     process.stdout.write(`gcp-gate: Reported command: ${command}\n`);
   }
-  process.stdout.write(`gcp-gate: Grant prod-level GCP access to ${email}? [y/N] `);
+  const pamSuffix = pamPolicy ? ` via PAM entitlement '${pamPolicy}'` : "";
+  process.stdout.write(`gcp-gate: Grant prod-level GCP access to ${email}${pamSuffix}? [y/N] `);
 
   return new Promise<boolean>((resolve) => {
     process.stdin.setRawMode?.(false);

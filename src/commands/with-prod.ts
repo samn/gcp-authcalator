@@ -136,6 +136,7 @@ export async function runWithProd(
       ...options.fetchOptions,
       command: wrappedCommand,
       scopes: wpConfig.scopes,
+      pamPolicy: wpConfig.pam_policy,
     });
   } catch (err) {
     console.error(

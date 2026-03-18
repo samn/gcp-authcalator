@@ -9,6 +9,7 @@ import { createProdRateLimiter } from "./rate-limit.ts";
 import { handleRequest } from "./handlers.ts";
 import { loadAndValidateTlsFiles } from "../tls/store.ts";
 import type { BunRequestInit } from "./connection.ts";
+import { createPamModule, resolveEntitlementPath, type PamModule } from "./pam.ts";
 
 export interface GateServerResult {
   server: ReturnType<typeof Bun.serve>;
@@ -39,6 +40,32 @@ export async function startGateServer(
   const audit = createAuditModule(options.auditLogDir);
   const prodRateLimiter = createProdRateLimiter();
 
+  // PAM setup: resolve entitlement paths and build allowlist
+  let pam: PamModule | undefined;
+  let pamDefaultPolicy: string | undefined;
+  let pamAllowedPolicies: Set<string> | undefined;
+
+  if (config.pam_policy) {
+    const pamLocation = config.pam_location ?? "global";
+
+    pam = createPamModule(async () => {
+      const { token } = await (await auth.getSourceClient()).getAccessToken();
+      if (!token) throw new Error("Failed to get ADC token for PAM API");
+      return token;
+    });
+
+    pamDefaultPolicy = resolveEntitlementPath(config.pam_policy, config.project_id, pamLocation);
+
+    // Build allowlist: default policy + any additional allowed policies
+    const allowed = new Set<string>([pamDefaultPolicy]);
+    if (config.pam_allowed_policies) {
+      for (const p of config.pam_allowed_policies) {
+        allowed.add(resolveEntitlementPath(p, config.project_id, pamLocation));
+      }
+    }
+    pamAllowedPolicies = allowed;
+  }
+
   const deps: GateDeps = {
     mintDevToken: auth.mintDevToken,
     mintProdToken: auth.mintProdToken,
@@ -49,6 +76,9 @@ export async function startGateServer(
     writeAuditLog: audit.writeAuditLog,
     prodRateLimiter,
     startTime: new Date(),
+    ensurePamGrant: pam?.ensureGrant,
+    pamAllowedPolicies,
+    pamDefaultPolicy,
   };
 
   // Ensure the socket directory exists with owner-only permissions (0o700).
@@ -162,20 +192,27 @@ export async function startGateServer(
   }
 
   // Graceful shutdown on signals
-  const onSignal = () => {
+  const onSignal = async () => {
     console.log("\ngate: shutting down...");
+    if (pam) {
+      await pam.revokeAll();
+    }
     stop();
     process.exit(0);
   };
-  process.on("SIGTERM", onSignal);
-  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", () => void onSignal());
+  process.on("SIGINT", () => void onSignal());
 
   console.log("gate: starting gcp-gate token daemon");
   console.log(`  project:         ${config.project_id}`);
-  console.log(`  service account: ${config.service_account}`);
+  console.log(`  service account: ${config.service_account ?? "(none — dev tokens disabled)"}`);
   console.log(`  socket path:     ${config.socket_path}`);
   if (tcpServer) {
     console.log(`  tcp listener:    127.0.0.1:${config.gate_tls_port} (mTLS)`);
+  }
+  if (pamDefaultPolicy) {
+    console.log(`  pam policy:      ${config.pam_policy} (default)`);
+    console.log(`  pam allowlist:   ${pamAllowedPolicies!.size} entitlement(s)`);
   }
   console.log("  endpoints:");
   console.log("    GET /token            → dev-scoped access token");

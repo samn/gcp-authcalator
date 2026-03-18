@@ -44,9 +44,10 @@ async function handleToken(req: Request, url: URL, deps: GateDeps): Promise<Resp
   const level = url.searchParams.get("level") === "prod" ? "prod" : "dev";
   const scopesParam = url.searchParams.get("scopes");
   const scopes = scopesParam ? scopesParam.split(",") : undefined;
+  const pamPolicyParam = url.searchParams.get("pam_policy") ?? undefined;
 
   if (level === "prod") {
-    return handleProdToken(req, deps, scopes);
+    return handleProdToken(req, deps, scopes, pamPolicyParam);
   }
 
   return handleDevToken(deps, scopes);
@@ -89,11 +90,38 @@ async function handleDevToken(deps: GateDeps, scopes?: string[]): Promise<Respon
   }
 }
 
-async function handleProdToken(req: Request, deps: GateDeps, scopes?: string[]): Promise<Response> {
-  const auditBase: Pick<AuditEntry, "endpoint" | "level"> = {
+async function handleProdToken(
+  req: Request,
+  deps: GateDeps,
+  scopes?: string[],
+  pamPolicyParam?: string,
+): Promise<Response> {
+  // Resolve effective PAM policy: query param > config default > none
+  const effectivePamPolicy = pamPolicyParam ?? deps.pamDefaultPolicy;
+
+  const auditBase: Pick<AuditEntry, "endpoint" | "level" | "pam_policy"> = {
     endpoint: "/token?level=prod",
     level: "prod",
+    pam_policy: effectivePamPolicy,
   };
+
+  // Allowlist check: if a PAM policy is specified, it must be in the allowlist
+  if (effectivePamPolicy && deps.pamAllowedPolicies) {
+    if (!deps.pamAllowedPolicies.has(effectivePamPolicy)) {
+      deps.writeAuditLog({
+        ...auditBase,
+        timestamp: new Date().toISOString(),
+        result: "denied",
+        error: "PAM policy not in allowlist",
+      });
+      return jsonResponse({ error: "PAM policy not in allowlist" }, 403);
+    }
+  }
+
+  // Misconfiguration check: PAM policy requested but module not wired
+  if (effectivePamPolicy && !deps.ensurePamGrant) {
+    return jsonResponse({ error: "PAM policy requested but PAM module not configured" }, 500);
+  }
 
   // Rate-limit check before showing any confirmation dialog
   const gate = deps.prodRateLimiter.acquire();
@@ -115,7 +143,7 @@ async function handleProdToken(req: Request, deps: GateDeps, scopes?: string[]):
     const commandArr = parseCommandHeader(req.headers.get("X-Wrapped-Command"));
     const commandSummary = commandArr ? summarizeCommand(commandArr) : undefined;
 
-    const approved = await deps.confirmProdAccess(email, commandSummary);
+    const approved = await deps.confirmProdAccess(email, commandSummary, effectivePamPolicy);
     if (!approved) {
       deps.prodRateLimiter.release("denied");
 
@@ -127,6 +155,16 @@ async function handleProdToken(req: Request, deps: GateDeps, scopes?: string[]):
       });
 
       return jsonResponse({ error: "Prod access denied by user" }, 403);
+    }
+
+    // Request PAM grant if a policy is configured
+    let pamAuditFields: Pick<AuditEntry, "pam_grant" | "pam_cached"> = {};
+    if (effectivePamPolicy && deps.ensurePamGrant) {
+      const grantResult = await deps.ensurePamGrant(effectivePamPolicy, commandSummary);
+      pamAuditFields = {
+        pam_grant: grantResult.name,
+        pam_cached: grantResult.cached,
+      };
     }
 
     const cached = await deps.mintProdToken(scopes);
@@ -142,6 +180,7 @@ async function handleProdToken(req: Request, deps: GateDeps, scopes?: string[]):
 
     deps.writeAuditLog({
       ...auditBase,
+      ...pamAuditFields,
       timestamp: new Date().toISOString(),
       result: "granted",
       email,

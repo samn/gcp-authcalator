@@ -7,6 +7,8 @@ export interface FetchProdTokenOptions {
   command?: string[];
   /** OAuth scopes for the prod token. */
   scopes?: string[];
+  /** PAM entitlement to escalate to (passed to gate as query param). */
+  pamPolicy?: string;
 }
 
 export interface ProdTokenResult {
@@ -44,6 +46,9 @@ export async function fetchProdToken(
   let tokenUrl = `${baseUrl}/token?level=prod`;
   if (options.scopes && options.scopes.length > 0) {
     tokenUrl += `&scopes=${options.scopes.map(encodeURIComponent).join(",")}`;
+  }
+  if (options.pamPolicy) {
+    tokenUrl += `&pam_policy=${encodeURIComponent(options.pamPolicy)}`;
   }
   const tokenRes = await fetchFn(tokenUrl, fetchOpts);
 

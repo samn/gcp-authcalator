@@ -62,6 +62,9 @@ Options:
   --bundle-b64             Print base64-encoded client bundle (init-tls only)
   --show-path              Print TLS directory path (init-tls only)
   --scopes <scopes>        Comma-separated OAuth scopes (default: cloud-platform)
+  --pam-policy <id|path>   PAM entitlement for just-in-time prod escalation
+  --pam-allowed-policies <ids>  Additional allowed PAM entitlements (comma-separated)
+  --pam-location <loc>     PAM entitlement location (default: global)
   -c, --config <path>      Path to TOML config file
   -h, --help               Show this help message
   -v, --version            Show version
@@ -104,6 +107,9 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       "bundle-b64": { type: "boolean" },
       "show-path": { type: "boolean" },
       scopes: { type: "string" },
+      "pam-policy": { type: "string" },
+      "pam-allowed-policies": { type: "string" },
+      "pam-location": { type: "string" },
       config: { type: "string", short: "c" },
       help: { type: "boolean", short: "h" },
       version: { type: "boolean", short: "v" },

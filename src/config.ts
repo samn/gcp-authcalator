@@ -64,14 +64,23 @@ export const ConfigSchema = z.object({
     .optional(),
   tls_bundle: z.string().min(1).transform(expandTilde).optional(),
   scopes: z.array(z.string().min(1)).optional(),
+  pam_policy: z.string().min(1).optional(),
+  pam_allowed_policies: z.array(z.string().min(1)).optional(),
+  pam_location: z.string().min(1).optional(),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
 
-/** gate requires project_id and service_account. */
+/**
+ * gate requires project_id and at least one of service_account or pam_policy.
+ * - service_account alone: dev tokens via impersonation, prod tokens via ADC
+ * - pam_policy alone: prod tokens only (dev tokens disabled)
+ * - both: dev tokens via impersonation, prod tokens with PAM escalation
+ */
 export const GateConfigSchema = ConfigSchema.required({
   project_id: true,
-  service_account: true,
+}).refine((c) => c.service_account || c.pam_policy, {
+  message: "gate requires at least one of service_account or pam_policy",
 });
 
 export type GateConfig = z.infer<typeof GateConfigSchema>;
@@ -104,6 +113,9 @@ const cliToConfigKey: Record<string, keyof Config> = {
   "gate-url": "gate_url",
   "tls-bundle": "tls_bundle",
   scopes: "scopes",
+  "pam-policy": "pam_policy",
+  "pam-allowed-policies": "pam_allowed_policies",
+  "pam-location": "pam_location",
 };
 
 /** Convert a CLI-arg values object (kebab-case keys) to config keys (snake_case). */
@@ -115,8 +127,11 @@ export function mapCliArgs(
     if (value === undefined) continue;
     const configKey = cliToConfigKey[cliKey];
     if (configKey) {
-      // Split comma-separated scopes string into an array
-      if (configKey === "scopes" && typeof value === "string") {
+      // Split comma-separated values into arrays for list fields
+      if (
+        (configKey === "scopes" || configKey === "pam_allowed_policies") &&
+        typeof value === "string"
+      ) {
         mapped[configKey] = value.split(",").map((s) => s.trim());
       } else {
         mapped[configKey] = value;
@@ -140,6 +155,8 @@ const configKeys: readonly (keyof Config)[] = [
   "tls_dir",
   "gate_url",
   "tls_bundle",
+  "pam_policy",
+  "pam_location",
 ];
 
 /**

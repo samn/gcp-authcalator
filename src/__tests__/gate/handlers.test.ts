@@ -511,6 +511,169 @@ describe("GET /token?level=prod", () => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /token?level=prod with PAM
+// ---------------------------------------------------------------------------
+
+describe("GET /token?level=prod with PAM", () => {
+  test("calls ensurePamGrant when pam_policy query param is in allowlist", async () => {
+    let capturedPath: string | undefined;
+    const deps = makeDeps({
+      pamDefaultPolicy: undefined,
+      pamAllowedPolicies: new Set(["my-policy"]),
+      ensurePamGrant: async (path) => {
+        capturedPath = path;
+        return { name: "grants/g1", state: "ACTIVATED", cached: false };
+      },
+    });
+
+    await handleRequest(makeRequest("/token?level=prod&pam_policy=my-policy"), deps);
+    expect(capturedPath).toBe("my-policy");
+  });
+
+  test("uses pamDefaultPolicy when no query param", async () => {
+    let capturedPath: string | undefined;
+    const deps = makeDeps({
+      pamDefaultPolicy: "default-entitlement",
+      pamAllowedPolicies: new Set(["default-entitlement"]),
+      ensurePamGrant: async (path) => {
+        capturedPath = path;
+        return { name: "grants/g1", state: "ACTIVATED", cached: false };
+      },
+    });
+
+    await handleRequest(makeRequest("/token?level=prod"), deps);
+    expect(capturedPath).toBe("default-entitlement");
+  });
+
+  test("query param overrides pamDefaultPolicy", async () => {
+    let capturedPath: string | undefined;
+    const deps = makeDeps({
+      pamDefaultPolicy: "default-entitlement",
+      pamAllowedPolicies: new Set(["default-entitlement", "override-entitlement"]),
+      ensurePamGrant: async (path) => {
+        capturedPath = path;
+        return { name: "grants/g1", state: "ACTIVATED", cached: false };
+      },
+    });
+
+    await handleRequest(makeRequest("/token?level=prod&pam_policy=override-entitlement"), deps);
+    expect(capturedPath).toBe("override-entitlement");
+  });
+
+  test("returns 403 when pam_policy not in allowlist", async () => {
+    const logs: AuditEntry[] = [];
+    const deps = makeDeps({
+      pamAllowedPolicies: new Set(["allowed-policy"]),
+      ensurePamGrant: async () => ({ name: "g", state: "ACTIVATED", cached: false }),
+      writeAuditLog: (e) => logs.push(e),
+    });
+
+    const res = await handleRequest(
+      makeRequest("/token?level=prod&pam_policy=forbidden-policy"),
+      deps,
+    );
+
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toContain("not in allowlist");
+
+    expect(logs).toHaveLength(1);
+    expect(logs[0]!.result).toBe("denied");
+  });
+
+  test("returns 500 when pam_policy is present but ensurePamGrant not wired", async () => {
+    const deps = makeDeps({
+      pamDefaultPolicy: undefined,
+      pamAllowedPolicies: undefined,
+      ensurePamGrant: undefined,
+    });
+
+    const res = await handleRequest(makeRequest("/token?level=prod&pam_policy=some-policy"), deps);
+
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toContain("PAM module not configured");
+  });
+
+  test("skips PAM when no pam_policy and no default", async () => {
+    let ensureCalled = false;
+    const deps = makeDeps({
+      pamDefaultPolicy: undefined,
+      ensurePamGrant: async () => {
+        ensureCalled = true;
+        return { name: "g", state: "ACTIVATED", cached: false };
+      },
+    });
+
+    const res = await handleRequest(makeRequest("/token?level=prod"), deps);
+    expect(res.status).toBe(200);
+    expect(ensureCalled).toBe(false);
+  });
+
+  test("includes PAM fields in audit log when grant succeeds", async () => {
+    const logs: AuditEntry[] = [];
+    const deps = makeDeps({
+      pamDefaultPolicy: "my-policy",
+      pamAllowedPolicies: new Set(["my-policy"]),
+      ensurePamGrant: async () => ({
+        name: "grants/pam-grant-123",
+        state: "ACTIVATED",
+        cached: false,
+      }),
+      writeAuditLog: (e) => logs.push(e),
+    });
+
+    await handleRequest(makeRequest("/token?level=prod"), deps);
+
+    expect(logs).toHaveLength(1);
+    expect(logs[0]!.pam_policy).toBe("my-policy");
+    expect(logs[0]!.pam_grant).toBe("grants/pam-grant-123");
+    expect(logs[0]!.pam_cached).toBe(false);
+  });
+
+  test("passes PAM policy to confirmProdAccess", async () => {
+    let capturedPam: string | undefined;
+    const deps = makeDeps({
+      pamDefaultPolicy: "my-entitlement",
+      pamAllowedPolicies: new Set(["my-entitlement"]),
+      ensurePamGrant: async () => ({
+        name: "g",
+        state: "ACTIVATED",
+        cached: false,
+      }),
+      confirmProdAccess: async (_email, _command, pamPolicy) => {
+        capturedPam = pamPolicy;
+        return true;
+      },
+    });
+
+    await handleRequest(makeRequest("/token?level=prod"), deps);
+    expect(capturedPam).toBe("my-entitlement");
+  });
+
+  test("returns 500 when ensurePamGrant fails", async () => {
+    const logs: AuditEntry[] = [];
+    const deps = makeDeps({
+      pamDefaultPolicy: "my-policy",
+      pamAllowedPolicies: new Set(["my-policy"]),
+      ensurePamGrant: async () => {
+        throw new Error("PAM API unreachable");
+      },
+      writeAuditLog: (e) => logs.push(e),
+    });
+
+    const res = await handleRequest(makeRequest("/token?level=prod"), deps);
+
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("PAM API unreachable");
+
+    expect(logs).toHaveLength(1);
+    expect(logs[0]!.result).toBe("error");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Concurrent dialog prevention
 // ---------------------------------------------------------------------------
 
