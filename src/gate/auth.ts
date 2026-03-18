@@ -7,8 +7,8 @@ import type { CachedToken } from "./types.ts";
 /** Minimum remaining lifetime before we re-mint a cached token (5 minutes). */
 const CACHE_MARGIN_MS = 5 * 60 * 1000;
 
-/** Default token lifetime for impersonated tokens (1 hour). */
-const DEFAULT_LIFETIME = 3600;
+/** Fallback token lifetime when not configured (1 hour). */
+const FALLBACK_LIFETIME = 3600;
 
 export interface AuthModuleOptions {
   /** Pre-built source client (ADC) — for testing. */
@@ -20,8 +20,8 @@ export interface AuthModuleOptions {
 }
 
 export interface AuthModule {
-  mintDevToken: (scopes?: string[]) => Promise<CachedToken>;
-  mintProdToken: (scopes?: string[]) => Promise<CachedToken>;
+  mintDevToken: (scopes?: string[], ttlSeconds?: number) => Promise<CachedToken>;
+  mintProdToken: (scopes?: string[], ttlSeconds?: number) => Promise<CachedToken>;
   getIdentityEmail: () => Promise<string>;
   getProjectNumber: () => Promise<string>;
   getUniverseDomain: () => Promise<string>;
@@ -40,11 +40,12 @@ export interface AuthModule {
  */
 export function createAuthModule(config: GateConfig, options: AuthModuleOptions = {}): AuthModule {
   const fetchFn = options.fetchFn ?? globalThis.fetch;
+  const configTtl = config.token_ttl_seconds ?? FALLBACK_LIFETIME;
 
   // Lazily initialized clients
   let sourceClient: AuthClient | null = options.sourceClient ?? null;
 
-  // Per-scope caches for dev tokens (impersonated)
+  // Per-scope-and-ttl caches for dev tokens (impersonated)
   const devTokenCaches = new Map<string, CachedToken>();
   const impersonatedClients = new Map<string, AuthClient>();
 
@@ -56,9 +57,9 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
   let projectNumberCache: string | null = null;
   let universeDomainCache: string | null = null;
 
-  /** Build a stable cache key from a scope set. */
-  function scopeKey(scopes: string[]): string {
-    return [...scopes].sort().join(",");
+  /** Build a stable cache key from a scope set and TTL. */
+  function cacheKey(scopes: string[], ttl: number): string {
+    return [...scopes].sort().join(",") + ":" + ttl;
   }
 
   async function getSourceClient(): Promise<AuthClient> {
@@ -69,11 +70,11 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
     return sourceClient;
   }
 
-  async function getImpersonatedClient(scopes: string[]): Promise<AuthClient> {
-    const key = scopeKey(scopes);
+  async function getImpersonatedClient(scopes: string[], ttl: number): Promise<AuthClient> {
+    const key = cacheKey(scopes, ttl);
 
-    // Use the injected client for default scopes (testing support)
-    if (defaultImpersonatedClient && key === scopeKey(DEFAULT_SCOPES)) {
+    // Use the injected client for default scopes + default TTL (testing support)
+    if (defaultImpersonatedClient && key === cacheKey(DEFAULT_SCOPES, configTtl)) {
       return defaultImpersonatedClient;
     }
 
@@ -84,7 +85,7 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
         sourceClient: source,
         targetPrincipal: config.service_account,
         targetScopes: scopes,
-        lifetime: DEFAULT_LIFETIME,
+        lifetime: ttl,
       });
       impersonatedClients.set(key, client);
     }
@@ -96,23 +97,24 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
     return cached.expires_at.getTime() - Date.now() > CACHE_MARGIN_MS;
   }
 
-  /** Extract expiry from the client's credentials, falling back to DEFAULT_LIFETIME. */
-  function expiryFromCredentials(client: AuthClient): Date {
+  /** Extract expiry from the client's credentials, falling back to configured TTL. */
+  function expiryFromCredentials(client: AuthClient, ttl: number): Date {
     const expMs = client.credentials?.expiry_date;
     if (expMs) return new Date(expMs);
-    return new Date(Date.now() + DEFAULT_LIFETIME * 1000);
+    return new Date(Date.now() + ttl * 1000);
   }
 
-  async function mintDevToken(scopes?: string[]): Promise<CachedToken> {
+  async function mintDevToken(scopes?: string[], ttlSeconds?: number): Promise<CachedToken> {
     const effectiveScopes = scopes ?? DEFAULT_SCOPES;
-    const key = scopeKey(effectiveScopes);
+    const effectiveTtl = ttlSeconds ?? configTtl;
+    const key = cacheKey(effectiveScopes, effectiveTtl);
 
     const cached = devTokenCaches.get(key);
     if (isCacheValid(cached)) {
       return cached;
     }
 
-    const client = await getImpersonatedClient(effectiveScopes);
+    const client = await getImpersonatedClient(effectiveScopes, effectiveTtl);
     const { token } = await client.getAccessToken();
 
     if (!token) {
@@ -121,19 +123,23 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
 
     const result: CachedToken = {
       access_token: token,
-      expires_at: expiryFromCredentials(client),
+      expires_at: expiryFromCredentials(client, effectiveTtl),
     };
     devTokenCaches.set(key, result);
     return result;
   }
 
-  async function mintProdToken(scopes?: string[]): Promise<CachedToken> {
+  async function mintProdToken(scopes?: string[], ttlSeconds?: number): Promise<CachedToken> {
     // Prod tokens use the engineer's own ADC credentials (not impersonated).
     // Never cached — always mint a fresh one.
     let client: AuthClient;
     const effectiveScopes = scopes ?? DEFAULT_SCOPES;
+    const effectiveTtl = ttlSeconds ?? configTtl;
 
-    if (scopeKey(effectiveScopes) === scopeKey(DEFAULT_SCOPES)) {
+    const scopesSorted = [...effectiveScopes].sort().join(",");
+    const defaultSorted = [...DEFAULT_SCOPES].sort().join(",");
+
+    if (scopesSorted === defaultSorted) {
       // Default scopes — reuse the cached source client
       client = await getSourceClient();
     } else {
@@ -148,9 +154,16 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
       throw new Error("Failed to mint prod token: no access token returned");
     }
 
+    // Cap expires_at to the effective TTL. The underlying ADC token may remain
+    // valid at Google beyond this time, but gcp-authcalator will treat it as
+    // expired once the cap is reached.
+    const credentialExpiry = expiryFromCredentials(client, effectiveTtl);
+    const ttlCap = new Date(Date.now() + effectiveTtl * 1000);
+    const expires_at = credentialExpiry < ttlCap ? credentialExpiry : ttlCap;
+
     return {
       access_token: token,
-      expires_at: expiryFromCredentials(client),
+      expires_at,
     };
   }
 

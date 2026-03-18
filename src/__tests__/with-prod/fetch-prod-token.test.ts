@@ -200,6 +200,55 @@ describe("fetchProdToken", () => {
     );
   });
 
+  test("includes token_ttl_seconds in token URL when provided", async () => {
+    let capturedTokenUrl = "";
+
+    const fetchFn = (async (url: string) => {
+      const parsed = new URL(url);
+      if (parsed.pathname === "/token") {
+        capturedTokenUrl = url;
+        return new Response(JSON.stringify({ access_token: "tok", expires_in: 900 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ email: "eng@example.com" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof globalThis.fetch;
+
+    await fetchProdToken(
+      { mode: "unix", socketPath: "/tmp/gate.sock" },
+      { fetchFn, tokenTtlSeconds: 900 },
+    );
+
+    expect(capturedTokenUrl).toContain("token_ttl_seconds=900");
+  });
+
+  test("omits token_ttl_seconds from token URL when not provided", async () => {
+    let capturedTokenUrl = "";
+
+    const fetchFn = (async (url: string) => {
+      const parsed = new URL(url);
+      if (parsed.pathname === "/token") {
+        capturedTokenUrl = url;
+        return new Response(JSON.stringify({ access_token: "tok", expires_in: 1800 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ email: "eng@example.com" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof globalThis.fetch;
+
+    await fetchProdToken({ mode: "unix", socketPath: "/tmp/gate.sock" }, { fetchFn });
+
+    expect(capturedTokenUrl).not.toContain("token_ttl_seconds");
+  });
+
   test("omits scopes from token URL when scopes not provided", async () => {
     let capturedTokenUrl = "";
 

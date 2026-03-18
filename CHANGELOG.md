@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - PAM (Privileged Access Manager) integration for just-in-time prod escalation via `--pam-policy`. When configured, the gate requests a temporary PAM grant before minting prod tokens, allowing the engineer's ADC to be downscoped by default. Includes entitlement allowlist enforcement, confirmation dialogs showing the entitlement name, audit logging of grant details, and best-effort grant revocation on shutdown.
 - Custom OAuth scopes via `scopes` config field (TOML array) and `--scopes` CLI flag (comma-separated). Tokens are now minted with the requested scopes instead of always using `cloud-platform`. Useful for tools requiring narrower scopes like `sqlservice.login`.
+- Configurable token TTL via `--token-ttl-seconds` CLI flag, `token_ttl_seconds` TOML config key, or `GCP_AUTHCALATOR_TOKEN_TTL_SECONDS` env var (default: 3600s). Controls the lifetime of minted tokens and PAM grants. `with-prod` can override the TTL to a shorter value (validated LTE the gate's configured maximum). Note: for prod ADC tokens, the TTL cap is advisory — the underlying Google-issued token may remain valid beyond the reported expiry, but gcp-authcalator treats the cap as authoritative.
 
 ### Changed
 

@@ -55,6 +55,7 @@ export interface AuditEntry {
   pam_policy?: string;
   pam_grant?: string;
   pam_cached?: boolean;
+  token_ttl_seconds?: number;
 }
 
 /**
@@ -62,8 +63,8 @@ export interface AuditEntry {
  * Allows handlers to be tested without real GCP calls.
  */
 export interface GateDeps {
-  mintDevToken: (scopes?: string[]) => Promise<CachedToken>;
-  mintProdToken: (scopes?: string[]) => Promise<CachedToken>;
+  mintDevToken: (scopes?: string[], ttlSeconds?: number) => Promise<CachedToken>;
+  mintProdToken: (scopes?: string[], ttlSeconds?: number) => Promise<CachedToken>;
   getIdentityEmail: () => Promise<string>;
   getProjectNumber: () => Promise<string>;
   getUniverseDomain: () => Promise<string>;
@@ -79,4 +80,6 @@ export interface GateDeps {
   pamDefaultPolicy?: string;
   /** Resolve a raw PAM policy value (short-form or full path) to a validated full entitlement path. */
   resolvePamPolicy?: (policy: string) => string;
+  /** Default token TTL in seconds from config. Used to validate TTL overrides. */
+  defaultTokenTtlSeconds: number;
 }

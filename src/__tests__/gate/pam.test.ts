@@ -120,6 +120,53 @@ describe("ensureGrant", () => {
     expect(result.cached).toBe(false);
   });
 
+  test("uses configured grant duration in request body", async () => {
+    const grantName = `${entitlementPath}/grants/grant-1`;
+    let capturedBody: string | undefined;
+
+    const fetchFn = (async (_url: string, init?: RequestInit) => {
+      if (init?.body) {
+        capturedBody = init.body as string;
+      }
+      return new Response(JSON.stringify(makeActivatedGrant(grantName)), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof globalThis.fetch;
+
+    const pam = createPamModule(async () => "test-token", {
+      fetchFn,
+      grantDurationSeconds: 1800,
+    });
+
+    await pam.ensureGrant(entitlementPath);
+    expect(capturedBody).toBeDefined();
+    const parsed = JSON.parse(capturedBody!) as Record<string, unknown>;
+    expect(parsed.requestedDuration).toBe("1800s");
+  });
+
+  test("defaults grant duration to 3600s when not configured", async () => {
+    const grantName = `${entitlementPath}/grants/grant-1`;
+    let capturedBody: string | undefined;
+
+    const fetchFn = (async (_url: string, init?: RequestInit) => {
+      if (init?.body) {
+        capturedBody = init.body as string;
+      }
+      return new Response(JSON.stringify(makeActivatedGrant(grantName)), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof globalThis.fetch;
+
+    const pam = createPamModule(async () => "test-token", { fetchFn });
+
+    await pam.ensureGrant(entitlementPath);
+    expect(capturedBody).toBeDefined();
+    const parsed = JSON.parse(capturedBody!) as Record<string, unknown>;
+    expect(parsed.requestedDuration).toBe("3600s");
+  });
+
   test("returns cached grant on second call", async () => {
     const grantName = `${entitlementPath}/grants/grant-1`;
     const { pam } = makeModule([{ status: 200, body: makeActivatedGrant(grantName) }]);

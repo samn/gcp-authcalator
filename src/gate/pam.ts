@@ -7,8 +7,8 @@
 
 const PAM_API_BASE = "https://privilegedaccessmanager.googleapis.com/v1";
 
-/** Default grant duration (matches token TTL). */
-const GRANT_DURATION = "3600s";
+/** Fallback grant duration when not configured (1 hour). */
+const FALLBACK_GRANT_DURATION_SECONDS = 3600;
 
 /** Minimum remaining lifetime before we re-request a cached grant (5 minutes). */
 const CACHE_MARGIN_MS = 5 * 60 * 1000;
@@ -38,6 +38,8 @@ function parseDurationSeconds(duration?: string): number {
 export interface PamModuleOptions {
   fetchFn?: typeof globalThis.fetch;
   now?: () => number;
+  /** Grant duration in seconds. Defaults to 3600. */
+  grantDurationSeconds?: number;
 }
 
 export interface PamModule {
@@ -137,6 +139,7 @@ export function createPamModule(
 ): PamModule {
   const fetchFn = options.fetchFn ?? globalThis.fetch;
   const now = options.now ?? Date.now;
+  const grantDuration = `${options.grantDurationSeconds ?? FALLBACK_GRANT_DURATION_SECONDS}s`;
 
   const grantCache = new Map<string, CachedGrant>();
 
@@ -163,7 +166,7 @@ export function createPamModule(
   ): Promise<PamGrantResponse> {
     const url = `${PAM_API_BASE}/${entitlementPath}/grants`;
     const body = {
-      requestedDuration: GRANT_DURATION,
+      requestedDuration: grantDuration,
       justification: {
         unstructuredJustification: justification ?? "gcp-authcalator prod access",
       },

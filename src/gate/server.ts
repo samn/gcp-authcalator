@@ -40,6 +40,8 @@ export async function startGateServer(
   const audit = createAuditModule(options.auditLogDir);
   const prodRateLimiter = createProdRateLimiter();
 
+  const defaultTokenTtlSeconds = config.token_ttl_seconds ?? 3600;
+
   // PAM setup: resolve entitlement paths and build allowlist
   let pam: PamModule | undefined;
   let pamDefaultPolicy: string | undefined;
@@ -48,11 +50,14 @@ export async function startGateServer(
   if (config.pam_policy) {
     const pamLocation = config.pam_location ?? "global";
 
-    pam = createPamModule(async () => {
-      const { token } = await (await auth.getSourceClient()).getAccessToken();
-      if (!token) throw new Error("Failed to get ADC token for PAM API");
-      return token;
-    });
+    pam = createPamModule(
+      async () => {
+        const { token } = await (await auth.getSourceClient()).getAccessToken();
+        if (!token) throw new Error("Failed to get ADC token for PAM API");
+        return token;
+      },
+      { grantDurationSeconds: defaultTokenTtlSeconds },
+    );
 
     pamDefaultPolicy = resolveEntitlementPath(config.pam_policy, config.project_id, pamLocation);
 
@@ -83,6 +88,7 @@ export async function startGateServer(
       ? (policy: string) =>
           resolveEntitlementPath(policy, config.project_id, config.pam_location ?? "global")
       : undefined,
+    defaultTokenTtlSeconds,
   };
 
   // Ensure the socket directory exists with owner-only permissions (0o700).
@@ -210,6 +216,7 @@ export async function startGateServer(
   console.log("gate: starting gcp-gate token daemon");
   console.log(`  project:         ${config.project_id}`);
   console.log(`  service account: ${config.service_account ?? "(none — dev tokens disabled)"}`);
+  console.log(`  token TTL:       ${defaultTokenTtlSeconds}s`);
   console.log(`  socket path:     ${config.socket_path}`);
   if (tcpServer) {
     console.log(`  tcp listener:    127.0.0.1:${config.gate_tls_port} (mTLS)`);

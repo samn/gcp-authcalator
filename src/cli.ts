@@ -65,6 +65,7 @@ Options:
   --pam-policy <id|path>   PAM entitlement for just-in-time prod escalation
   --pam-allowed-policies <ids>  Additional allowed PAM entitlements (comma-separated)
   --pam-location <loc>     PAM entitlement location (default: global)
+  --token-ttl-seconds <secs>  Token lifetime in seconds (default: 3600)
   -c, --config <path>      Path to TOML config file
   -h, --help               Show this help message
   -v, --version            Show version
@@ -110,6 +111,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       "pam-policy": { type: "string" },
       "pam-allowed-policies": { type: "string" },
       "pam-location": { type: "string" },
+      "token-ttl-seconds": { type: "string" },
       config: { type: "string", short: "c" },
       help: { type: "boolean", short: "h" },
       version: { type: "boolean", short: "v" },

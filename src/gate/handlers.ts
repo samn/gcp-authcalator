@@ -40,27 +40,63 @@ export async function handleRequest(req: Request, deps: GateDeps): Promise<Respo
   }
 }
 
+/** Parse and validate the token_ttl_seconds query param. Returns the value or an error Response. */
+function parseTtlParam(
+  param: string | null,
+  defaultTtl: number,
+): { ttlSeconds?: number } | { error: Response } {
+  if (param === null) return {};
+
+  const n = Number(param);
+  if (!Number.isInteger(n) || n !== n) {
+    return { error: jsonResponse({ error: "token_ttl_seconds must be an integer" }, 400) };
+  }
+  if (n < 60) {
+    return { error: jsonResponse({ error: "token_ttl_seconds must be >= 60" }, 400) };
+  }
+  if (n > defaultTtl) {
+    return {
+      error: jsonResponse(
+        { error: `token_ttl_seconds (${n}) exceeds configured maximum (${defaultTtl})` },
+        400,
+      ),
+    };
+  }
+  return { ttlSeconds: n };
+}
+
 async function handleToken(req: Request, url: URL, deps: GateDeps): Promise<Response> {
   const level = url.searchParams.get("level") === "prod" ? "prod" : "dev";
   const scopesParam = url.searchParams.get("scopes");
   const scopes = scopesParam ? scopesParam.split(",") : undefined;
   const pamPolicyParam = url.searchParams.get("pam_policy") ?? undefined;
 
+  const ttlResult = parseTtlParam(
+    url.searchParams.get("token_ttl_seconds"),
+    deps.defaultTokenTtlSeconds,
+  );
+  if ("error" in ttlResult) return ttlResult.error;
+
   if (level === "prod") {
-    return handleProdToken(req, deps, scopes, pamPolicyParam);
+    return handleProdToken(req, deps, scopes, pamPolicyParam, ttlResult.ttlSeconds);
   }
 
-  return handleDevToken(deps, scopes);
+  return handleDevToken(deps, scopes, ttlResult.ttlSeconds);
 }
 
-async function handleDevToken(deps: GateDeps, scopes?: string[]): Promise<Response> {
-  const auditBase: Pick<AuditEntry, "endpoint" | "level"> = {
+async function handleDevToken(
+  deps: GateDeps,
+  scopes?: string[],
+  ttlSeconds?: number,
+): Promise<Response> {
+  const auditBase: Pick<AuditEntry, "endpoint" | "level" | "token_ttl_seconds"> = {
     endpoint: "/token",
     level: "dev",
+    token_ttl_seconds: ttlSeconds,
   };
 
   try {
-    const cached = await deps.mintDevToken(scopes);
+    const cached = await deps.mintDevToken(scopes, ttlSeconds);
     const expiresIn = Math.max(0, Math.floor((cached.expires_at.getTime() - Date.now()) / 1000));
 
     const body: TokenResponse = {
@@ -95,6 +131,7 @@ async function handleProdToken(
   deps: GateDeps,
   scopes?: string[],
   pamPolicyParam?: string,
+  ttlSeconds?: number,
 ): Promise<Response> {
   // Resolve effective PAM policy: query param > config default > none
   // Query params must be resolved to full entitlement paths (with validation)
@@ -113,10 +150,11 @@ async function handleProdToken(
     effectivePamPolicy = deps.pamDefaultPolicy;
   }
 
-  const auditBase: Pick<AuditEntry, "endpoint" | "level" | "pam_policy"> = {
+  const auditBase: Pick<AuditEntry, "endpoint" | "level" | "pam_policy" | "token_ttl_seconds"> = {
     endpoint: "/token?level=prod",
     level: "prod",
     pam_policy: effectivePamPolicy,
+    token_ttl_seconds: ttlSeconds,
   };
 
   // Allowlist check: if a PAM policy is specified, it must be in the allowlist
@@ -181,7 +219,7 @@ async function handleProdToken(
       };
     }
 
-    const cached = await deps.mintProdToken(scopes);
+    const cached = await deps.mintProdToken(scopes, ttlSeconds);
     const expiresIn = Math.max(0, Math.floor((cached.expires_at.getTime() - Date.now()) / 1000));
 
     deps.prodRateLimiter.release("granted");
