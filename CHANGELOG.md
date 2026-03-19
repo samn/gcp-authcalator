@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [0.4.1] - 2026-03-19
+
 ### Added
 
 - Linux ARM64 release binary (`gcp-authcalator-linux-arm64`)
