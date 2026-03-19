@@ -22,6 +22,9 @@ jobs:
           - target: bun-linux-x64
             runner: ubuntu-latest
             artifact: gcp-authcalator-linux-amd64
+          - target: bun-linux-arm64
+            runner: ubuntu-24.04-arm
+            artifact: gcp-authcalator-linux-arm64
           - target: bun-darwin-arm64
             runner: macos-latest
             artifact: gcp-authcalator-darwin-arm64

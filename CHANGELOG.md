@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- Linux ARM64 release binary (`gcp-authcalator-linux-arm64`)
+
 ### Changed
 
 - Upgrade Bun from 1.3.10 to 1.3.11 (4 MB smaller compiled binaries on Linux, HTTP/2 and security fixes)
