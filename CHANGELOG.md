@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Changed
+
+- Upgrade Bun from 1.3.10 to 1.3.11 (4 MB smaller compiled binaries on Linux, HTTP/2 and security fixes)
+- Upgrade google-auth-library from 10.5.0 to 10.6.2
+- Upgrade oxlint from 1.50.0 to 1.56.0 and oxfmt from 0.35.0 to 0.41.0
+- Pin `@types/bun` to `^1.3.11` instead of `latest` for reproducible installs
+- Rename `.mise.toml` to `mise.toml` (mise canonical name)
+
 ## [0.4.0] - 2026-03-18
 
 ### Added
