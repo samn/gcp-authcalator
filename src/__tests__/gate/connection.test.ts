@@ -69,6 +69,24 @@ describe("buildGateConnection", () => {
     }
   });
 
+  test("returns tcp mode when gate_url and tls_dir are set", async () => {
+    const dir = join(makeTempDir(), "tls");
+    await ensureTlsFiles(dir);
+
+    const conn = await buildGateConnection(
+      { socket_path: "/tmp/test.sock", gate_url: "https://localhost:8174", tls_dir: dir },
+      {},
+    );
+
+    expect(conn.mode).toBe("tcp");
+    if (conn.mode === "tcp") {
+      expect(conn.gateUrl).toBe("https://localhost:8174");
+      expect(conn.caCert).toContain("-----BEGIN CERTIFICATE-----");
+      expect(conn.clientCert).toContain("-----BEGIN CERTIFICATE-----");
+      expect(conn.clientKey).toContain("-----BEGIN PRIVATE KEY-----");
+    }
+  });
+
   test("throws when gate_url is set but no client bundle is available", async () => {
     await expect(
       buildGateConnection(

@@ -24,7 +24,7 @@ export type GateConnection =
  * - Otherwise: return Unix socket mode.
  */
 export async function buildGateConnection(
-  config: { socket_path: string; gate_url?: string; tls_bundle?: string },
+  config: { socket_path: string; gate_url?: string; tls_bundle?: string; tls_dir?: string },
   env: Record<string, string | undefined> = process.env,
 ): Promise<GateConnection> {
   const gateUrl = config.gate_url ?? env.GCP_AUTHCALATOR_GATE_URL;
@@ -38,7 +38,7 @@ export async function buildGateConnection(
   if (!bundle) {
     throw new Error(
       "gate_url is set but no TLS client bundle is available.\n" +
-        "  Set GCP_AUTHCALATOR_TLS_BUNDLE_B64 env var or --tls-bundle config option.",
+        "  Set GCP_AUTHCALATOR_TLS_BUNDLE_B64 env var, --tls-bundle path, or --tls-dir directory.",
     );
   }
 

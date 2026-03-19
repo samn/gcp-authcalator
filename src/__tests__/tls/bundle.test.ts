@@ -70,6 +70,37 @@ describe("resolveClientBundle", () => {
     expect(result!.caCert).toContain("-----BEGIN CERTIFICATE-----");
   });
 
+  test("resolves from tls_dir containing client-bundle.pem", async () => {
+    const dir = join(makeTempDir(), "tls");
+    await ensureTlsFiles(dir);
+
+    const result = resolveClientBundle({ tls_dir: dir }, {});
+
+    expect(result).not.toBeNull();
+    expect(result!.caCert).toContain("-----BEGIN CERTIFICATE-----");
+    expect(result!.clientCert).toContain("-----BEGIN CERTIFICATE-----");
+    expect(result!.clientKey).toContain("-----BEGIN PRIVATE KEY-----");
+  });
+
+  test("returns null when tls_dir has no client-bundle.pem", () => {
+    const dir = makeTempDir();
+    const result = resolveClientBundle({ tls_dir: dir }, {});
+    expect(result).toBeNull();
+  });
+
+  test("prefers tls_bundle over tls_dir", async () => {
+    const dir1 = join(makeTempDir(), "tls1");
+    const dir2 = join(makeTempDir(), "tls2");
+    await ensureTlsFiles(dir1);
+    await ensureTlsFiles(dir2);
+    const bundlePath = join(dir1, "client-bundle.pem");
+
+    const result = resolveClientBundle({ tls_bundle: bundlePath, tls_dir: dir2 }, {});
+
+    expect(result).not.toBeNull();
+    expect(result!.caCert).toContain("-----BEGIN CERTIFICATE-----");
+  });
+
   test("clears env var after reading", async () => {
     const dir = join(makeTempDir(), "tls");
     await ensureTlsFiles(dir);
