@@ -39,7 +39,7 @@ describe("generateServerCert", () => {
     expect(valid).toBe(true);
   });
 
-  test("server cert has SAN with localhost and 127.0.0.1", async () => {
+  test("server cert has SAN with localhost, host.docker.internal, and 127.0.0.1", async () => {
     const ca = await generateCA();
     const { cert } = await generateServerCert(ca.caCert, ca.caKey);
     const x509Cert = new x509.X509Certificate(cert);
@@ -52,6 +52,7 @@ describe("generateServerCert", () => {
     const ipNames = names.filter((n) => n.type === "ip").map((n) => n.value);
 
     expect(dnsNames).toContain("localhost");
+    expect(dnsNames).toContain("host.docker.internal");
     expect(ipNames).toContain("127.0.0.1");
   });
 
