@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [0.4.2] - 2026-03-19
+
 ### Added
 
 - `--tls-dir` now works as a TLS client bundle source for metadata-proxy when `gate_url` is set. The client bundle is resolved in priority order: `GCP_AUTHCALATOR_TLS_BUNDLE_B64` env var > `--tls-bundle` path > `--tls-dir` directory (looks for `client-bundle.pem`).
