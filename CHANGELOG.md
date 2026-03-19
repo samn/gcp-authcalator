@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- `host.docker.internal` as a SAN on the server TLS certificate, enabling connections from Docker containers via the host networking bridge.
+
 ## [0.4.2] - 2026-03-19
 
 ### Added

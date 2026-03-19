@@ -4,7 +4,7 @@ import { randomSerialNumber, keyToPem, pemToArrayBuffer } from "./utils.ts";
 /**
  * Generate a server certificate signed by the given CA.
  *
- * - SAN: localhost, 127.0.0.1
+ * - SAN: localhost, host.docker.internal, 127.0.0.1
  * - EKU: serverAuth
  * - Validity: 90 days
  * - ECDSA P-256
@@ -39,6 +39,7 @@ export async function generateServerCert(
       new x509.ExtendedKeyUsageExtension(["1.3.6.1.5.5.7.3.1"], true), // serverAuth
       new x509.SubjectAlternativeNameExtension([
         { type: "dns", value: "localhost" },
+        { type: "dns", value: "host.docker.internal" },
         { type: "ip", value: "127.0.0.1" },
       ]),
     ],
