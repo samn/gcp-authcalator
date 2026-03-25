@@ -19,22 +19,22 @@ A natural first thought is to run a proxy outside the container that injects aut
 
 ### Why not just use GCP PAM (Privileged Access Manager)?
 
-GCP [PAM](https://cloud.google.com/iam/docs/pam-overview) provides just-in-time privilege escalation with time-bound grants and approval workflows. It's a strong control for managing *who* gets elevated access and *when* — but it doesn't address *which process* uses the resulting credentials, which is the critical gap in untrusted environments.
+GCP [PAM](https://cloud.google.com/iam/docs/pam-overview) provides just-in-time privilege escalation with time-bound grants and approval workflows. It's a strong control for managing _who_ gets elevated access and _when_ — but it doesn't address _which process_ uses the resulting credentials, which is the critical gap in untrusted environments.
 
 - **PAM grants elevate the entire session.** Once a PAM grant is approved, the engineer's ADC carries the elevated roles. Every process running as that user — including coding agents, build scripts, and compromised dependencies — inherits the escalation for the grant's full duration (typically 1–4 hours). PAM cannot distinguish between the engineer running a migration and an agent exfiltrating data.
-- **Credentials are still inside the container.** PAM controls *which roles* ADC carries but not *where* ADC lives. If ADC is mounted or forwarded into a devcontainer, any process can read the credentials directly and use them outside PAM's visibility.
+- **Credentials are still inside the container.** PAM controls _which roles_ ADC carries but not _where_ ADC lives. If ADC is mounted or forwarded into a devcontainer, any process can read the credentials directly and use them outside PAM's visibility.
 - **No per-request confirmation.** PAM is approve-once for the grant duration. There is no mechanism to prompt the engineer each time a process actually uses the elevated credentials. A single approval covers unlimited requests until the grant expires.
 - **Revocation is coarse-grained.** Revoking a PAM grant removes the IAM binding, but cached tokens remain valid until they expire. Processes that already obtained a token keep their access.
 
-gcp-authcalator is complementary to PAM — in fact, it [integrates with PAM directly](#gate--host-side-token-daemon) for just-in-time escalation. The difference is what happens *after* the grant:
+gcp-authcalator is complementary to PAM — in fact, it [integrates with PAM directly](#gate--host-side-token-daemon) for just-in-time escalation. The difference is what happens _after_ the grant:
 
-| | PAM alone | gcp-authcalator + PAM |
-|---|---|---|
-| Credentials location | Inside the container (ADC) | Host only; container gets short-lived tokens |
-| Who can use elevated creds | Any same-user process | Only the approved process tree (`with-prod`) |
-| Per-request confirmation | No — approve once, use many | Yes — host-side dialog per escalation |
-| Token scope after approval | Full ADC with granted roles | Single downscoped token, isolated metadata proxy |
-| Agent/automation access | Same as engineer | Dev service account only; prod requires human approval |
+|                            | PAM alone                   | gcp-authcalator + PAM                                  |
+| -------------------------- | --------------------------- | ------------------------------------------------------ |
+| Credentials location       | Inside the container (ADC)  | Host only; container gets short-lived tokens           |
+| Who can use elevated creds | Any same-user process       | Only the approved process tree (`with-prod`)           |
+| Per-request confirmation   | No — approve once, use many | Yes — host-side dialog per escalation                  |
+| Token scope after approval | Full ADC with granted roles | Single downscoped token, isolated metadata proxy       |
+| Agent/automation access    | Same as engineer            | Dev service account only; prod requires human approval |
 
 In short: PAM answers "should this person have access right now?" while gcp-authcalator answers "should this specific process have access right now?" Both questions matter in environments with untrusted automation.
 
