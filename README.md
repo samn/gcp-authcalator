@@ -9,6 +9,14 @@ Modern IDEs encourage running AI coding agents in the same devcontainer the engi
 
 The core problem is that `google.auth.default()` returns the engineer's full-privilege credentials to **any** process. There is no privilege boundary between the engineer's interactive session and automated tooling.
 
+### Why not just keep credentials on the host behind a simple proxy?
+
+A natural first thought is to run a proxy outside the container that injects auth tokens into requests, so credentials never enter the container directly. This helps, but it is not sufficient:
+
+- **Client libraries cache tokens aggressively.** Google Cloud SDKs and `gcloud` cache access tokens in memory and on disk (`~/.config/gcloud/`, `~/.kube/gke_gcloud_auth_plugin_cache`). Once a token passes through the proxy into the container, the proxy no longer controls who uses it or for how long.
+- **Cached tokens cause privilege escalation.** If you temporarily serve a higher-privilege token for a production operation and then switch back, processes inside the container keep using the cached prod token until it expires (~1 hour). A coding agent or compromised dependency can silently reuse it long after the elevated session was supposed to end.
+- **No per-request privilege boundary.** A static proxy hands the same token to every caller. There is no mechanism to require human approval for sensitive operations or to give different processes different privilege levels.
+
 gcp-authcalator solves this by keeping credentials on the host and making the container ask for them:
 
 1. A **token daemon** (`gate`) runs on the host and holds the engineer's Application Default Credentials. It mints short-lived, downscoped tokens via service account impersonation — never handing out the root credentials.
