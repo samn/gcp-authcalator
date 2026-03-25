@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- README: comparison section explaining why gcp-authcalator is stronger than PAM alone for untrusted environments
+
 ## [0.4.3] - 2026-03-19
 
 ### Added
