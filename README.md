@@ -88,6 +88,7 @@ Download a prebuilt binary from the [GitHub Releases](https://github.com/samn/gc
 | Platform     | Binary                         |
 | ------------ | ------------------------------ |
 | Linux x86_64 | `gcp-authcalator-linux-amd64`  |
+| Linux ARM64  | `gcp-authcalator-linux-arm64`  |
 | macOS ARM64  | `gcp-authcalator-darwin-arm64` |
 
 Each release includes SHA256 checksums for verification.
@@ -513,6 +514,7 @@ bun test          # run tests
 ```bash
 bun run build                # build for current platform
 bun run build:linux-amd64    # cross-compile for Linux x86_64
+bun run build:linux-arm64    # cross-compile for Linux ARM64
 bun run build:darwin-arm64   # cross-compile for macOS ARM64
 ```
 
