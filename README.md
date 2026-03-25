@@ -106,7 +106,7 @@ This produces a single compiled `gcp-authcalator` binary.
 ## Configuration
 
 Settings can be provided via CLI flags, a TOML config file, environment variables, or a combination.
-Precedence: CLI flags > TOML file > environment variables > defaults.
+Precedence: environment variables > CLI flags > TOML file > defaults.
 
 ### CLI flags
 
@@ -120,16 +120,31 @@ Precedence: CLI flags > TOML file > environment variables > defaults.
 --gate-url <url>           Gate URL for remote connections (must use https://)
 --tls-bundle <path>        Path to TLS client bundle file (PEM or base64-encoded)
 --scopes <scopes>          Comma-separated OAuth scopes (default: cloud-platform)
+--pam-policy <id|path>     PAM entitlement for just-in-time prod escalation
+--pam-allowed-policies <ids>  Additional PAM entitlements callers may request (comma-separated)
+--pam-location <loc>       PAM entitlement location (default: global)
+--token-ttl-seconds <secs> Token lifetime in seconds (60–43200, default: 3600)
 -c, --config <path>        Path to TOML config file
 ```
 
 ### Environment variables
 
-| Variable                         | Description                                              |
-| -------------------------------- | -------------------------------------------------------- |
-| `GCP_AUTHCALATOR_GATE_URL`       | Gate URL for remote connections (same as `--gate-url`)   |
-| `GCP_AUTHCALATOR_TLS_BUNDLE`     | Path to TLS client bundle file (same as `--tls-bundle`)  |
-| `GCP_AUTHCALATOR_TLS_BUNDLE_B64` | Base64-encoded TLS client bundle (preferred for secrets) |
+All config options can be set via `GCP_AUTHCALATOR_*` environment variables (uppercased key name with `GCP_AUTHCALATOR_` prefix):
+
+| Variable                            | Description                                               |
+| ----------------------------------- | --------------------------------------------------------- |
+| `GCP_AUTHCALATOR_PROJECT_ID`        | GCP project ID (same as `--project-id`)                   |
+| `GCP_AUTHCALATOR_SERVICE_ACCOUNT`   | Service account email (same as `--service-account`)       |
+| `GCP_AUTHCALATOR_SOCKET_PATH`       | Unix socket path (same as `--socket-path`)                |
+| `GCP_AUTHCALATOR_PORT`              | Metadata proxy port (same as `--port`)                    |
+| `GCP_AUTHCALATOR_GATE_TLS_PORT`     | Gate TCP+mTLS listener port (same as `--gate-tls-port`)   |
+| `GCP_AUTHCALATOR_TLS_DIR`           | TLS certificate directory (same as `--tls-dir`)           |
+| `GCP_AUTHCALATOR_GATE_URL`          | Gate URL for remote connections (same as `--gate-url`)    |
+| `GCP_AUTHCALATOR_TLS_BUNDLE`        | Path to TLS client bundle file (same as `--tls-bundle`)   |
+| `GCP_AUTHCALATOR_TLS_BUNDLE_B64`    | Base64-encoded TLS client bundle (preferred for secrets)  |
+| `GCP_AUTHCALATOR_PAM_POLICY`        | PAM entitlement ID or path (same as `--pam-policy`)       |
+| `GCP_AUTHCALATOR_PAM_LOCATION`      | PAM entitlement location (same as `--pam-location`)       |
+| `GCP_AUTHCALATOR_TOKEN_TTL_SECONDS` | Token lifetime in seconds (same as `--token-ttl-seconds`) |
 
 ### TOML config file
 
@@ -144,6 +159,14 @@ port = 8173
 # gate_tls_port = 8174       # Enable TCP+mTLS listener on gate
 # gate_url = "https://localhost:8174"  # Point metadata-proxy at remote gate
 # scopes = ["https://www.googleapis.com/auth/cloud-platform"]
+
+# Token lifetime (optional, default: 3600):
+# token_ttl_seconds = 3600
+
+# PAM integration for just-in-time prod escalation (optional):
+# pam_policy = "prod-db-admin"
+# pam_allowed_policies = ["prod-readonly", "prod-migration"]
+# pam_location = "global"
 ```
 
 Pass the file with `--config`:
@@ -171,9 +194,15 @@ gcp-authcalator gate \
   --gate-tls-port 8174
 ```
 
-**Required options:** `--project-id`, `--service-account`
+**Required options:** `--project-id`, and at least one of `--service-account` or `--pam-policy`:
+
+- `--service-account` alone: dev tokens via impersonation, prod tokens via ADC
+- `--pam-policy` alone: prod tokens only (dev tokens disabled), with just-in-time PAM escalation
+- Both: dev tokens via impersonation, prod tokens with PAM escalation
 
 **Optional:** `--gate-tls-port` enables a TCP listener with mutual TLS, allowing remote devcontainers to connect. TLS certificates must be generated first with `gcp-authcalator init-tls` and are stored in `~/.gcp-authcalator/tls/`.
+
+**PAM (Privileged Access Manager) integration:** When `--pam-policy` is configured, prod token requests trigger a temporary [PAM grant](https://cloud.google.com/iam/docs/pam-overview) before minting the token. This allows the engineer's ADC to be downscoped by default, with just-in-time escalation for production access. The `--pam-allowed-policies` flag defines additional entitlements that callers may request via `?pam_policy=<id>` query parameter. Grants are revoked on a best-effort basis when the gate shuts down.
 
 **API endpoints** (over Unix socket or TCP+mTLS):
 

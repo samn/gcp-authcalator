@@ -10,8 +10,9 @@ project_id = "my-gcp-project"
 service_account = "dev-runner@my-gcp-project.iam.gserviceaccount.com"
 
 # Path to the Unix domain socket shared between host and container
-# Default: /tmp/gcp-authcalator.sock
-# socket_path = "/tmp/gcp-authcalator.sock"
+# Default: $XDG_RUNTIME_DIR/gcp-authcalator.sock
+# (or ~/.gcp-authcalator/gcp-authcalator.sock if XDG_RUNTIME_DIR is unset)
+# socket_path = "/run/user/1000/gcp-authcalator.sock"
 
 # TCP port for the metadata proxy
 # Default: 8173

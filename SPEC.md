@@ -238,7 +238,7 @@ New config options and env vars for remote devcontainer support:
 | `tls_bundle`    | `--tls-bundle`    | `GCP_AUTHCALATOR_TLS_BUNDLE`     | Path to TLS client bundle file           |
 | —               | —                 | `GCP_AUTHCALATOR_TLS_BUNDLE_B64` | Base64-encoded client bundle (preferred) |
 
-Config precedence: CLI args > TOML file > env vars > schema defaults.
+Config precedence: env vars > CLI args > TOML file > schema defaults.
 
 `gate_url` is validated to require `https://` — `http://` URLs are rejected at config parse time, preventing accidental plaintext connections to gate.
 
