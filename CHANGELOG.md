@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [0.5.0] - 2026-03-26
+
 ### Added
 
 - `with-prod`: extra environment variables via `[env]` TOML table or `--env` / `-e` CLI flag, with `${VAR}` / `${VAR:-default}` substitution resolved within the elevated environment. Useful for tools like GDAL that need env vars referencing the metadata proxy address.
