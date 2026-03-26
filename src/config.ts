@@ -68,6 +68,7 @@ export const ConfigSchema = z.object({
   pam_allowed_policies: z.array(z.string().min(1)).optional(),
   pam_location: z.string().min(1).optional(),
   token_ttl_seconds: z.coerce.number().int().min(60).max(43200).optional(),
+  env: z.record(z.string(), z.string()).optional(),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
@@ -194,5 +195,13 @@ export function loadConfig(cliValues: Record<string, unknown>, configPath?: stri
   const envValues = loadEnvVars();
   const fileValues = configPath ? loadTOML(configPath) : {};
   const merged = { ...fileValues, ...cliValues, ...envValues };
+
+  // Deep-merge the env record so CLI --env values add to TOML [env] values
+  const fileEnv = fileValues.env as Record<string, string> | undefined;
+  const cliEnv = cliValues.env as Record<string, string> | undefined;
+  if (fileEnv && cliEnv) {
+    merged.env = { ...fileEnv, ...cliEnv };
+  }
+
   return ConfigSchema.parse(merged);
 }

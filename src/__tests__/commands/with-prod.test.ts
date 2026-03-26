@@ -1,7 +1,7 @@
 import { describe, expect, test, beforeEach, afterEach, spyOn } from "bun:test";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { z } from "zod";
-import { runWithProd } from "../../commands/with-prod.ts";
+import { resolveEnvSubstitutions, runWithProd } from "../../commands/with-prod.ts";
 import { PROD_SESSION_ENV_VAR } from "../../with-prod/detect-nested-session.ts";
 import type { Subprocess } from "bun";
 
@@ -880,5 +880,248 @@ describe("runWithProd nested sessions", () => {
 
     const logOutput = logSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
     expect(logOutput).toContain("reusing existing prod session (proxy at 127.0.0.1:54321)");
+  });
+});
+
+describe("resolveEnvSubstitutions", () => {
+  test("resolves simple ${VAR} substitution", () => {
+    expect(resolveEnvSubstitutions("http://${HOST}/path", { HOST: "example.com" })).toBe(
+      "http://example.com/path",
+    );
+  });
+
+  test("resolves ${VAR:-default} using env value when present", () => {
+    expect(resolveEnvSubstitutions("${HOST:-localhost}", { HOST: "example.com" })).toBe(
+      "example.com",
+    );
+  });
+
+  test("resolves ${VAR:-default} using default when var absent", () => {
+    expect(resolveEnvSubstitutions("${HOST:-localhost}", {})).toBe("localhost");
+  });
+
+  test("resolves ${VAR:-default} using default when var is undefined", () => {
+    expect(resolveEnvSubstitutions("${HOST:-localhost}", { HOST: undefined })).toBe("localhost");
+  });
+
+  test("returns empty string for unknown var without default", () => {
+    expect(resolveEnvSubstitutions("${MISSING}", {})).toBe("");
+  });
+
+  test("handles multiple substitutions in one value", () => {
+    expect(
+      resolveEnvSubstitutions("http://${HOST}:${PORT}/api", { HOST: "example.com", PORT: "8080" }),
+    ).toBe("http://example.com:8080/api");
+  });
+
+  test("passes through literal values without substitution", () => {
+    expect(resolveEnvSubstitutions("plain-value", {})).toBe("plain-value");
+  });
+
+  test("handles default value containing :-", () => {
+    expect(resolveEnvSubstitutions("${VAR:-a:-b}", {})).toBe("a:-b");
+  });
+});
+
+describe("runWithProd extra env vars", () => {
+  let logSpy: ReturnType<typeof spyOn>;
+  let exitSpy: ReturnType<typeof spyOn>;
+  let errorSpy: ReturnType<typeof spyOn>;
+
+  beforeEach(() => {
+    logSpy = spyOn(console, "log").mockImplementation(() => {});
+    errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    exitSpy = spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("process.exit called");
+    });
+  });
+
+  afterEach(() => {
+    logSpy.mockRestore();
+    errorSpy.mockRestore();
+    exitSpy.mockRestore();
+  });
+
+  test("passes extra env vars to subprocess in normal flow", async () => {
+    const mockFetchFn = mockGateFetch();
+    const { mockSpawnFn, getCapturedEnv } = mockSpawnCapture();
+
+    try {
+      await runWithProd(
+        {
+          project_id: "my-proj",
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+          env: { CPL_MACHINE_IS_GCE: "YES", CUSTOM_VAR: "hello" },
+        },
+        ["echo", "test"],
+        {
+          fetchOptions: { fetchFn: mockFetchFn },
+          spawnFn: mockSpawnFn,
+        },
+      );
+    } catch {
+      // process.exit mock throws
+    }
+
+    const env = getCapturedEnv();
+    expect(env.CPL_MACHINE_IS_GCE).toBe("YES");
+    expect(env.CUSTOM_VAR).toBe("hello");
+  });
+
+  test("substitutes ${VAR} in extra env vars against the built env", async () => {
+    const mockFetchFn = mockGateFetch();
+    const { mockSpawnFn, getCapturedEnv } = mockSpawnCapture();
+
+    try {
+      await runWithProd(
+        {
+          project_id: "my-proj",
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+          env: {
+            CPL_GCE_CREDENTIALS_URL:
+              "http://${GCE_METADATA_HOST}/computeMetadata/v1/instance/service-accounts/default/token",
+          },
+        },
+        ["echo", "test"],
+        {
+          fetchOptions: { fetchFn: mockFetchFn },
+          spawnFn: mockSpawnFn,
+        },
+      );
+    } catch {
+      // process.exit mock throws
+    }
+
+    const env = getCapturedEnv();
+    expect(env.CPL_GCE_CREDENTIALS_URL).toMatch(
+      /^http:\/\/127\.0\.0\.1:\d+\/computeMetadata\/v1\/instance\/service-accounts\/default\/token$/,
+    );
+  });
+
+  test("substitutes ${VAR:-default} in extra env vars", async () => {
+    const mockFetchFn = mockGateFetch();
+    const { mockSpawnFn, getCapturedEnv } = mockSpawnCapture();
+
+    try {
+      await runWithProd(
+        {
+          project_id: "my-proj",
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+          env: {
+            CPL_GCE_CREDENTIALS_URL:
+              "http://${GCE_METADATA_HOST:-127.0.0.1:8173}/computeMetadata/v1/instance/service-accounts/default/token",
+          },
+        },
+        ["echo", "test"],
+        {
+          fetchOptions: { fetchFn: mockFetchFn },
+          spawnFn: mockSpawnFn,
+        },
+      );
+    } catch {
+      // process.exit mock throws
+    }
+
+    const env = getCapturedEnv();
+    // GCE_METADATA_HOST is set by with-prod, so the default should NOT be used
+    expect(env.CPL_GCE_CREDENTIALS_URL).toMatch(
+      /^http:\/\/127\.0\.0\.1:\d+\/computeMetadata\/v1\/instance\/service-accounts\/default\/token$/,
+    );
+    expect(env.CPL_GCE_CREDENTIALS_URL).not.toContain("8173");
+  });
+
+  test("extra env vars can reference other extra env vars", async () => {
+    const mockFetchFn = mockGateFetch();
+    const { mockSpawnFn, getCapturedEnv } = mockSpawnCapture();
+
+    try {
+      await runWithProd(
+        {
+          project_id: "my-proj",
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+          env: { BASE_URL: "http://${GCE_METADATA_HOST}", FULL_URL: "${BASE_URL}/token" },
+        },
+        ["echo", "test"],
+        {
+          fetchOptions: { fetchFn: mockFetchFn },
+          spawnFn: mockSpawnFn,
+        },
+      );
+    } catch {
+      // process.exit mock throws
+    }
+
+    const env = getCapturedEnv();
+    expect(env.BASE_URL).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+    expect(env.FULL_URL).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/token$/);
+  });
+
+  test("passes extra env vars in nested session flow", async () => {
+    const originalEnv = { ...process.env };
+    process.env[PROD_SESSION_ENV_VAR] = "127.0.0.1:54321";
+    process.env.GCE_METADATA_HOST = "127.0.0.1:54321";
+
+    const mockFetchFn = mockCombinedFetch({ proxyProjectBody: "parent-project" });
+    const { mockSpawnFn, getCapturedEnv } = mockSpawnCapture();
+
+    try {
+      await runWithProd(
+        {
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+          env: {
+            CPL_MACHINE_IS_GCE: "YES",
+            CPL_GCE_CREDENTIALS_URL:
+              "http://${GCE_METADATA_HOST}/computeMetadata/v1/instance/service-accounts/default/token",
+          },
+        },
+        ["echo", "test"],
+        {
+          fetchOptions: { fetchFn: mockFetchFn },
+          spawnFn: mockSpawnFn,
+        },
+      );
+    } catch {
+      // process.exit mock throws
+    }
+
+    const env = getCapturedEnv();
+    expect(env.CPL_MACHINE_IS_GCE).toBe("YES");
+    expect(env.CPL_GCE_CREDENTIALS_URL).toBe(
+      "http://127.0.0.1:54321/computeMetadata/v1/instance/service-accounts/default/token",
+    );
+
+    process.env = originalEnv;
+  });
+
+  test("does not modify env when no extra env vars configured", async () => {
+    const mockFetchFn = mockGateFetch();
+    const { mockSpawnFn, getCapturedEnv } = mockSpawnCapture();
+
+    try {
+      await runWithProd(
+        {
+          project_id: "my-proj",
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+        },
+        ["echo", "test"],
+        {
+          fetchOptions: { fetchFn: mockFetchFn },
+          spawnFn: mockSpawnFn,
+        },
+      );
+    } catch {
+      // process.exit mock throws
+    }
+
+    const env = getCapturedEnv();
+    // Standard vars should still be set
+    expect(env.GCE_METADATA_HOST).toMatch(/^127\.0\.0\.1:\d+$/);
+    expect(env.CLOUDSDK_CORE_PROJECT).toBe("my-proj");
   });
 });

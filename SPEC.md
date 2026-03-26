@@ -213,6 +213,7 @@ The actual implementation adds several security hardening measures beyond this p
 - **Token file instead of env var** — the access token is written to a `0600` file in a user-private directory, and gcloud is configured via `auth/access_token_file` rather than `CLOUDSDK_AUTH_ACCESS_TOKEN` (which leaks into `/proc/*/environ`)
 - **Environment stripping** — all credential-related env vars (`GOOGLE_APPLICATION_CREDENTIALS`, `CLOUDSDK_AUTH_ACCESS_TOKEN`, `CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE`, etc.) are removed from the child's environment to prevent bypass
 - **Temp directory in user-private runtime dir** — not `/tmp`, preventing other users from observing or racing the temp directory
+- **Extra environment variables** — configurable via `[env]` TOML table or `--env` CLI flag. Values support `${VAR}` and `${VAR:-default}` substitution resolved after the elevated environment is built, allowing tools like GDAL to reference `GCE_METADATA_HOST` without tool-specific code in gcp-authcalator
 
 Usage: `with-prod -- python some/script.py`, `with-prod -- gcloud sql instances list`, `with-prod -- alembic upgrade head`
 

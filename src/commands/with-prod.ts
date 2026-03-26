@@ -26,6 +26,35 @@ export interface WithProdOptions {
   spawnFn?: SpawnFn;
 }
 
+/** Resolve ${VAR} and ${VAR:-default} patterns against an env record. */
+export function resolveEnvSubstitutions(
+  value: string,
+  env: Record<string, string | undefined>,
+): string {
+  return value.replace(/\$\{([^}]+)\}/g, (_, expr: string) => {
+    const dashIdx = expr.indexOf(":-");
+    if (dashIdx === -1) {
+      return env[expr] ?? "";
+    }
+    const varName = expr.slice(0, dashIdx);
+    const defaultValue = expr.slice(dashIdx + 2);
+    return env[varName] ?? defaultValue;
+  });
+}
+
+/** Apply extra env vars with substitution resolved against the base env. */
+function applyExtraEnvVars(
+  baseEnv: Record<string, string | undefined>,
+  extraEnv: Record<string, string> | undefined,
+): Record<string, string | undefined> {
+  if (!extraEnv) return baseEnv;
+  const result = { ...baseEnv };
+  for (const [key, value] of Object.entries(extraEnv)) {
+    result[key] = resolveEnvSubstitutions(value, result);
+  }
+  return result;
+}
+
 /** Strip credential env vars that could bypass the metadata proxy. */
 function stripCredentialEnvVars(
   env: Record<string, string | undefined>,
@@ -120,7 +149,7 @@ export async function runWithProd(
         env.CLOUDSDK_CONFIG = process.env.CLOUDSDK_CONFIG;
       }
 
-      await spawnAndWait(wrappedCommand, env, spawnFn);
+      await spawnAndWait(wrappedCommand, applyExtraEnvVars(env, config.env), spawnFn);
     }
   }
 
@@ -194,21 +223,24 @@ export async function runWithProd(
     );
 
     // Step 4: Spawn wrapped command with metadata env vars
-    const env = {
-      ...stripCredentialEnvVars(process.env),
-      GCE_METADATA_HOST: metadataHost,
-      GCE_METADATA_IP: metadataHost,
-      GCE_METADATA_ROOT: metadataHost,
-      CLOUDSDK_CONFIG: gcloudConfigDir,
-      // Explicitly set gcloud-specific env vars so `gcloud auth list` and
-      // other gcloud commands show the correct active account and project.
-      // gcloud's internal account-enumeration code may not honor
-      // GCE_METADATA_HOST, falling back to the original metadata proxy.
-      // Tokens still flow through the PID-validated metadata proxy.
-      CLOUDSDK_CORE_ACCOUNT: tokenResult.email,
-      CLOUDSDK_CORE_PROJECT: wpConfig.project_id,
-      [PROD_SESSION_ENV_VAR]: metadataHost,
-    };
+    const env = applyExtraEnvVars(
+      {
+        ...stripCredentialEnvVars(process.env),
+        GCE_METADATA_HOST: metadataHost,
+        GCE_METADATA_IP: metadataHost,
+        GCE_METADATA_ROOT: metadataHost,
+        CLOUDSDK_CONFIG: gcloudConfigDir,
+        // Explicitly set gcloud-specific env vars so `gcloud auth list` and
+        // other gcloud commands show the correct active account and project.
+        // gcloud's internal account-enumeration code may not honor
+        // GCE_METADATA_HOST, falling back to the original metadata proxy.
+        // Tokens still flow through the PID-validated metadata proxy.
+        CLOUDSDK_CORE_ACCOUNT: tokenResult.email,
+        CLOUDSDK_CORE_PROJECT: wpConfig.project_id,
+        [PROD_SESSION_ENV_VAR]: metadataHost,
+      },
+      wpConfig.env,
+    );
 
     const child = spawnFn(wrappedCommand, {
       env,

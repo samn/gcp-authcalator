@@ -66,6 +66,7 @@ Options:
   --pam-allowed-policies <ids>  Additional allowed PAM entitlements (comma-separated)
   --pam-location <loc>     PAM entitlement location (default: global)
   --token-ttl-seconds <secs>  Token lifetime in seconds (default: 3600)
+  -e, --env <KEY=VALUE>    Extra env var for with-prod subprocess (repeatable, supports \${VAR} substitution)
   -c, --config <path>      Path to TOML config file
   -h, --help               Show this help message
   -v, --version            Show version
@@ -112,6 +113,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       "pam-allowed-policies": { type: "string" },
       "pam-location": { type: "string" },
       "token-ttl-seconds": { type: "string" },
+      env: { type: "string", short: "e", multiple: true },
       config: { type: "string", short: "c" },
       help: { type: "boolean", short: "h" },
       version: { type: "boolean", short: "v" },
@@ -167,7 +169,22 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     return;
   }
 
-  const cliValues = mapCliArgs(values);
+  const { env: envPairs, ...scalarValues } = values;
+  const cliValues = mapCliArgs(scalarValues);
+
+  // Parse --env KEY=VALUE pairs into a record
+  if (envPairs) {
+    const envRecord: Record<string, string> = {};
+    for (const pair of envPairs) {
+      const eqIndex = pair.indexOf("=");
+      if (eqIndex <= 0) {
+        console.error(`error: --env value must be KEY=VALUE, got: ${pair}`);
+        process.exit(1);
+      }
+      envRecord[pair.slice(0, eqIndex)] = pair.slice(eqIndex + 1);
+    }
+    cliValues.env = envRecord;
+  }
 
   let config;
   try {
