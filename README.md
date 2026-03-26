@@ -147,6 +147,7 @@ Precedence: environment variables > CLI flags > TOML file > defaults.
 --pam-allowed-policies <ids>  Additional PAM entitlements callers may request (comma-separated)
 --pam-location <loc>       PAM entitlement location (default: global)
 --token-ttl-seconds <secs> Token lifetime in seconds (60–43200, default: 3600)
+-e, --env <KEY=VALUE>      Extra env var for with-prod subprocess (repeatable, supports ${VAR} substitution)
 -c, --config <path>        Path to TOML config file
 ```
 
@@ -190,6 +191,13 @@ port = 8173
 # pam_policy = "prod-db-admin"
 # pam_allowed_policies = ["prod-readonly", "prod-migration"]
 # pam_location = "global"
+
+# Extra environment variables for with-prod subprocess (optional).
+# Values support ${VAR} and ${VAR:-default} substitution resolved within
+# the elevated environment (after GCE_METADATA_HOST etc. are set).
+# [env]
+# CPL_MACHINE_IS_GCE = "YES"
+# CPL_GCE_CREDENTIALS_URL = "http://${GCE_METADATA_HOST}/computeMetadata/v1/instance/service-accounts/default/token"
 ```
 
 Pass the file with `--config`:
@@ -293,6 +301,12 @@ gcp-authcalator with-prod -- python some/script.py
 gcp-authcalator with-prod -- gcloud sql instances list
 gcp-authcalator with-prod -- alembic upgrade head
 gcp-authcalator with-prod --scopes="https://www.googleapis.com/auth/sqlservice.login" -- cloud-sql-proxy my-project:us-central1:my-instance
+
+# Pass extra env vars (e.g. for GDAL/OGR):
+gcp-authcalator with-prod \
+  --env CPL_MACHINE_IS_GCE=YES \
+  --env 'CPL_GCE_CREDENTIALS_URL=http://${GCE_METADATA_HOST}/computeMetadata/v1/instance/service-accounts/default/token' \
+  -- ogr2ogr ...
 ```
 
 **Required options:** `--project-id`
@@ -304,7 +318,8 @@ This command:
 3. Creates an isolated `CLOUDSDK_CONFIG` directory so `gcloud` doesn't reuse cached credentials
 4. Strips credential-related environment variables (`GOOGLE_APPLICATION_CREDENTIALS`, `CLOUDSDK_AUTH_ACCESS_TOKEN`, etc.) to force the child through the proxy
 5. Spawns the wrapped command with `GCE_METADATA_HOST`, `GCE_METADATA_IP`, and `GCE_METADATA_ROOT` pointing at the temporary proxy
-6. Forwards signals to the child process and propagates its exit code
+6. Applies any extra environment variables from `[env]` config or `--env` CLI flags, with `${VAR}` / `${VAR:-default}` substitution resolved against the elevated environment
+7. Forwards signals to the child process and propagates its exit code
 
 The temporary proxy uses PID-based process restriction — only the wrapped command and its descendants can request tokens from it.
 

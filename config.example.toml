@@ -33,3 +33,10 @@ service_account = "dev-runner@my-gcp-project.iam.gserviceaccount.com"
 
 # PAM entitlement location (default: global)
 # pam_location = "global"
+
+# Extra environment variables for with-prod subprocess.
+# Values support ${VAR} and ${VAR:-default} substitution resolved against the
+# elevated environment (after GCE_METADATA_HOST etc. are set).
+# [env]
+# CPL_MACHINE_IS_GCE = "YES"
+# CPL_GCE_CREDENTIALS_URL = "http://${GCE_METADATA_HOST:-127.0.0.1:8173}/computeMetadata/v1/instance/service-accounts/default/token"
