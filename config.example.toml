@@ -34,6 +34,14 @@ service_account = "dev-runner@my-gcp-project.iam.gserviceaccount.com"
 # PAM entitlement location (default: global)
 # pam_location = "global"
 
+# Token lifetime in seconds (default: 3600 / 1 hour)
+# Keep this low to limit exfiltration risk. Tokens auto-refresh within sessions.
+# token_ttl_seconds = 3600
+
+# Prod session lifetime in seconds (default: 28800 / 8 hours)
+# Controls how long with-prod can refresh tokens without re-confirmation.
+# session_ttl_seconds = 28800
+
 # Extra environment variables for with-prod subprocess.
 # Values support ${VAR} and ${VAR:-default} substitution resolved against the
 # elevated environment (after GCE_METADATA_HOST etc. are set).

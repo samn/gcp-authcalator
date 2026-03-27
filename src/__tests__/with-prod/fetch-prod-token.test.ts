@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { fetchProdToken } from "../../with-prod/fetch-prod-token.ts";
+import {
+  fetchProdToken,
+  createProdSession,
+  revokeProdSession,
+} from "../../with-prod/fetch-prod-token.ts";
 
 /**
  * Creates a URL-aware mock fetch that returns different responses for
@@ -329,5 +333,150 @@ describe("fetchProdToken — TCP mode", () => {
     await expect(fetchProdToken(tcpConn, { fetchFn })).rejects.toThrow(
       "gcp-gate returned 403: denied",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createProdSession
+// ---------------------------------------------------------------------------
+
+describe("createProdSession", () => {
+  const unixConn = { mode: "unix" as const, socketPath: "/tmp/gate.sock" };
+
+  function mockSessionFetch(
+    body: Record<string, unknown> = {
+      session_id: "abc123",
+      access_token: "prod-tok",
+      expires_in: 1800,
+      email: "eng@example.com",
+    },
+    status = 200,
+  ): { fetchFn: typeof globalThis.fetch; capturedUrls: string[]; capturedMethods: string[] } {
+    const capturedUrls: string[] = [];
+    const capturedMethods: string[] = [];
+    const fn = (async (url: string, init?: RequestInit) => {
+      capturedUrls.push(url);
+      capturedMethods.push(init?.method ?? "GET");
+      return new Response(JSON.stringify(body), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof globalThis.fetch;
+    return { fetchFn: fn, capturedUrls, capturedMethods };
+  }
+
+  test("sends POST to /session", async () => {
+    const { fetchFn, capturedUrls, capturedMethods } = mockSessionFetch();
+    await createProdSession(unixConn, { fetchFn });
+
+    expect(capturedUrls[0]).toContain("/session");
+    expect(capturedMethods[0]).toBe("POST");
+  });
+
+  test("returns session_id, access_token, expires_in, email", async () => {
+    const { fetchFn } = mockSessionFetch();
+    const result = await createProdSession(unixConn, { fetchFn });
+
+    expect(result.session_id).toBe("abc123");
+    expect(result.access_token).toBe("prod-tok");
+    expect(result.expires_in).toBe(1800);
+    expect(result.email).toBe("eng@example.com");
+  });
+
+  test("includes scopes, pam_policy, token_ttl_seconds, session_ttl_seconds in URL", async () => {
+    const { fetchFn, capturedUrls } = mockSessionFetch();
+    await createProdSession(unixConn, {
+      fetchFn,
+      scopes: ["scope1"],
+      pamPolicy: "my-policy",
+      tokenTtlSeconds: 900,
+      sessionTtlSeconds: 7200,
+    });
+
+    expect(capturedUrls[0]).toContain("scopes=scope1");
+    expect(capturedUrls[0]).toContain("pam_policy=my-policy");
+    expect(capturedUrls[0]).toContain("token_ttl_seconds=900");
+    expect(capturedUrls[0]).toContain("session_ttl_seconds=7200");
+  });
+
+  test("sends X-Wrapped-Command header", async () => {
+    let capturedHeaders: Headers | undefined;
+    const fetchFn = (async (_url: string, init?: RequestInit) => {
+      capturedHeaders = new Headers(init?.headers);
+      return new Response(
+        JSON.stringify({
+          session_id: "s",
+          access_token: "t",
+          expires_in: 3600,
+          email: "e@e.com",
+        }),
+        { status: 200 },
+      );
+    }) as unknown as typeof globalThis.fetch;
+
+    await createProdSession(unixConn, { fetchFn, command: ["gcloud", "sql", "connect"] });
+    expect(capturedHeaders!.get("X-Wrapped-Command")).toBe(
+      JSON.stringify(["gcloud", "sql", "connect"]),
+    );
+  });
+
+  test("throws on non-OK response", async () => {
+    const { fetchFn } = mockSessionFetch({ error: "denied" }, 403);
+    await expect(createProdSession(unixConn, { fetchFn })).rejects.toThrow("gcp-gate returned 403");
+  });
+
+  test("throws when session_id is missing", async () => {
+    const { fetchFn } = mockSessionFetch({ access_token: "t", email: "e@e.com" });
+    await expect(createProdSession(unixConn, { fetchFn })).rejects.toThrow("no session_id");
+  });
+
+  test("throws when access_token is missing", async () => {
+    const { fetchFn } = mockSessionFetch({ session_id: "s", email: "e@e.com" });
+    await expect(createProdSession(unixConn, { fetchFn })).rejects.toThrow("no access_token");
+  });
+
+  test("throws when email is missing", async () => {
+    const { fetchFn } = mockSessionFetch({ session_id: "s", access_token: "t" });
+    await expect(createProdSession(unixConn, { fetchFn })).rejects.toThrow("no email");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// revokeProdSession
+// ---------------------------------------------------------------------------
+
+describe("revokeProdSession", () => {
+  const unixConn = { mode: "unix" as const, socketPath: "/tmp/gate.sock" };
+
+  test("sends DELETE to /session?id=<sessionId>", async () => {
+    let capturedUrl = "";
+    let capturedMethod = "";
+    const fetchFn = (async (url: string, init?: RequestInit) => {
+      capturedUrl = url;
+      capturedMethod = init?.method ?? "GET";
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof globalThis.fetch;
+
+    await revokeProdSession(unixConn, "my-session-id", { fetchFn });
+
+    expect(capturedUrl).toContain("/session?id=my-session-id");
+    expect(capturedMethod).toBe("DELETE");
+  });
+
+  test("does not throw on network error (best-effort)", async () => {
+    const fetchFn = (async () => {
+      throw new Error("Connection refused");
+    }) as unknown as typeof globalThis.fetch;
+
+    // Should not throw
+    await revokeProdSession(unixConn, "my-session-id", { fetchFn });
+  });
+
+  test("does not throw on non-OK response (best-effort)", async () => {
+    const fetchFn = (async () => {
+      return new Response("not found", { status: 404 });
+    }) as unknown as typeof globalThis.fetch;
+
+    await revokeProdSession(unixConn, "my-session-id", { fetchFn });
   });
 });

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- `with-prod`: auto-refresh of prod credentials via gate sessions. Long-running processes no longer lose access when tokens expire. Individual tokens remain short-lived for security; the session allows transparent re-minting without re-confirmation.
+- `gate`: new `POST /session` and `DELETE /session` endpoints for prod session lifecycle, and `GET /token?session=<id>` for session-based token refresh.
+- New `--session-ttl-seconds` config option (default: 28800 / 8 hours) to control how long a prod session allows token refreshes before requiring re-confirmation.
+
 ## [0.5.0] - 2026-03-26
 
 ### Added

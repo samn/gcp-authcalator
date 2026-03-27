@@ -236,7 +236,7 @@ describe("init-tls subcommand", () => {
 });
 
 describe("with-prod subcommand", () => {
-  test("exits 1 when token fetch fails (no gate socket)", async () => {
+  test("exits 1 when session creation fails (no gate socket)", async () => {
     const { stderr, exitCode } = await runCLI([
       "with-prod",
       "--project-id",
@@ -245,7 +245,7 @@ describe("with-prod subcommand", () => {
       "hello",
     ]);
     expect(exitCode).toBe(1);
-    expect(stderr).toContain("failed to acquire prod token");
+    expect(stderr).toContain("failed to create prod session");
   });
 
   test("exits 1 when no wrapped command provided", async () => {

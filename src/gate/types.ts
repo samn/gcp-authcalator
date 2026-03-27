@@ -4,6 +4,7 @@
 
 import type { ProdRateLimiter } from "./rate-limit.ts";
 import type { PamGrantResult } from "./pam.ts";
+import type { SessionManager } from "./session.ts";
 
 /** A cached GCP access token with its expiry time. */
 export interface CachedToken {
@@ -44,18 +45,28 @@ export interface ErrorResponse {
   error: string;
 }
 
+/** JSON response for session creation. */
+export interface SessionResponse {
+  session_id: string;
+  access_token: string;
+  expires_in: number;
+  token_type: "Bearer";
+  email: string;
+}
+
 /** Audit log entry written as a JSON line. */
 export interface AuditEntry {
   timestamp: string;
   endpoint: string;
   level: "dev" | "prod";
-  result: "granted" | "denied" | "error" | "rate_limited";
+  result: "granted" | "denied" | "error" | "rate_limited" | "revoked";
   email?: string;
   error?: string;
   pam_policy?: string;
   pam_grant?: string;
   pam_cached?: boolean;
   token_ttl_seconds?: number;
+  session_id?: string;
 }
 
 /**
@@ -82,4 +93,8 @@ export interface GateDeps {
   resolvePamPolicy?: (policy: string) => string;
   /** Default token TTL in seconds from config. Used to validate TTL overrides. */
   defaultTokenTtlSeconds: number;
+  /** Session manager for prod session lifecycle. */
+  sessionManager: SessionManager;
+  /** Default session TTL in seconds from config. */
+  sessionTtlSeconds: number;
 }
