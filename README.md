@@ -147,6 +147,7 @@ Precedence: environment variables > CLI flags > TOML file > defaults.
 --pam-allowed-policies <ids>  Additional PAM entitlements callers may request (comma-separated)
 --pam-location <loc>       PAM entitlement location (default: global)
 --token-ttl-seconds <secs> Token lifetime in seconds (60–43200, default: 3600)
+--session-ttl-seconds <secs> Prod session lifetime in seconds (300–86400, default: 28800 / 8h)
 -e, --env <KEY=VALUE>      Extra env var for with-prod subprocess (repeatable, supports ${VAR} substitution)
 -c, --config <path>        Path to TOML config file
 ```
@@ -155,20 +156,21 @@ Precedence: environment variables > CLI flags > TOML file > defaults.
 
 All config options can be set via `GCP_AUTHCALATOR_*` environment variables (uppercased key name with `GCP_AUTHCALATOR_` prefix):
 
-| Variable                            | Description                                               |
-| ----------------------------------- | --------------------------------------------------------- |
-| `GCP_AUTHCALATOR_PROJECT_ID`        | GCP project ID (same as `--project-id`)                   |
-| `GCP_AUTHCALATOR_SERVICE_ACCOUNT`   | Service account email (same as `--service-account`)       |
-| `GCP_AUTHCALATOR_SOCKET_PATH`       | Unix socket path (same as `--socket-path`)                |
-| `GCP_AUTHCALATOR_PORT`              | Metadata proxy port (same as `--port`)                    |
-| `GCP_AUTHCALATOR_GATE_TLS_PORT`     | Gate TCP+mTLS listener port (same as `--gate-tls-port`)   |
-| `GCP_AUTHCALATOR_TLS_DIR`           | TLS certificate directory (same as `--tls-dir`)           |
-| `GCP_AUTHCALATOR_GATE_URL`          | Gate URL for remote connections (same as `--gate-url`)    |
-| `GCP_AUTHCALATOR_TLS_BUNDLE`        | Path to TLS client bundle file (same as `--tls-bundle`)   |
-| `GCP_AUTHCALATOR_TLS_BUNDLE_B64`    | Base64-encoded TLS client bundle (preferred for secrets)  |
-| `GCP_AUTHCALATOR_PAM_POLICY`        | PAM entitlement ID or path (same as `--pam-policy`)       |
-| `GCP_AUTHCALATOR_PAM_LOCATION`      | PAM entitlement location (same as `--pam-location`)       |
-| `GCP_AUTHCALATOR_TOKEN_TTL_SECONDS` | Token lifetime in seconds (same as `--token-ttl-seconds`) |
+| Variable                              | Description                                                        |
+| ------------------------------------- | ------------------------------------------------------------------ |
+| `GCP_AUTHCALATOR_PROJECT_ID`          | GCP project ID (same as `--project-id`)                            |
+| `GCP_AUTHCALATOR_SERVICE_ACCOUNT`     | Service account email (same as `--service-account`)                |
+| `GCP_AUTHCALATOR_SOCKET_PATH`         | Unix socket path (same as `--socket-path`)                         |
+| `GCP_AUTHCALATOR_PORT`                | Metadata proxy port (same as `--port`)                             |
+| `GCP_AUTHCALATOR_GATE_TLS_PORT`       | Gate TCP+mTLS listener port (same as `--gate-tls-port`)            |
+| `GCP_AUTHCALATOR_TLS_DIR`             | TLS certificate directory (same as `--tls-dir`)                    |
+| `GCP_AUTHCALATOR_GATE_URL`            | Gate URL for remote connections (same as `--gate-url`)             |
+| `GCP_AUTHCALATOR_TLS_BUNDLE`          | Path to TLS client bundle file (same as `--tls-bundle`)            |
+| `GCP_AUTHCALATOR_TLS_BUNDLE_B64`      | Base64-encoded TLS client bundle (preferred for secrets)           |
+| `GCP_AUTHCALATOR_PAM_POLICY`          | PAM entitlement ID or path (same as `--pam-policy`)                |
+| `GCP_AUTHCALATOR_PAM_LOCATION`        | PAM entitlement location (same as `--pam-location`)                |
+| `GCP_AUTHCALATOR_TOKEN_TTL_SECONDS`   | Token lifetime in seconds (same as `--token-ttl-seconds`)          |
+| `GCP_AUTHCALATOR_SESSION_TTL_SECONDS` | Prod session lifetime in seconds (same as `--session-ttl-seconds`) |
 
 ### TOML config file
 
@@ -186,6 +188,10 @@ port = 8173
 
 # Token lifetime (optional, default: 3600):
 # token_ttl_seconds = 3600
+
+# Prod session lifetime — how long with-prod can refresh tokens without
+# re-confirmation (optional, default: 28800 / 8 hours):
+# session_ttl_seconds = 28800
 
 # PAM integration for just-in-time prod escalation (optional):
 # pam_policy = "prod-db-admin"
@@ -237,14 +243,17 @@ gcp-authcalator gate \
 
 **API endpoints** (over Unix socket or TCP+mTLS):
 
-| Endpoint                | Behavior                                                         |
-| ----------------------- | ---------------------------------------------------------------- |
-| `GET /token`            | Returns a dev-scoped access token (impersonated service account) |
-| `GET /token?level=prod` | Prompts for confirmation, then returns the engineer's own token  |
-| `GET /identity`         | Returns the authenticated user's email                           |
-| `GET /project-number`   | Returns the numeric GCP project ID                               |
-| `GET /universe-domain`  | Returns the GCP universe domain                                  |
-| `GET /health`           | Returns `{ "status": "ok", "uptime_seconds": N }`                |
+| Endpoint                  | Behavior                                                               |
+| ------------------------- | ---------------------------------------------------------------------- |
+| `GET /token`              | Returns a dev-scoped access token (impersonated service account)       |
+| `GET /token?level=prod`   | Prompts for confirmation, then returns the engineer's own token        |
+| `GET /token?session=<id>` | Refreshes a token within a pre-approved prod session                   |
+| `POST /session`           | Creates a prod session (with confirmation), returns session ID + token |
+| `DELETE /session?id=<id>` | Revokes a prod session                                                 |
+| `GET /identity`           | Returns the authenticated user's email                                 |
+| `GET /project-number`     | Returns the numeric GCP project ID                                     |
+| `GET /universe-domain`    | Returns the GCP universe domain                                        |
+| `GET /health`             | Returns `{ "status": "ok", "uptime_seconds": N }`                      |
 
 Both `/token` and `/token?level=prod` accept an optional `scopes` query parameter (comma-separated) to request tokens with specific OAuth scopes. For example: `/token?scopes=https://www.googleapis.com/auth/sqlservice.login`. When omitted, tokens are minted with the default `cloud-platform` scope.
 
@@ -313,15 +322,16 @@ gcp-authcalator with-prod \
 
 This command:
 
-1. Requests a prod token from `gate` (triggers a host-side confirmation dialog)
-2. Starts a temporary metadata proxy on a random port serving that token
-3. Creates an isolated `CLOUDSDK_CONFIG` directory so `gcloud` doesn't reuse cached credentials
+1. Creates a **prod session** at `gate` (triggers a host-side confirmation dialog). The session allows transparent token refresh without re-confirmation for a bounded lifetime (default 8 hours, configurable via `--session-ttl-seconds`).
+2. Starts a temporary metadata proxy on a random port that **auto-refreshes tokens** from the gate when they near expiry (within 5 minutes of the token TTL). This means long-running processes never lose access — individual tokens remain short-lived while the session stays active.
+3. Creates an isolated `CLOUDSDK_CONFIG` directory so `gcloud` doesn't reuse cached credentials. The access token file is atomically updated on each refresh.
 4. Strips credential-related environment variables (`GOOGLE_APPLICATION_CREDENTIALS`, `CLOUDSDK_AUTH_ACCESS_TOKEN`, etc.) to force the child through the proxy
 5. Spawns the wrapped command with `GCE_METADATA_HOST`, `GCE_METADATA_IP`, and `GCE_METADATA_ROOT` pointing at the temporary proxy
 6. Applies any extra environment variables from `[env]` config or `--env` CLI flags, with `${VAR}` / `${VAR:-default}` substitution resolved against the elevated environment
 7. Forwards signals to the child process and propagates its exit code
+8. Revokes the session on exit (best-effort cleanup)
 
-The temporary proxy uses PID-based process restriction — only the wrapped command and its descendants can request tokens from it.
+The temporary proxy uses PID-based process restriction — only the wrapped command and its descendants can request tokens from it. The session ID (which authorizes token refresh) stays in the `with-prod` process and never reaches the subprocess — an attacker inside the subprocess cannot refresh tokens independently.
 
 ### `init-tls` — TLS certificate management
 
@@ -525,7 +535,7 @@ gcp-authcalator metadata-proxy --project-id my-project
 When port forwarding drops (SSH disconnect, Codespace timeout):
 
 - **Dev tokens**: metadata-proxy continues serving cached tokens for up to 55 minutes. New token requests fail with a clear connection error.
-- **Prod tokens**: `with-prod` requests fail immediately with a descriptive error.
+- **Prod tokens**: `with-prod` continues serving the cached token until it expires. Token refresh attempts fail with a descriptive error; access resumes automatically when the connection is restored (if the session hasn't expired).
 - **Reconnection**: Automatic when port forwarding resumes — no restart of metadata-proxy required.
 
 ## Security model
@@ -553,7 +563,7 @@ gcp-authcalator is designed for environments where a coding agent (or other untr
 **Limitations:**
 
 - A malicious process running as the **same user** with sufficient sophistication (e.g., `ptrace`, reading `/proc/*/mem`) can potentially extract tokens from a running process. Full same-user isolation requires OS-level sandboxing beyond what gcp-authcalator provides.
-- Once the engineer approves a prod token request, the elevated token is available to the approved process tree for its lifetime (~1 hour). gcp-authcalator cannot revoke it early.
+- Once the engineer approves a prod session, elevated tokens are available to the approved process tree for the session lifetime (default 8 hours). Individual tokens are short-lived (default 1 hour) and auto-refresh, but access persists until the session expires or `with-prod` exits. A compromised process within the subprocess tree can continue receiving fresh tokens via the metadata proxy for the session's duration.
 - **Stolen client bundle** (remote mode): An attacker with the client cert can authenticate to gate over a forwarded port. Mitigation: client bundle has 90-day expiry; bundle files are `0600`; gate only listens on localhost; prod tokens still require confirmation dialog.
 - **Bundle in env var**: `GCP_AUTHCALATOR_TLS_BUNDLE_B64` is cleared from `process.env` immediately after reading to prevent inheritance by child processes. The bundle only authorizes gate communication, not GCP access directly.
 
