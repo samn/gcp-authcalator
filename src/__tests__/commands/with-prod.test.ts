@@ -6,26 +6,40 @@ import { PROD_SESSION_ENV_VAR } from "../../with-prod/detect-nested-session.ts";
 import type { Subprocess } from "bun";
 
 /**
- * URL-aware mock that returns different responses for /token and /identity
- * endpoints, mirroring the real gcp-gate API.
+ * URL-aware mock that returns different responses for gate endpoints,
+ * mirroring the real gcp-gate API. Handles POST /session (create),
+ * DELETE /session (revoke), and GET /token?session=... (refresh).
  */
 function mockGateFetch(
-  tokenBody: Record<string, unknown> = { access_token: "prod-token-abc", expires_in: 1800 },
-  identityBody: Record<string, unknown> = { email: "eng@example.com" },
+  sessionBody: Record<string, unknown> = {
+    session_id: "test-session-id",
+    access_token: "prod-token-abc",
+    expires_in: 1800,
+    token_type: "Bearer",
+    email: "eng@example.com",
+  },
+  overrides?: { sessionStatus?: number },
 ): typeof globalThis.fetch {
-  return (async (url: string) => {
+  return (async (url: string, init?: RequestInit) => {
     const parsed = new URL(url);
-    if (parsed.pathname === "/token") {
-      return new Response(JSON.stringify(tokenBody), {
+    const method = init?.method ?? "GET";
+    if (parsed.pathname === "/session" && method === "POST") {
+      return new Response(JSON.stringify(sessionBody), {
+        status: overrides?.sessionStatus ?? 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (parsed.pathname === "/session" && method === "DELETE") {
+      return new Response(JSON.stringify({ status: "revoked" }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       });
     }
-    if (parsed.pathname === "/identity") {
-      return new Response(JSON.stringify(identityBody), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      });
+    if (parsed.pathname === "/token" && parsed.searchParams.has("session")) {
+      return new Response(
+        JSON.stringify({ access_token: "refreshed-token", expires_in: 1800, token_type: "Bearer" }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
     }
     return new Response("Not found", { status: 404 });
   }) as unknown as typeof globalThis.fetch;
@@ -33,7 +47,7 @@ function mockGateFetch(
 
 /**
  * Mock fetch that responds to both proxy health-check URLs (for nested
- * detection) and gate URLs (for normal token fetch). The proxy URLs are
+ * detection) and gate URLs (for session-based flow). The proxy URLs are
  * distinguished by having a port in the host (e.g., 127.0.0.1:54321).
  */
 function mockCombinedFetch(opts?: {
@@ -47,13 +61,12 @@ function mockCombinedFetch(opts?: {
   proxyProjectStatus?: number;
   proxyProjectBody?: string;
   /** Gate responses (for fallback to normal flow) */
-  gateTokenBody?: Record<string, unknown>;
-  gateTokenStatus?: number;
-  gateIdentityBody?: Record<string, unknown>;
-  gateIdentityStatus?: number;
+  gateSessionBody?: Record<string, unknown>;
+  gateSessionStatus?: number;
 }): typeof globalThis.fetch {
-  return (async (url: string) => {
+  return (async (url: string, init?: RequestInit) => {
     const parsed = new URL(url);
+    const method = init?.method ?? "GET";
     const isProxyRequest = parsed.host !== "localhost";
 
     if (isProxyRequest) {
@@ -93,21 +106,35 @@ function mockCombinedFetch(opts?: {
       return new Response("Not found", { status: 404 });
     }
 
-    // Gate endpoints (normal flow)
-    if (parsed.pathname === "/token") {
+    // Gate endpoints (session-based flow)
+    if (parsed.pathname === "/session" && method === "POST") {
       return new Response(
-        JSON.stringify(opts?.gateTokenBody ?? { access_token: "prod-token-abc", expires_in: 1800 }),
+        JSON.stringify(
+          opts?.gateSessionBody ?? {
+            session_id: "test-session-id",
+            access_token: "prod-token-abc",
+            expires_in: 1800,
+            token_type: "Bearer",
+            email: "eng@example.com",
+          },
+        ),
         {
-          status: opts?.gateTokenStatus ?? 200,
+          status: opts?.gateSessionStatus ?? 200,
           headers: { "Content-Type": "application/json" },
         },
       );
     }
-    if (parsed.pathname === "/identity") {
-      return new Response(JSON.stringify(opts?.gateIdentityBody ?? { email: "eng@example.com" }), {
-        status: opts?.gateIdentityStatus ?? 200,
+    if (parsed.pathname === "/session" && method === "DELETE") {
+      return new Response(JSON.stringify({ status: "revoked" }), {
+        status: 200,
         headers: { "Content-Type": "application/json" },
       });
+    }
+    if (parsed.pathname === "/token" && parsed.searchParams.has("session")) {
+      return new Response(
+        JSON.stringify({ access_token: "refreshed-token", expires_in: 1800, token_type: "Bearer" }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
     }
     return new Response("Not found", { status: 404 });
   }) as unknown as typeof globalThis.fetch;
@@ -229,8 +256,8 @@ describe("runWithProd", () => {
 
     // Verify log messages include the engineer's email
     const logOutput = logSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
-    expect(logOutput).toContain("requesting prod-level token");
-    expect(logOutput).toContain("prod token acquired for eng@example.com");
+    expect(logOutput).toContain("requesting prod session");
+    expect(logOutput).toContain("prod session created for eng@example.com");
   });
 
   test("sets gcloudConfigDir permissions to 0o700 (owner-only)", async () => {
@@ -462,11 +489,11 @@ describe("runWithProd", () => {
 
     expect(exitSpy).toHaveBeenCalledWith(1);
     const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
-    expect(errorOutput).toContain("failed to acquire prod token");
+    expect(errorOutput).toContain("failed to create prod session");
   });
 
   test("propagates non-zero exit code from child process", async () => {
-    const mockFetchFn = mockGateFetch({ access_token: "tok", expires_in: 3600 });
+    const mockFetchFn = mockGateFetch();
 
     const mockSpawnFn = (_cmd: string[]) => {
       return {
@@ -493,22 +520,26 @@ describe("runWithProd", () => {
     expect(exitSpy).toHaveBeenCalledWith(42);
   });
 
-  test("passes scopes from config to fetchProdToken URL", async () => {
-    let capturedTokenUrl = "";
-    const mockFetchFn = (async (url: string) => {
+  test("passes scopes from config to session creation URL", async () => {
+    let capturedSessionUrl = "";
+    const mockFetchFn = (async (url: string, init?: RequestInit) => {
       const parsed = new URL(url);
-      if (parsed.pathname === "/token") {
-        capturedTokenUrl = url;
-        return new Response(JSON.stringify({ access_token: "tok", expires_in: 1800 }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
+      const method = init?.method ?? "GET";
+      if (parsed.pathname === "/session" && method === "POST") {
+        capturedSessionUrl = url;
+        return new Response(
+          JSON.stringify({
+            session_id: "s1",
+            access_token: "tok",
+            expires_in: 1800,
+            token_type: "Bearer",
+            email: "eng@example.com",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
       }
-      if (parsed.pathname === "/identity") {
-        return new Response(JSON.stringify({ email: "eng@example.com" }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
+      if (parsed.pathname === "/session" && method === "DELETE") {
+        return new Response(JSON.stringify({ status: "revoked" }), { status: 200 });
       }
       return new Response("Not found", { status: 404 });
     }) as unknown as typeof globalThis.fetch;
@@ -538,7 +569,7 @@ describe("runWithProd", () => {
       // process.exit mock throws
     }
 
-    expect(capturedTokenUrl).toContain(
+    expect(capturedSessionUrl).toContain(
       `scopes=${encodeURIComponent("https://www.googleapis.com/auth/sqlservice.login")}`,
     );
   });
@@ -606,7 +637,7 @@ describe("runWithProd nested sessions", () => {
     // Gate returns 403 — if nested detection works, gate should never be called
     const mockFetchFn = mockCombinedFetch({
       proxyProjectBody: "parent-project",
-      gateTokenStatus: 403,
+      gateSessionStatus: 403,
     });
     const { mockSpawnFn, getCapturedCmd } = mockSpawnCapture();
 
@@ -622,7 +653,7 @@ describe("runWithProd nested sessions", () => {
 
     const logOutput = logSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
     expect(logOutput).toContain("reusing existing prod session");
-    expect(logOutput).not.toContain("requesting prod-level token");
+    expect(logOutput).not.toContain("requesting prod session");
   });
 
   test("passes through GCE_METADATA_HOST from parent session", async () => {
@@ -774,7 +805,7 @@ describe("runWithProd nested sessions", () => {
 
     // Should have gone through normal flow (new token fetch)
     const logOutput = logSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
-    expect(logOutput).toContain("requesting prod-level token");
+    expect(logOutput).toContain("requesting prod session");
     expect(logOutput).not.toContain("reusing existing prod session");
 
     // Should have new metadata proxy, not the parent's
@@ -803,7 +834,7 @@ describe("runWithProd nested sessions", () => {
     // Should have gone through normal flow
     const logOutput = logSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
     expect(logOutput).toContain("differs from active session");
-    expect(logOutput).toContain("requesting prod-level token");
+    expect(logOutput).toContain("requesting prod session");
     expect(logOutput).not.toContain("reusing existing prod session");
 
     // New metadata proxy should be started
@@ -817,7 +848,7 @@ describe("runWithProd nested sessions", () => {
 
     const mockFetchFn = mockCombinedFetch({
       proxyProjectBody: "same-project",
-      gateTokenStatus: 403,
+      gateSessionStatus: 403,
     });
     const { mockSpawnFn, getCapturedEnv } = mockSpawnCapture();
 
@@ -843,7 +874,7 @@ describe("runWithProd nested sessions", () => {
 
     const mockFetchFn = mockCombinedFetch({
       proxyProjectBody: "parent-project",
-      gateTokenStatus: 403,
+      gateSessionStatus: 403,
     });
     const { mockSpawnFn, getCapturedEnv } = mockSpawnCapture();
 

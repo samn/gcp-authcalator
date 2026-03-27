@@ -66,6 +66,7 @@ Options:
   --pam-allowed-policies <ids>  Additional allowed PAM entitlements (comma-separated)
   --pam-location <loc>     PAM entitlement location (default: global)
   --token-ttl-seconds <secs>  Token lifetime in seconds (default: 3600)
+  --session-ttl-seconds <secs>  Prod session lifetime in seconds (default: 28800 / 8h)
   -e, --env <KEY=VALUE>    Extra env var for with-prod subprocess (repeatable, supports \${VAR} substitution)
   -c, --config <path>      Path to TOML config file
   -h, --help               Show this help message
@@ -113,6 +114,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       "pam-allowed-policies": { type: "string" },
       "pam-location": { type: "string" },
       "token-ttl-seconds": { type: "string" },
+      "session-ttl-seconds": { type: "string" },
       env: { type: "string", short: "e", multiple: true },
       config: { type: "string", short: "c" },
       help: { type: "boolean", short: "h" },

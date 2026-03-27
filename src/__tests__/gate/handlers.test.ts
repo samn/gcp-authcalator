@@ -3,6 +3,7 @@ import { handleRequest } from "../../gate/handlers.ts";
 import type { GateDeps, AuditEntry, CachedToken } from "../../gate/types.ts";
 import { createProdRateLimiter } from "../../gate/rate-limit.ts";
 import type { ProdRateLimiter } from "../../gate/rate-limit.ts";
+import { createSessionManager } from "../../gate/session.ts";
 
 function makeDeps(overrides: Partial<GateDeps> = {}): GateDeps {
   const token: CachedToken = {
@@ -24,6 +25,8 @@ function makeDeps(overrides: Partial<GateDeps> = {}): GateDeps {
     prodRateLimiter: createProdRateLimiter(),
     startTime: new Date(Date.now() - 60_000),
     defaultTokenTtlSeconds: 3600,
+    sessionManager: createSessionManager(),
+    sessionTtlSeconds: 28800,
     ...overrides,
   };
 }
@@ -973,5 +976,404 @@ describe("token_ttl_seconds query param", () => {
 
     expect(logs).toHaveLength(1);
     expect(logs[0]!.token_ttl_seconds).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /session (create prod session)
+// ---------------------------------------------------------------------------
+
+describe("POST /session", () => {
+  test("creates a session and returns session_id with initial token", async () => {
+    const deps = makeDeps();
+    const res = await handleRequest(makeRequest("/session", "POST"), deps);
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.session_id).toBeString();
+    expect((body.session_id as string).length).toBe(64);
+    expect(body.access_token).toBe("prod-access-token");
+    expect(body.expires_in).toBeGreaterThan(0);
+    expect(body.token_type).toBe("Bearer");
+    expect(body.email).toBe("user@example.com");
+  });
+
+  test("triggers confirmation dialog", async () => {
+    let confirmed = false;
+    const deps = makeDeps({
+      confirmProdAccess: async () => {
+        confirmed = true;
+        return true;
+      },
+    });
+
+    await handleRequest(makeRequest("/session", "POST"), deps);
+    expect(confirmed).toBe(true);
+  });
+
+  test("returns 403 when user denies confirmation", async () => {
+    const deps = makeDeps({ confirmProdAccess: async () => false });
+    const res = await handleRequest(makeRequest("/session", "POST"), deps);
+
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("Prod access denied by user");
+  });
+
+  test("returns 429 when rate-limited", async () => {
+    const deps = makeDeps({ prodRateLimiter: blockedRateLimiter() });
+    const res = await handleRequest(makeRequest("/session", "POST"), deps);
+    expect(res.status).toBe(429);
+  });
+
+  test("passes scopes to mintProdToken", async () => {
+    let capturedScopes: string[] | undefined;
+    const deps = makeDeps({
+      mintProdToken: async (scopes) => {
+        capturedScopes = scopes;
+        return { access_token: "t", expires_at: new Date(Date.now() + 3600_000) };
+      },
+    });
+
+    await handleRequest(makeRequest("/session?scopes=scope1,scope2", "POST"), deps);
+    expect(capturedScopes).toEqual(["scope1", "scope2"]);
+  });
+
+  test("writes audit log with session_id on success", async () => {
+    const logs: AuditEntry[] = [];
+    const deps = makeDeps({ writeAuditLog: (e) => logs.push(e) });
+
+    const res = await handleRequest(makeRequest("/session", "POST"), deps);
+    const body = (await res.json()) as Record<string, unknown>;
+
+    expect(logs).toHaveLength(1);
+    expect(logs[0]!.endpoint).toBe("/session");
+    expect(logs[0]!.level).toBe("prod");
+    expect(logs[0]!.result).toBe("granted");
+    expect(logs[0]!.session_id).toBe(body.session_id as string);
+  });
+
+  test("returns 405 for GET method", async () => {
+    const res = await handleRequest(makeRequest("/session", "GET"), makeDeps());
+    expect(res.status).toBe(405);
+  });
+
+  test("validates session_ttl_seconds param", async () => {
+    const res = await handleRequest(
+      makeRequest("/session?session_ttl_seconds=100", "POST"),
+      makeDeps(),
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toContain("session_ttl_seconds must be >= 300");
+  });
+
+  test("validates token_ttl_seconds param", async () => {
+    const res = await handleRequest(
+      makeRequest("/session?token_ttl_seconds=10", "POST"),
+      makeDeps(),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  test("stores session scopes and ttl for later refresh", async () => {
+    const sessionManager = createSessionManager();
+    const deps = makeDeps({ sessionManager });
+
+    const res = await handleRequest(
+      makeRequest("/session?scopes=scope1&token_ttl_seconds=900", "POST"),
+      deps,
+    );
+    const body = (await res.json()) as Record<string, unknown>;
+    const session = sessionManager.validate(body.session_id as string);
+
+    expect(session).not.toBeNull();
+    expect(session!.scopes).toEqual(["scope1"]);
+    expect(session!.ttlSeconds).toBe(900);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DELETE /session (revoke prod session)
+// ---------------------------------------------------------------------------
+
+describe("DELETE /session", () => {
+  test("revokes an existing session", async () => {
+    const sessionManager = createSessionManager();
+    const session = sessionManager.create({
+      email: "eng@example.com",
+      ttlSeconds: 3600,
+      sessionLifetimeSeconds: 28800,
+    });
+    const deps = makeDeps({ sessionManager });
+
+    const res = await handleRequest(makeRequest(`/session?id=${session.id}`, "DELETE"), deps);
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.status).toBe("revoked");
+    expect(sessionManager.validate(session.id)).toBeNull();
+  });
+
+  test("returns 404 for unknown session", async () => {
+    const res = await handleRequest(
+      makeRequest(`/session?id=${"0".repeat(64)}`, "DELETE"),
+      makeDeps(),
+    );
+    expect(res.status).toBe(404);
+  });
+
+  test("returns 400 when id param is missing", async () => {
+    const res = await handleRequest(makeRequest("/session", "DELETE"), makeDeps());
+    expect(res.status).toBe(400);
+  });
+
+  test("writes audit log on revocation", async () => {
+    const logs: AuditEntry[] = [];
+    const sessionManager = createSessionManager();
+    const session = sessionManager.create({
+      email: "eng@example.com",
+      ttlSeconds: 3600,
+      sessionLifetimeSeconds: 28800,
+    });
+    const deps = makeDeps({ sessionManager, writeAuditLog: (e) => logs.push(e) });
+
+    await handleRequest(makeRequest(`/session?id=${session.id}`, "DELETE"), deps);
+
+    expect(logs).toHaveLength(1);
+    expect(logs[0]!.result).toBe("revoked");
+    expect(logs[0]!.session_id).toBe(session.id);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /token?session=<id> (session-based token refresh)
+// ---------------------------------------------------------------------------
+
+describe("GET /token?session=<id>", () => {
+  test("mints a fresh prod token for a valid session", async () => {
+    const sessionManager = createSessionManager();
+    const session = sessionManager.create({
+      email: "eng@example.com",
+      ttlSeconds: 3600,
+      sessionLifetimeSeconds: 28800,
+    });
+    const deps = makeDeps({ sessionManager });
+
+    const res = await handleRequest(makeRequest(`/token?session=${session.id}`), deps);
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.access_token).toBe("prod-access-token");
+    expect(body.expires_in).toBeGreaterThan(0);
+    expect(body.token_type).toBe("Bearer");
+  });
+
+  test("returns 401 for expired session", async () => {
+    let time = 1_000_000;
+    const sessionManager = createSessionManager({ now: () => time });
+    const session = sessionManager.create({
+      email: "eng@example.com",
+      ttlSeconds: 3600,
+      sessionLifetimeSeconds: 60,
+    });
+
+    time = 1_000_000 + 61_000;
+    const deps = makeDeps({ sessionManager });
+    const res = await handleRequest(makeRequest(`/token?session=${session.id}`), deps);
+
+    expect(res.status).toBe(401);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toContain("expired or invalid");
+  });
+
+  test("returns 401 for unknown session ID", async () => {
+    const res = await handleRequest(makeRequest(`/token?session=${"0".repeat(64)}`), makeDeps());
+    expect(res.status).toBe(401);
+  });
+
+  test("uses session scopes and ttl for token minting", async () => {
+    let capturedScopes: string[] | undefined;
+    let capturedTtl: number | undefined;
+    const sessionManager = createSessionManager();
+    const session = sessionManager.create({
+      email: "eng@example.com",
+      scopes: ["scope1", "scope2"],
+      ttlSeconds: 900,
+      sessionLifetimeSeconds: 28800,
+    });
+
+    const deps = makeDeps({
+      sessionManager,
+      mintProdToken: async (scopes, ttl) => {
+        capturedScopes = scopes;
+        capturedTtl = ttl;
+        return { access_token: "t", expires_at: new Date(Date.now() + 900_000) };
+      },
+    });
+
+    await handleRequest(makeRequest(`/token?session=${session.id}`), deps);
+
+    expect(capturedScopes).toEqual(["scope1", "scope2"]);
+    expect(capturedTtl).toBe(900);
+  });
+
+  test("does not trigger confirmation or rate limiting", async () => {
+    let confirmCalled = false;
+    const sessionManager = createSessionManager();
+    const session = sessionManager.create({
+      email: "eng@example.com",
+      ttlSeconds: 3600,
+      sessionLifetimeSeconds: 28800,
+    });
+
+    const deps = makeDeps({
+      sessionManager,
+      confirmProdAccess: async () => {
+        confirmCalled = true;
+        return true;
+      },
+      prodRateLimiter: blockedRateLimiter(),
+    });
+
+    const res = await handleRequest(makeRequest(`/token?session=${session.id}`), deps);
+
+    expect(res.status).toBe(200);
+    expect(confirmCalled).toBe(false);
+  });
+
+  test("writes audit log with session_id", async () => {
+    const logs: AuditEntry[] = [];
+    const sessionManager = createSessionManager();
+    const session = sessionManager.create({
+      email: "eng@example.com",
+      ttlSeconds: 3600,
+      sessionLifetimeSeconds: 28800,
+    });
+    const deps = makeDeps({ sessionManager, writeAuditLog: (e) => logs.push(e) });
+
+    await handleRequest(makeRequest(`/token?session=${session.id}`), deps);
+
+    expect(logs).toHaveLength(1);
+    expect(logs[0]!.session_id).toBe(session.id);
+    expect(logs[0]!.email).toBe("eng@example.com");
+    expect(logs[0]!.level).toBe("prod");
+  });
+
+  test("returns 500 when mintProdToken fails", async () => {
+    const sessionManager = createSessionManager();
+    const session = sessionManager.create({
+      email: "eng@example.com",
+      ttlSeconds: 3600,
+      sessionLifetimeSeconds: 28800,
+    });
+
+    const deps = makeDeps({
+      sessionManager,
+      mintProdToken: async () => {
+        throw new Error("ADC expired");
+      },
+    });
+
+    const res = await handleRequest(makeRequest(`/token?session=${session.id}`), deps);
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("ADC expired");
+  });
+
+  test("renews PAM grant for sessions with a PAM policy", async () => {
+    let ensureGrantCalled = false;
+    let capturedEntitlement = "";
+    const sessionManager = createSessionManager();
+    const session = sessionManager.create({
+      email: "eng@example.com",
+      ttlSeconds: 3600,
+      sessionLifetimeSeconds: 28800,
+      pamPolicy: "projects/p/locations/global/entitlements/e",
+    });
+
+    const deps = makeDeps({
+      sessionManager,
+      ensurePamGrant: async (entitlementPath) => {
+        ensureGrantCalled = true;
+        capturedEntitlement = entitlementPath;
+        return { name: "grants/g1", state: "ACTIVATED", cached: false };
+      },
+    });
+
+    const res = await handleRequest(makeRequest(`/token?session=${session.id}`), deps);
+
+    expect(res.status).toBe(200);
+    expect(ensureGrantCalled).toBe(true);
+    expect(capturedEntitlement).toBe("projects/p/locations/global/entitlements/e");
+  });
+
+  test("does not call ensurePamGrant when session has no PAM policy", async () => {
+    let ensureGrantCalled = false;
+    const sessionManager = createSessionManager();
+    const session = sessionManager.create({
+      email: "eng@example.com",
+      ttlSeconds: 3600,
+      sessionLifetimeSeconds: 28800,
+    });
+
+    const deps = makeDeps({
+      sessionManager,
+      ensurePamGrant: async () => {
+        ensureGrantCalled = true;
+        return { name: "grants/g1", state: "ACTIVATED", cached: false };
+      },
+    });
+
+    const res = await handleRequest(makeRequest(`/token?session=${session.id}`), deps);
+
+    expect(res.status).toBe(200);
+    expect(ensureGrantCalled).toBe(false);
+  });
+
+  test("includes pam_grant in audit log for session refresh with PAM", async () => {
+    const logs: AuditEntry[] = [];
+    const sessionManager = createSessionManager();
+    const session = sessionManager.create({
+      email: "eng@example.com",
+      ttlSeconds: 3600,
+      sessionLifetimeSeconds: 28800,
+      pamPolicy: "projects/p/locations/global/entitlements/e",
+    });
+
+    const deps = makeDeps({
+      sessionManager,
+      writeAuditLog: (e) => logs.push(e),
+      ensurePamGrant: async () => ({ name: "grants/g1", state: "ACTIVATED", cached: true }),
+    });
+
+    await handleRequest(makeRequest(`/token?session=${session.id}`), deps);
+
+    expect(logs).toHaveLength(1);
+    expect(logs[0]!.pam_grant).toBe("grants/g1");
+    expect(logs[0]!.pam_cached).toBe(true);
+    expect(logs[0]!.pam_policy).toBe("projects/p/locations/global/entitlements/e");
+  });
+
+  test("returns 500 when PAM grant renewal fails during session refresh", async () => {
+    const sessionManager = createSessionManager();
+    const session = sessionManager.create({
+      email: "eng@example.com",
+      ttlSeconds: 3600,
+      sessionLifetimeSeconds: 28800,
+      pamPolicy: "projects/p/locations/global/entitlements/e",
+    });
+
+    const deps = makeDeps({
+      sessionManager,
+      ensurePamGrant: async () => {
+        throw new Error("PAM grant expired and renewal failed");
+      },
+    });
+
+    const res = await handleRequest(makeRequest(`/token?session=${session.id}`), deps);
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("PAM grant expired and renewal failed");
   });
 });

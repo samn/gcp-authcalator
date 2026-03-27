@@ -134,6 +134,9 @@ A small HTTP server using the `google-auth-library` library. Runs on the host ma
 | `GET /identity`         | Returns the authenticated user's email                                   |
 | `GET /project-number`   | Returns the numeric project ID (resolved via Cloud Resource Manager API) |
 | `GET /universe-domain`  | Returns the GCP universe domain (resolved via GoogleAuth)                |
+| `POST /session`         | Create a prod session (confirmation + PAM), returns session ID + token   |
+| `DELETE /session?id=..` | Revoke a prod session                                                    |
+| `GET /token?session=..` | Refresh token within a pre-approved session (no confirmation)            |
 | `GET /health`           | Health check                                                             |
 
 Both token endpoints accept an optional `scopes` query parameter (comma-separated) to request tokens with specific OAuth scopes (e.g., `GET /token?scopes=https://www.googleapis.com/auth/sqlservice.login`). Defaults to `cloud-platform`.
@@ -191,20 +194,24 @@ The conceptual flow (simplified pseudocode):
 #!/bin/bash
 set -euo pipefail
 
-# 1. Request prod token from host daemon (triggers confirmation dialog)
-RESPONSE=$(curl -sf --unix-socket "$XDG_RUNTIME_DIR/gcp-authcalator.sock" \
-  http://gate/token?level=prod)
+# 1. Create a prod session at the host daemon (triggers confirmation dialog)
+#    Returns a session ID + initial token. The session allows subsequent
+#    token refreshes without re-confirmation for a bounded lifetime.
+RESPONSE=$(curl -sf -X POST --unix-socket "$XDG_RUNTIME_DIR/gcp-authcalator.sock" \
+  http://gate/session)
 
-# 2. Start temporary metadata proxy serving this specific token
+# 2. Start temporary metadata proxy with a session token provider that
+#    auto-refreshes via GET /token?session=<id> when near expiry
 #    (on a random port, restricted to the child process tree via PID validation)
 
 # 3. Create an isolated gcloud config directory with the token written to a file
-#    (not an env var — avoids /proc/*/environ exposure)
+#    (not an env var — avoids /proc/*/environ exposure). File is atomically
+#    updated on each token refresh.
 
 # 4. Strip credential env vars and spawn the command with GCE_METADATA_HOST
 #    pointing at the temporary proxy
 
-# 5. Forward signals, propagate exit code, clean up temp files
+# 5. Forward signals, propagate exit code, revoke session, clean up temp files
 ```
 
 The actual implementation adds several security hardening measures beyond this pseudocode:

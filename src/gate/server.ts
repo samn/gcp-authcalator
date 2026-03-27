@@ -6,6 +6,7 @@ import { createAuthModule, type AuthModuleOptions } from "./auth.ts";
 import { createConfirmModule, type ConfirmOptions } from "./confirm.ts";
 import { createAuditModule } from "./audit.ts";
 import { createProdRateLimiter } from "./rate-limit.ts";
+import { createSessionManager } from "./session.ts";
 import { handleRequest } from "./handlers.ts";
 import { loadAndValidateTlsFiles } from "../tls/store.ts";
 import type { BunRequestInit } from "./connection.ts";
@@ -41,6 +42,8 @@ export async function startGateServer(
   const prodRateLimiter = createProdRateLimiter();
 
   const defaultTokenTtlSeconds = config.token_ttl_seconds ?? 3600;
+  const sessionTtlSeconds = config.session_ttl_seconds ?? 28800;
+  const sessionManager = createSessionManager();
 
   // PAM setup: resolve entitlement paths and build allowlist
   let pam: PamModule | undefined;
@@ -89,6 +92,8 @@ export async function startGateServer(
           resolveEntitlementPath(policy, config.project_id, config.pam_location ?? "global")
       : undefined,
     defaultTokenTtlSeconds,
+    sessionManager,
+    sessionTtlSeconds,
   };
 
   // Ensure the socket directory exists with owner-only permissions (0o700).
@@ -204,6 +209,7 @@ export async function startGateServer(
   // Graceful shutdown on signals
   const onSignal = async () => {
     console.log("\ngate: shutting down...");
+    sessionManager.revokeAll();
     if (pam) {
       await pam.revokeAll();
     }
@@ -217,6 +223,7 @@ export async function startGateServer(
   console.log(`  project:         ${config.project_id}`);
   console.log(`  service account: ${config.service_account ?? "(none — dev tokens disabled)"}`);
   console.log(`  token TTL:       ${defaultTokenTtlSeconds}s`);
+  console.log(`  session TTL:     ${sessionTtlSeconds}s`);
   console.log(`  socket path:     ${config.socket_path}`);
   if (tcpServer) {
     console.log(`  tcp listener:    127.0.0.1:${config.gate_tls_port} (mTLS)`);
@@ -231,6 +238,8 @@ export async function startGateServer(
   console.log("    GET /identity         → authenticated user email");
   console.log("    GET /project-number   → numeric project ID");
   console.log("    GET /universe-domain  → GCP universe domain");
+  console.log("    POST /session         → create prod session (with confirmation)");
+  console.log("    DELETE /session       → revoke prod session");
   console.log("    GET /health           → health check");
 
   return { server, tcpServer, stop };

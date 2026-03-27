@@ -11,6 +11,8 @@ export interface FetchProdTokenOptions {
   pamPolicy?: string;
   /** Token TTL override in seconds (must be LTE gate's configured default). */
   tokenTtlSeconds?: number;
+  /** Session TTL override in seconds (for createProdSession). */
+  sessionTtlSeconds?: number;
 }
 
 export interface ProdTokenResult {
@@ -87,4 +89,106 @@ export async function fetchProdToken(
     expires_in: tokenBody.expires_in ?? 3600,
     email: identityBody.email,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Session-based prod access (auto-refresh)
+// ---------------------------------------------------------------------------
+
+export interface ProdSessionResult {
+  session_id: string;
+  access_token: string;
+  expires_in: number;
+  email: string;
+}
+
+/**
+ * Create a prod session at the gate.
+ *
+ * Triggers the same confirmation + PAM flow as fetchProdToken, but also
+ * creates a session that allows subsequent token refreshes without
+ * re-confirmation.
+ */
+export async function createProdSession(
+  conn: GateConnection,
+  options: FetchProdTokenOptions = {},
+): Promise<ProdSessionResult> {
+  const fetchFn = options.fetchFn ?? globalThis.fetch;
+  const { baseUrl, extraOpts } = connectionFetchOpts(conn);
+
+  const headers: Record<string, string> = {};
+  if (options.command && options.command.length > 0) {
+    headers["X-Wrapped-Command"] = JSON.stringify(options.command);
+  }
+
+  let sessionUrl = `${baseUrl}/session`;
+  const params: string[] = [];
+  if (options.scopes && options.scopes.length > 0) {
+    params.push(`scopes=${options.scopes.map(encodeURIComponent).join(",")}`);
+  }
+  if (options.pamPolicy) {
+    params.push(`pam_policy=${encodeURIComponent(options.pamPolicy)}`);
+  }
+  if (options.tokenTtlSeconds !== undefined) {
+    params.push(`token_ttl_seconds=${options.tokenTtlSeconds}`);
+  }
+  if (options.sessionTtlSeconds !== undefined) {
+    params.push(`session_ttl_seconds=${options.sessionTtlSeconds}`);
+  }
+  if (params.length > 0) {
+    sessionUrl += `?${params.join("&")}`;
+  }
+
+  const res = await fetchFn(sessionUrl, { ...extraOpts, method: "POST", headers });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`gcp-gate returned ${res.status}: ${text}`);
+  }
+
+  const body = (await res.json()) as {
+    session_id?: string;
+    access_token?: string;
+    expires_in?: number;
+    email?: string;
+  };
+
+  if (!body.session_id) {
+    throw new Error("gcp-gate returned no session_id");
+  }
+  if (!body.access_token) {
+    throw new Error("gcp-gate returned no access_token");
+  }
+  if (!body.email) {
+    throw new Error("gcp-gate returned no email");
+  }
+
+  return {
+    session_id: body.session_id,
+    access_token: body.access_token,
+    expires_in: body.expires_in ?? 3600,
+    email: body.email,
+  };
+}
+
+/**
+ * Revoke a prod session at the gate.
+ * Best-effort — errors are logged but not thrown.
+ */
+export async function revokeProdSession(
+  conn: GateConnection,
+  sessionId: string,
+  options: { fetchFn?: typeof globalThis.fetch } = {},
+): Promise<void> {
+  const fetchFn = options.fetchFn ?? globalThis.fetch;
+  const { baseUrl, extraOpts } = connectionFetchOpts(conn);
+
+  try {
+    await fetchFn(`${baseUrl}/session?id=${encodeURIComponent(sessionId)}`, {
+      ...extraOpts,
+      method: "DELETE",
+    });
+  } catch {
+    // Best-effort cleanup — swallow errors
+  }
 }

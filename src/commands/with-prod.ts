@@ -1,12 +1,17 @@
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Config } from "../config.ts";
 import { getDefaultRuntimeDir, WithProdConfigSchema } from "../config.ts";
-import { fetchProdToken, type FetchProdTokenOptions } from "../with-prod/fetch-prod-token.ts";
-import { createStaticTokenProvider } from "../with-prod/static-token-provider.ts";
+import {
+  createProdSession,
+  revokeProdSession,
+  type FetchProdTokenOptions,
+} from "../with-prod/fetch-prod-token.ts";
+import { createSessionTokenProvider } from "../with-prod/session-token-provider.ts";
 import { startMetadataProxyServer } from "../metadata-proxy/server.ts";
 import { detectNestedSession, PROD_SESSION_ENV_VAR } from "../with-prod/detect-nested-session.ts";
 import { buildGateConnection } from "../gate/connection.ts";
+import type { GateConnection } from "../gate/connection.ts";
 import type { Subprocess } from "bun";
 
 type SpawnFn = (
@@ -153,38 +158,68 @@ export async function runWithProd(
     }
   }
 
-  // Normal flow: fetch a new prod token and start a fresh session.
+  // Normal flow: create a prod session and start a fresh proxy.
   const wpConfig = WithProdConfigSchema.parse(config);
 
-  // Step 1: Fetch prod token + identity from gcp-gate
-  console.log("with-prod: requesting prod-level token from gcp-gate...");
-  let tokenResult;
+  // Step 1: Create prod session at gcp-gate (triggers confirmation dialog)
+  console.log("with-prod: requesting prod session from gcp-gate...");
+  let conn: GateConnection;
+  let sessionResult;
   try {
-    const conn = await buildGateConnection(wpConfig);
-    tokenResult = await fetchProdToken(conn, {
+    conn = await buildGateConnection(wpConfig);
+    sessionResult = await createProdSession(conn, {
       ...options.fetchOptions,
       command: wrappedCommand,
       scopes: wpConfig.scopes,
       pamPolicy: wpConfig.pam_policy,
       tokenTtlSeconds: wpConfig.token_ttl_seconds,
+      sessionTtlSeconds: wpConfig.session_ttl_seconds,
     });
   } catch (err) {
     console.error(
-      `with-prod: failed to acquire prod token: ${err instanceof Error ? err.message : String(err)}`,
+      `with-prod: failed to create prod session: ${err instanceof Error ? err.message : String(err)}`,
     );
     process.exit(1);
   }
-  console.log(`with-prod: prod token acquired for ${tokenResult.email}`);
+  console.log(`with-prod: prod session created for ${sessionResult.email}`);
 
-  // Step 2: Start temporary metadata proxy with the engineer's email so
+  // Step 2: Create an isolated gcloud config directory BEFORE the token
+  // provider so onRefresh can capture the file path in its closure.
+  const runtimeDir = getDefaultRuntimeDir();
+  mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
+  const gcloudConfigDir = mkdtempSync(join(runtimeDir, "gcp-authcalator-gcloud-"));
+  chmodSync(gcloudConfigDir, 0o700);
+
+  const tokenFilePath = join(gcloudConfigDir, "access_token");
+  writeFileSync(tokenFilePath, sessionResult.access_token, { mode: 0o600 });
+  writeFileSync(
+    join(gcloudConfigDir, "properties"),
+    `[auth]\naccess_token_file = ${tokenFilePath}\n`,
+    { mode: 0o600 },
+  );
+
+  // Step 3: Create a session token provider that auto-refreshes from the gate.
+  // The session ID stays in this closure — the subprocess never sees it.
+  const initialToken = {
+    access_token: sessionResult.access_token,
+    expires_at: new Date(Date.now() + sessionResult.expires_in * 1000),
+  };
+  const tokenProvider = createSessionTokenProvider(conn, sessionResult.session_id, initialToken, {
+    fetchFn: options.fetchOptions?.fetchFn,
+    onRefresh: (token) => {
+      // Atomically update gcloud's access_token_file (write to temp, rename)
+      const tmpPath = `${tokenFilePath}.tmp`;
+      writeFileSync(tmpPath, token.access_token, { mode: 0o600 });
+      renameSync(tmpPath, tokenFilePath);
+    },
+  });
+
+  // Step 4: Start temporary metadata proxy with the engineer's email so
   // gcloud can discover the account (it ignores the "default" alias).
-  const expiresAt = new Date(Date.now() + tokenResult.expires_in * 1000);
-  const tokenProvider = createStaticTokenProvider(tokenResult.access_token, expiresAt);
-
   const { server, stop } = startMetadataProxyServer(
     {
       project_id: wpConfig.project_id,
-      service_account: tokenResult.email,
+      service_account: sessionResult.email,
       socket_path: wpConfig.socket_path,
       port: 0,
     },
@@ -199,30 +234,9 @@ export async function runWithProd(
 
   const metadataHost = `127.0.0.1:${server.port}`;
 
-  let gcloudConfigDir: string | undefined;
   let exitCode: number | undefined;
   try {
-    // Step 3: Create an isolated gcloud config directory so the child process
-    // doesn't reuse cached tokens from the main metadata proxy.
-    // Place it in the user-private runtime directory (not /tmp) so other
-    // local users cannot observe or race the temp directory.
-    const runtimeDir = getDefaultRuntimeDir();
-    mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
-    gcloudConfigDir = mkdtempSync(join(runtimeDir, "gcp-authcalator-gcloud-"));
-    chmodSync(gcloudConfigDir, 0o700);
-
-    // Write the access token to a file and configure gcloud to use it via
-    // auth/access_token_file. This is safer than CLOUDSDK_AUTH_ACCESS_TOKEN
-    // (which leaks into /proc/*/environ and is inherited by all children).
-    const tokenFilePath = join(gcloudConfigDir, "access_token");
-    writeFileSync(tokenFilePath, tokenResult.access_token, { mode: 0o600 });
-    writeFileSync(
-      join(gcloudConfigDir, "properties"),
-      `[auth]\naccess_token_file = ${tokenFilePath}\n`,
-      { mode: 0o600 },
-    );
-
-    // Step 4: Spawn wrapped command with metadata env vars
+    // Step 5: Spawn wrapped command with metadata env vars
     const env = applyExtraEnvVars(
       {
         ...stripCredentialEnvVars(process.env),
@@ -235,7 +249,7 @@ export async function runWithProd(
         // gcloud's internal account-enumeration code may not honor
         // GCE_METADATA_HOST, falling back to the original metadata proxy.
         // Tokens still flow through the PID-validated metadata proxy.
-        CLOUDSDK_CORE_ACCOUNT: tokenResult.email,
+        CLOUDSDK_CORE_ACCOUNT: sessionResult.email,
         CLOUDSDK_CORE_PROJECT: wpConfig.project_id,
         [PROD_SESSION_ENV_VAR]: metadataHost,
       },
@@ -249,20 +263,22 @@ export async function runWithProd(
       stderr: "inherit",
     });
 
-    // Step 5: Forward signals to child
+    // Step 6: Forward signals to child
     const forwardSignal = (signal: NodeJS.Signals) => {
       child.kill(signal === "SIGINT" ? 2 : 15);
     };
     process.on("SIGTERM", () => forwardSignal("SIGTERM"));
     process.on("SIGINT", () => forwardSignal("SIGINT"));
 
-    // Step 6: Wait for child
+    // Step 7: Wait for child
     exitCode = (await child.exited) ?? undefined;
   } finally {
     stop();
-    if (gcloudConfigDir) {
-      rmSync(gcloudConfigDir, { recursive: true, force: true });
-    }
+    // Best-effort revoke the session so gate can clean up immediately
+    void revokeProdSession(conn, sessionResult.session_id, {
+      fetchFn: options.fetchOptions?.fetchFn,
+    });
+    rmSync(gcloudConfigDir, { recursive: true, force: true });
   }
 
   process.exit(exitCode ?? 1);
