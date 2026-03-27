@@ -1196,15 +1196,6 @@ describe("GET /token?session=<id>", () => {
     let capturedScopes: string[] | undefined;
     let capturedTtl: number | undefined;
     const sessionManager = createSessionManager();
-    sessionManager.create({
-      email: "eng@example.com",
-      scopes: ["scope1", "scope2"],
-      ttlSeconds: 900,
-      sessionLifetimeSeconds: 28800,
-    });
-
-    // Get the session ID from the manager (we need it for the request)
-    // Create a new session since we need the ID
     const session = sessionManager.create({
       email: "eng@example.com",
       scopes: ["scope1", "scope2"],
@@ -1288,5 +1279,101 @@ describe("GET /token?session=<id>", () => {
     expect(res.status).toBe(500);
     const body = (await res.json()) as Record<string, unknown>;
     expect(body.error).toBe("ADC expired");
+  });
+
+  test("renews PAM grant for sessions with a PAM policy", async () => {
+    let ensureGrantCalled = false;
+    let capturedEntitlement = "";
+    const sessionManager = createSessionManager();
+    const session = sessionManager.create({
+      email: "eng@example.com",
+      ttlSeconds: 3600,
+      sessionLifetimeSeconds: 28800,
+      pamPolicy: "projects/p/locations/global/entitlements/e",
+    });
+
+    const deps = makeDeps({
+      sessionManager,
+      ensurePamGrant: async (entitlementPath) => {
+        ensureGrantCalled = true;
+        capturedEntitlement = entitlementPath;
+        return { name: "grants/g1", state: "ACTIVATED", cached: false };
+      },
+    });
+
+    const res = await handleRequest(makeRequest(`/token?session=${session.id}`), deps);
+
+    expect(res.status).toBe(200);
+    expect(ensureGrantCalled).toBe(true);
+    expect(capturedEntitlement).toBe("projects/p/locations/global/entitlements/e");
+  });
+
+  test("does not call ensurePamGrant when session has no PAM policy", async () => {
+    let ensureGrantCalled = false;
+    const sessionManager = createSessionManager();
+    const session = sessionManager.create({
+      email: "eng@example.com",
+      ttlSeconds: 3600,
+      sessionLifetimeSeconds: 28800,
+    });
+
+    const deps = makeDeps({
+      sessionManager,
+      ensurePamGrant: async () => {
+        ensureGrantCalled = true;
+        return { name: "grants/g1", state: "ACTIVATED", cached: false };
+      },
+    });
+
+    const res = await handleRequest(makeRequest(`/token?session=${session.id}`), deps);
+
+    expect(res.status).toBe(200);
+    expect(ensureGrantCalled).toBe(false);
+  });
+
+  test("includes pam_grant in audit log for session refresh with PAM", async () => {
+    const logs: AuditEntry[] = [];
+    const sessionManager = createSessionManager();
+    const session = sessionManager.create({
+      email: "eng@example.com",
+      ttlSeconds: 3600,
+      sessionLifetimeSeconds: 28800,
+      pamPolicy: "projects/p/locations/global/entitlements/e",
+    });
+
+    const deps = makeDeps({
+      sessionManager,
+      writeAuditLog: (e) => logs.push(e),
+      ensurePamGrant: async () => ({ name: "grants/g1", state: "ACTIVATED", cached: true }),
+    });
+
+    await handleRequest(makeRequest(`/token?session=${session.id}`), deps);
+
+    expect(logs).toHaveLength(1);
+    expect(logs[0]!.pam_grant).toBe("grants/g1");
+    expect(logs[0]!.pam_cached).toBe(true);
+    expect(logs[0]!.pam_policy).toBe("projects/p/locations/global/entitlements/e");
+  });
+
+  test("returns 500 when PAM grant renewal fails during session refresh", async () => {
+    const sessionManager = createSessionManager();
+    const session = sessionManager.create({
+      email: "eng@example.com",
+      ttlSeconds: 3600,
+      sessionLifetimeSeconds: 28800,
+      pamPolicy: "projects/p/locations/global/entitlements/e",
+    });
+
+    const deps = makeDeps({
+      sessionManager,
+      ensurePamGrant: async () => {
+        throw new Error("PAM grant expired and renewal failed");
+      },
+    });
+
+    const res = await handleRequest(makeRequest(`/token?session=${session.id}`), deps);
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("PAM grant expired and renewal failed");
   });
 });

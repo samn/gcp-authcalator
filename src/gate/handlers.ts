@@ -113,6 +113,18 @@ async function handleSessionTokenRefresh(sessionId: string, deps: GateDeps): Pro
   };
 
   try {
+    // Renew PAM grant if the session has a PAM policy (grants expire
+    // independently of the session and must be kept alive for the token
+    // to carry elevated permissions).
+    let pamAuditFields: Pick<AuditEntry, "pam_grant" | "pam_cached"> = {};
+    if (session.pamPolicy && deps.ensurePamGrant) {
+      const grantResult = await deps.ensurePamGrant(session.pamPolicy);
+      pamAuditFields = {
+        pam_grant: grantResult.name,
+        pam_cached: grantResult.cached,
+      };
+    }
+
     const cached = await deps.mintProdToken(session.scopes, session.ttlSeconds);
     const expiresIn = Math.max(0, Math.floor((cached.expires_at.getTime() - Date.now()) / 1000));
 
@@ -124,6 +136,7 @@ async function handleSessionTokenRefresh(sessionId: string, deps: GateDeps): Pro
 
     deps.writeAuditLog({
       ...auditBase,
+      ...pamAuditFields,
       timestamp: new Date().toISOString(),
       result: "granted",
       email: session.email,
@@ -187,38 +200,54 @@ async function handleDevToken(
   }
 }
 
-async function handleProdToken(
+/** Result of a successful acquireProdAccess call. */
+interface ProdAccessGrant {
+  email: string;
+  effectivePamPolicy?: string;
+  pamAuditFields: Pick<AuditEntry, "pam_grant" | "pam_cached">;
+  auditBase: Pick<AuditEntry, "endpoint" | "level" | "pam_policy" | "token_ttl_seconds">;
+}
+
+/**
+ * Shared flow for acquiring prod access: resolve PAM policy, check allowlist,
+ * rate-limit, confirm, and ensure PAM grant.
+ *
+ * Returns a ProdAccessGrant on success or a Response on error.
+ * On success the rate limiter has been acquired — the caller MUST call
+ * deps.prodRateLimiter.release() in both its success and error paths.
+ */
+async function acquireProdAccess(
   req: Request,
   deps: GateDeps,
-  scopes?: string[],
-  pamPolicyParam?: string,
-  ttlSeconds?: number,
-): Promise<Response> {
+  opts: {
+    pamPolicyParam?: string;
+    auditEndpoint: string;
+    ttlSeconds?: number;
+  },
+): Promise<ProdAccessGrant | Response> {
   // Resolve effective PAM policy: query param > config default > none
-  // Query params must be resolved to full entitlement paths (with validation)
   let effectivePamPolicy: string | undefined;
-  if (pamPolicyParam && deps.resolvePamPolicy) {
+  if (opts.pamPolicyParam && deps.resolvePamPolicy) {
     try {
-      effectivePamPolicy = deps.resolvePamPolicy(pamPolicyParam);
+      effectivePamPolicy = deps.resolvePamPolicy(opts.pamPolicyParam);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Invalid PAM policy";
       return jsonResponse({ error: message }, 400);
     }
-  } else if (pamPolicyParam) {
-    // PAM policy requested but no resolver available (PAM not configured)
-    effectivePamPolicy = pamPolicyParam;
+  } else if (opts.pamPolicyParam) {
+    effectivePamPolicy = opts.pamPolicyParam;
   } else {
     effectivePamPolicy = deps.pamDefaultPolicy;
   }
 
   const auditBase: Pick<AuditEntry, "endpoint" | "level" | "pam_policy" | "token_ttl_seconds"> = {
-    endpoint: "/token?level=prod",
+    endpoint: opts.auditEndpoint,
     level: "prod",
     pam_policy: effectivePamPolicy,
-    token_ttl_seconds: ttlSeconds,
+    token_ttl_seconds: opts.ttlSeconds,
   };
 
-  // Allowlist check: if a PAM policy is specified, it must be in the allowlist
+  // Allowlist check
   if (effectivePamPolicy && deps.pamAllowedPolicies) {
     if (!deps.pamAllowedPolicies.has(effectivePamPolicy)) {
       deps.writeAuditLog({
@@ -231,7 +260,7 @@ async function handleProdToken(
     }
   }
 
-  // Misconfiguration check: PAM policy requested but module not wired
+  // Misconfiguration check
   if (effectivePamPolicy && !deps.ensurePamGrant) {
     return jsonResponse({ error: "PAM policy requested but PAM module not configured" }, 500);
   }
@@ -245,28 +274,24 @@ async function handleProdToken(
       result: "rate_limited",
       error: gate.reason,
     });
-
     return jsonResponse({ error: gate.reason }, 429);
   }
 
   try {
     const email = await deps.getIdentityEmail();
 
-    // Extract and summarize the command for the confirmation dialog
     const commandArr = parseCommandHeader(req.headers.get("X-Wrapped-Command"));
     const commandSummary = commandArr ? summarizeCommand(commandArr) : undefined;
 
     const approved = await deps.confirmProdAccess(email, commandSummary, effectivePamPolicy);
     if (!approved) {
       deps.prodRateLimiter.release("denied");
-
       deps.writeAuditLog({
         ...auditBase,
         timestamp: new Date().toISOString(),
         result: "denied",
         email,
       });
-
       return jsonResponse({ error: "Prod access denied by user" }, 403);
     }
 
@@ -280,6 +305,38 @@ async function handleProdToken(
       };
     }
 
+    return { email, effectivePamPolicy, pamAuditFields, auditBase };
+  } catch (err) {
+    deps.prodRateLimiter.release("error");
+
+    const message = err instanceof Error ? err.message : "Unknown error";
+
+    deps.writeAuditLog({
+      ...auditBase,
+      timestamp: new Date().toISOString(),
+      result: "error",
+      error: message,
+    });
+
+    return jsonResponse({ error: message }, 500);
+  }
+}
+
+async function handleProdToken(
+  req: Request,
+  deps: GateDeps,
+  scopes?: string[],
+  pamPolicyParam?: string,
+  ttlSeconds?: number,
+): Promise<Response> {
+  const grant = await acquireProdAccess(req, deps, {
+    pamPolicyParam,
+    auditEndpoint: "/token?level=prod",
+    ttlSeconds,
+  });
+  if (grant instanceof Response) return grant;
+
+  try {
     const cached = await deps.mintProdToken(scopes, ttlSeconds);
     const expiresIn = Math.max(0, Math.floor((cached.expires_at.getTime() - Date.now()) / 1000));
 
@@ -292,11 +349,11 @@ async function handleProdToken(
     };
 
     deps.writeAuditLog({
-      ...auditBase,
-      ...pamAuditFields,
+      ...grant.auditBase,
+      ...grant.pamAuditFields,
       timestamp: new Date().toISOString(),
       result: "granted",
-      email,
+      email: grant.email,
     });
 
     return jsonResponse(body);
@@ -306,9 +363,10 @@ async function handleProdToken(
     const message = err instanceof Error ? err.message : "Unknown error";
 
     deps.writeAuditLog({
-      ...auditBase,
+      ...grant.auditBase,
       timestamp: new Date().toISOString(),
       result: "error",
+      email: grant.email,
       error: message,
     });
 
@@ -344,7 +402,7 @@ function parseSessionTtlParam(
 /**
  * Create a new prod session with an initial token.
  *
- * Follows the same confirmation + PAM flow as handleProdToken, then creates
+ * Uses acquireProdAccess for the shared confirmation + PAM flow, then creates
  * a session that allows subsequent token refreshes without re-confirmation.
  */
 async function handleCreateSession(req: Request, url: URL, deps: GateDeps): Promise<Response> {
@@ -364,85 +422,14 @@ async function handleCreateSession(req: Request, url: URL, deps: GateDeps): Prom
   );
   if ("error" in sessionTtlResult) return sessionTtlResult.error;
 
-  // Resolve effective PAM policy (same logic as handleProdToken)
-  let effectivePamPolicy: string | undefined;
-  if (pamPolicyParam && deps.resolvePamPolicy) {
-    try {
-      effectivePamPolicy = deps.resolvePamPolicy(pamPolicyParam);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Invalid PAM policy";
-      return jsonResponse({ error: message }, 400);
-    }
-  } else if (pamPolicyParam) {
-    effectivePamPolicy = pamPolicyParam;
-  } else {
-    effectivePamPolicy = deps.pamDefaultPolicy;
-  }
-
-  const auditBase: Pick<AuditEntry, "endpoint" | "level" | "pam_policy" | "token_ttl_seconds"> = {
-    endpoint: "/session",
-    level: "prod",
-    pam_policy: effectivePamPolicy,
-    token_ttl_seconds: ttlResult.ttlSeconds,
-  };
-
-  // Allowlist check
-  if (effectivePamPolicy && deps.pamAllowedPolicies) {
-    if (!deps.pamAllowedPolicies.has(effectivePamPolicy)) {
-      deps.writeAuditLog({
-        ...auditBase,
-        timestamp: new Date().toISOString(),
-        result: "denied",
-        error: "PAM policy not in allowlist",
-      });
-      return jsonResponse({ error: "PAM policy not in allowlist" }, 403);
-    }
-  }
-
-  if (effectivePamPolicy && !deps.ensurePamGrant) {
-    return jsonResponse({ error: "PAM policy requested but PAM module not configured" }, 500);
-  }
-
-  // Rate-limit check
-  const gate = deps.prodRateLimiter.acquire();
-  if (!gate.allowed) {
-    deps.writeAuditLog({
-      ...auditBase,
-      timestamp: new Date().toISOString(),
-      result: "rate_limited",
-      error: gate.reason,
-    });
-    return jsonResponse({ error: gate.reason }, 429);
-  }
+  const grant = await acquireProdAccess(req, deps, {
+    pamPolicyParam,
+    auditEndpoint: "/session",
+    ttlSeconds: ttlResult.ttlSeconds,
+  });
+  if (grant instanceof Response) return grant;
 
   try {
-    const email = await deps.getIdentityEmail();
-
-    const commandArr = parseCommandHeader(req.headers.get("X-Wrapped-Command"));
-    const commandSummary = commandArr ? summarizeCommand(commandArr) : undefined;
-
-    const approved = await deps.confirmProdAccess(email, commandSummary, effectivePamPolicy);
-    if (!approved) {
-      deps.prodRateLimiter.release("denied");
-      deps.writeAuditLog({
-        ...auditBase,
-        timestamp: new Date().toISOString(),
-        result: "denied",
-        email,
-      });
-      return jsonResponse({ error: "Prod access denied by user" }, 403);
-    }
-
-    // PAM grant
-    let pamAuditFields: Pick<AuditEntry, "pam_grant" | "pam_cached"> = {};
-    if (effectivePamPolicy && deps.ensurePamGrant) {
-      const grantResult = await deps.ensurePamGrant(effectivePamPolicy, commandSummary);
-      pamAuditFields = {
-        pam_grant: grantResult.name,
-        pam_cached: grantResult.cached,
-      };
-    }
-
     // Mint the initial token
     const cached = await deps.mintProdToken(scopes, ttlResult.ttlSeconds);
     const expiresIn = Math.max(0, Math.floor((cached.expires_at.getTime() - Date.now()) / 1000));
@@ -451,9 +438,9 @@ async function handleCreateSession(req: Request, url: URL, deps: GateDeps): Prom
     const effectiveTokenTtl = ttlResult.ttlSeconds ?? deps.defaultTokenTtlSeconds;
     const effectiveSessionTtl = sessionTtlResult.sessionTtlSeconds ?? deps.sessionTtlSeconds;
     const session = deps.sessionManager.create({
-      email,
+      email: grant.email,
       scopes,
-      pamPolicy: effectivePamPolicy,
+      pamPolicy: grant.effectivePamPolicy,
       ttlSeconds: effectiveTokenTtl,
       sessionLifetimeSeconds: effectiveSessionTtl,
     });
@@ -465,15 +452,15 @@ async function handleCreateSession(req: Request, url: URL, deps: GateDeps): Prom
       access_token: cached.access_token,
       expires_in: expiresIn,
       token_type: "Bearer",
-      email,
+      email: grant.email,
     };
 
     deps.writeAuditLog({
-      ...auditBase,
-      ...pamAuditFields,
+      ...grant.auditBase,
+      ...grant.pamAuditFields,
       timestamp: new Date().toISOString(),
       result: "granted",
-      email,
+      email: grant.email,
       session_id: session.id,
     });
 
@@ -484,9 +471,10 @@ async function handleCreateSession(req: Request, url: URL, deps: GateDeps): Prom
     const message = err instanceof Error ? err.message : "Unknown error";
 
     deps.writeAuditLog({
-      ...auditBase,
+      ...grant.auditBase,
       timestamp: new Date().toISOString(),
       result: "error",
+      email: grant.email,
       error: message,
     });
 
