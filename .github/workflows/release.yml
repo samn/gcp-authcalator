@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
   ci:
@@ -86,3 +87,54 @@ jobs:
           body_path: release-notes.md
           files: |
             artifacts/**/*
+
+  docker:
+    name: Docker Image
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Linux artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: gcp-authcalator-linux-*
+          path: docker-context
+
+      - name: Prepare binaries
+        run: |
+          mv docker-context/gcp-authcalator-linux-amd64/gcp-authcalator-linux-amd64.tar.gz .
+          mv docker-context/gcp-authcalator-linux-arm64/gcp-authcalator-linux-arm64.tar.gz .
+          tar xzf gcp-authcalator-linux-amd64.tar.gz
+          tar xzf gcp-authcalator-linux-arm64.tar.gz
+          chmod +x gcp-authcalator-linux-amd64 gcp-authcalator-linux-arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
