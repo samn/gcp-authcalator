@@ -337,7 +337,7 @@ This command:
 
 The temporary proxy uses PID-based process restriction — only the wrapped command and its descendants can request tokens from it. The session ID (which authorizes token refresh) stays in the `with-prod` process and never reaches the subprocess — an attacker inside the subprocess cannot refresh tokens independently.
 
-### `approve` — CLI approval of pending requests
+### `approve` / `deny` — CLI approval of pending requests
 
 Lists, approves, or denies pending prod access requests on the gate server. This is the CLI fallback for environments where GUI dialogs and terminal prompts are unavailable (headless servers, containers without a display, CI).
 
@@ -349,12 +349,12 @@ gcp-authcalator approve
 gcp-authcalator approve abc12def
 
 # Deny a request by ID:
-gcp-authcalator approve --deny abc12def
+gcp-authcalator deny abc12def
 ```
 
 When the gate's confirmation module cannot show a GUI dialog or terminal prompt, it queues the request and logs the request ID to stderr with instructions. The request auto-denies after 120 seconds if not resolved.
 
-The `approve` command connects to the gate via the same Unix socket or TCP+mTLS transport as other commands. It does not require `--project-id` — only `--socket-path` (or `--gate-url` for remote).
+Both commands connect to the gate via the same Unix socket or TCP+mTLS transport as other commands. They do not require `--project-id` — only `--socket-path` (or `--gate-url` for remote).
 
 ### `init-tls` — TLS certificate management
 

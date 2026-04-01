@@ -228,17 +228,17 @@ The actual implementation adds several security hardening measures beyond this p
 
 Usage: `with-prod -- python some/script.py`, `with-prod -- gcloud sql instances list`, `with-prod -- alembic upgrade head`
 
-### 5. `approve` -- CLI Approval of Pending Requests
+### 5. `approve` / `deny` -- CLI Approval of Pending Requests
 
-When the gate's confirmation module cannot show a GUI dialog or terminal prompt (headless environments, containers without a display), prod access requests are queued as pending. The `approve` command connects to the gate and provides CLI-based approval:
+When the gate's confirmation module cannot show a GUI dialog or terminal prompt (headless environments, containers without a display), prod access requests are queued as pending. The `approve` and `deny` commands connect to the gate and provide CLI-based approval:
 
 - `gcp-authcalator approve` — List all pending requests with IDs, emails, commands, and time remaining
 - `gcp-authcalator approve <id>` — Approve a pending request by its 8-character hex ID
-- `gcp-authcalator approve --deny <id>` — Deny a pending request
+- `gcp-authcalator deny <id>` — Deny a pending request
 
 Pending requests auto-deny after 120 seconds (2x the GUI dialog timeout, to allow time for terminal switching). The gate logs request IDs and approval instructions to stderr when a request is queued.
 
-The `approve` command uses the same gate connection (Unix socket or TCP+mTLS) as other commands. It does not require `--project-id` — only the socket path or gate URL is needed.
+Both commands use the same gate connection (Unix socket or TCP+mTLS) as other commands. They do not require `--project-id` — only the socket path or gate URL is needed.
 
 ### 6. `init-tls` -- TLS Certificate Management
 

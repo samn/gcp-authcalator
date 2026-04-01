@@ -68,7 +68,7 @@ async function listPending(baseUrl: string, extraOpts: BunRequestInit): Promise<
     console.log(`  ${req.id}  ${req.email}${command}${pam}  (expires in ${remainingSecs}s)`);
   }
   console.log(
-    "\nUse 'gcp-authcalator approve <id>' to approve or 'gcp-authcalator approve --deny <id>' to deny.",
+    "\nUse 'gcp-authcalator approve <id>' to approve or 'gcp-authcalator deny <id>' to deny.",
   );
 }
 

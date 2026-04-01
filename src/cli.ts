@@ -46,7 +46,8 @@ Commands:
   gate              Start the host-side token daemon
   metadata-proxy    Start the GCE metadata server emulator
   with-prod         Wrap a command with prod credentials
-  approve           List/approve/deny pending prod access requests
+  approve           List or approve pending prod access requests
+  deny              Deny a pending prod access request
   init-tls          Generate TLS certificates for remote devcontainer support
   kube-token        kubectl exec credential plugin (outputs ExecCredential JSON)
   kube-setup        Patch kubeconfig to use gcp-authcalator instead of gke-gcloud-auth-plugin
@@ -69,7 +70,6 @@ Options:
   --pam-location <loc>     PAM entitlement location (default: global)
   --token-ttl-seconds <secs>  Token lifetime in seconds (default: 3600)
   --session-ttl-seconds <secs>  Prod session lifetime in seconds (default: 28800 / 8h)
-  --deny                   Deny a pending request instead of approving (approve only)
   -e, --env <KEY=VALUE>    Extra env var for with-prod subprocess (repeatable, supports \${VAR} substitution)
   -c, --config <path>      Path to TOML config file
   -h, --help               Show this help message
@@ -81,7 +81,7 @@ Examples:
   gcp-authcalator with-prod -- python some/script.py
   gcp-authcalator approve
   gcp-authcalator approve abc12def
-  gcp-authcalator approve --deny abc12def
+  gcp-authcalator deny abc12def
   gcp-authcalator kube-setup`;
 
 const SUBCOMMANDS = [
@@ -89,6 +89,7 @@ const SUBCOMMANDS = [
   "metadata-proxy",
   "with-prod",
   "approve",
+  "deny",
   "init-tls",
   "kube-token",
   "kube-setup",
@@ -122,7 +123,6 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       "pam-location": { type: "string" },
       "token-ttl-seconds": { type: "string" },
       "session-ttl-seconds": { type: "string" },
-      deny: { type: "boolean" },
       env: { type: "string", short: "e", multiple: true },
       config: { type: "string", short: "c" },
       help: { type: "boolean", short: "h" },
@@ -179,15 +179,16 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     return;
   }
 
-  if (subcommand === "approve") {
+  if (subcommand === "approve" || subcommand === "deny") {
     try {
       const { env: _envPairs, ...scalarVals } = values;
       const approveConfig = loadConfig(mapCliArgs(scalarVals), values.config);
+      const isDeny = subcommand === "deny";
       const id = positionals[1];
-      await runApprove(approveConfig, id ? [id] : [], { deny: !!values.deny });
+      await runApprove(approveConfig, id ? [id] : [], { deny: isDeny });
     } catch (err) {
       if (err instanceof z.ZodError) {
-        console.error("error: invalid configuration for 'approve'");
+        console.error(`error: invalid configuration for '${subcommand}'`);
         for (const issue of err.issues) {
           console.error(`  ${issue.path.join(".")}: ${issue.message}`);
         }
