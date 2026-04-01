@@ -49,7 +49,7 @@
    - Push the commit and tag to the remote
 
 5. **GitHub Actions takes over** — the `release.yml` workflow will:
-   - Build binaries for Linux amd64 and macOS arm64
+   - Build binaries for Linux amd64, Linux arm64, and macOS arm64
    - Generate SHA256 checksums
    - Create a GitHub Release with the changelog entry as the body
    - Attach the binaries and checksums as release assets
@@ -63,4 +63,5 @@ We use [Semantic Versioning](https://semver.org/) with a `v` prefix for git tags
 | Platform     | Binary name                    |
 | ------------ | ------------------------------ |
 | Linux x86_64 | `gcp-authcalator-linux-amd64`  |
+| Linux ARM64  | `gcp-authcalator-linux-arm64`  |
 | macOS ARM64  | `gcp-authcalator-darwin-arm64` |

@@ -112,6 +112,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [0.1.4] - 2026-02-20
 
+### Added
+
 - `with-prod`: nested sessions automatically reuse the parent's prod token and metadata proxy, eliminating redundant confirmation dialogs
 - `version`: show git commit SHA alongside the version number (e.g. `0.1.3 (abc1234)`)
 

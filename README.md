@@ -154,7 +154,7 @@ Precedence: environment variables > CLI flags > TOML file > defaults.
 
 ### Environment variables
 
-All config options can be set via `GCP_AUTHCALATOR_*` environment variables (uppercased key name with `GCP_AUTHCALATOR_` prefix):
+Most config options can be set via `GCP_AUTHCALATOR_*` environment variables (uppercased key name with `GCP_AUTHCALATOR_` prefix). Options that take arrays or maps (`scopes`, `pam_allowed_policies`, `env`) are only available via CLI flags or TOML config.
 
 | Variable                              | Description                                                        |
 | ------------------------------------- | ------------------------------------------------------------------ |
@@ -604,7 +604,7 @@ prek install
 
 ```bash
 bun run format    # auto-fix formatting
-bun run lint      # run ESLint
+bun run lint      # run oxlint
 bun run typecheck # check types
 bun test          # run tests
 ```
