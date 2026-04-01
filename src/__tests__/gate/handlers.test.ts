@@ -4,6 +4,7 @@ import type { GateDeps, AuditEntry, CachedToken } from "../../gate/types.ts";
 import { createProdRateLimiter } from "../../gate/rate-limit.ts";
 import type { ProdRateLimiter } from "../../gate/rate-limit.ts";
 import { createSessionManager } from "../../gate/session.ts";
+import { createPendingQueue } from "../../gate/pending.ts";
 
 function makeDeps(overrides: Partial<GateDeps> = {}): GateDeps {
   const token: CachedToken = {
@@ -1375,5 +1376,118 @@ describe("GET /token?session=<id>", () => {
     expect(res.status).toBe(500);
     const body = (await res.json()) as Record<string, unknown>;
     expect(body.error).toBe("PAM grant expired and renewal failed");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /pending
+// ---------------------------------------------------------------------------
+
+describe("GET /pending", () => {
+  test("returns empty list when no pending requests", async () => {
+    const pendingQueue = createPendingQueue({ timeoutMs: 5000, now: () => 1_000_000 });
+    const deps = makeDeps({ pendingQueue });
+    const res = await handleRequest(makeRequest("/pending"), deps);
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { pending: unknown[] };
+    expect(body.pending).toEqual([]);
+  });
+
+  test("returns pending requests", async () => {
+    const pendingQueue = createPendingQueue({ timeoutMs: 5000, now: () => 1_000_000 });
+    pendingQueue.enqueue("user@example.com", "gcloud compute list", "prod-policy");
+
+    const deps = makeDeps({ pendingQueue });
+    const res = await handleRequest(makeRequest("/pending"), deps);
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      pending: Array<{ email: string; command: string; pamPolicy: string }>;
+    };
+    expect(body.pending).toHaveLength(1);
+    expect(body.pending[0]!.email).toBe("user@example.com");
+    expect(body.pending[0]!.command).toBe("gcloud compute list");
+    expect(body.pending[0]!.pamPolicy).toBe("prod-policy");
+
+    pendingQueue.denyAll();
+  });
+
+  test("returns 501 when pendingQueue not in deps", async () => {
+    const deps = makeDeps();
+    const res = await handleRequest(makeRequest("/pending"), deps);
+
+    expect(res.status).toBe(501);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("Pending queue not enabled");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /pending/:id/approve and /pending/:id/deny
+// ---------------------------------------------------------------------------
+
+describe("POST /pending/:id/approve", () => {
+  test("approves a pending request", async () => {
+    const pendingQueue = createPendingQueue({ timeoutMs: 5000, now: () => 1_000_000 });
+    const promise = pendingQueue.enqueue("user@example.com");
+    const [req] = pendingQueue.list();
+
+    const auditLog: AuditEntry[] = [];
+    const deps = makeDeps({
+      pendingQueue,
+      writeAuditLog: (entry) => auditLog.push(entry),
+    });
+
+    const res = await handleRequest(makeRequest(`/pending/${req!.id}/approve`, "POST"), deps);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.status).toBe("approved");
+
+    expect(await promise).toBe(true);
+
+    expect(auditLog).toHaveLength(1);
+    expect(auditLog[0]!.result).toBe("granted");
+    expect(auditLog[0]!.endpoint).toContain(req!.id);
+  });
+
+  test("returns 404 for unknown ID", async () => {
+    const pendingQueue = createPendingQueue({ timeoutMs: 5000, now: () => 1_000_000 });
+    const deps = makeDeps({ pendingQueue });
+
+    const res = await handleRequest(makeRequest("/pending/deadbeef/approve", "POST"), deps);
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("Request not found or expired");
+  });
+
+  test("returns 501 when pendingQueue not in deps", async () => {
+    const deps = makeDeps();
+    const res = await handleRequest(makeRequest("/pending/deadbeef/approve", "POST"), deps);
+    expect(res.status).toBe(501);
+  });
+});
+
+describe("POST /pending/:id/deny", () => {
+  test("denies a pending request", async () => {
+    const pendingQueue = createPendingQueue({ timeoutMs: 5000, now: () => 1_000_000 });
+    const promise = pendingQueue.enqueue("user@example.com");
+    const [req] = pendingQueue.list();
+
+    const auditLog: AuditEntry[] = [];
+    const deps = makeDeps({
+      pendingQueue,
+      writeAuditLog: (entry) => auditLog.push(entry),
+    });
+
+    const res = await handleRequest(makeRequest(`/pending/${req!.id}/deny`, "POST"), deps);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.status).toBe("denied");
+
+    expect(await promise).toBe(false);
+
+    expect(auditLog).toHaveLength(1);
+    expect(auditLog[0]!.result).toBe("denied");
   });
 });

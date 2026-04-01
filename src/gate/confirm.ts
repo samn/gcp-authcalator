@@ -1,4 +1,5 @@
 import type { Subprocess } from "bun";
+import type { PendingQueue } from "./pending.ts";
 
 type SpawnFn = (cmd: string[], opts?: { stdin?: "pipe" | "inherit" }) => Subprocess;
 
@@ -9,6 +10,8 @@ export interface ConfirmOptions {
   platform?: string;
   /** Override process.stdin.isTTY for testing. */
   isTTY?: boolean;
+  /** Optional pending queue for CLI-based approval when no GUI/TTY is available. */
+  pendingQueue?: PendingQueue;
 }
 
 /**
@@ -24,6 +27,7 @@ export function createConfirmModule(options: ConfirmOptions = {}): {
   const spawnFn = options.spawn ?? (Bun.spawn as unknown as SpawnFn);
   const platform = options.platform ?? process.platform;
   const isTTY = options.isTTY ?? !!process.stdin.isTTY;
+  const pendingQueue = options.pendingQueue;
 
   async function confirmProdAccess(
     email: string,
@@ -39,8 +43,8 @@ export function createConfirmModule(options: ConfirmOptions = {}): {
       // GUI not available, fall through to terminal
     }
 
-    // Fallback to terminal prompt
-    return tryTerminalPrompt(email, isTTY, command, pamPolicy);
+    // Fallback to terminal prompt, then pending queue
+    return tryTerminalPrompt(email, isTTY, command, pamPolicy, pendingQueue);
   }
 
   return { confirmProdAccess };
@@ -121,8 +125,13 @@ async function tryTerminalPrompt(
   isTTY: boolean,
   command?: string,
   pamPolicy?: string,
+  queue?: PendingQueue,
 ): Promise<boolean> {
   if (!isTTY) {
+    if (queue) {
+      console.error("confirm: no interactive method available, queuing for CLI approval");
+      return queue.enqueue(email, command, pamPolicy);
+    }
     console.error("confirm: no interactive method available, denying prod access");
     return false;
   }

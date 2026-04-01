@@ -11,6 +11,7 @@ import { handleRequest } from "./handlers.ts";
 import { loadAndValidateTlsFiles } from "../tls/store.ts";
 import type { BunRequestInit } from "./connection.ts";
 import { createPamModule, resolveEntitlementPath, type PamModule } from "./pam.ts";
+import { createPendingQueue } from "./pending.ts";
 
 export interface GateServerResult {
   server: ReturnType<typeof Bun.serve>;
@@ -37,7 +38,11 @@ export async function startGateServer(
   options: StartGateServerOptions = {},
 ): Promise<GateServerResult> {
   const auth = createAuthModule(config, options.authOptions);
-  const confirm = createConfirmModule(options.confirmOptions);
+  const pendingQueue = createPendingQueue();
+  const confirm = createConfirmModule({
+    ...options.confirmOptions,
+    pendingQueue,
+  });
   const audit = createAuditModule(options.auditLogDir);
   const prodRateLimiter = createProdRateLimiter();
 
@@ -94,6 +99,7 @@ export async function startGateServer(
     defaultTokenTtlSeconds,
     sessionManager,
     sessionTtlSeconds,
+    pendingQueue,
   };
 
   // Ensure the socket directory exists with owner-only permissions (0o700).
@@ -209,6 +215,7 @@ export async function startGateServer(
   // Graceful shutdown on signals
   const onSignal = async () => {
     console.log("\ngate: shutting down...");
+    pendingQueue.denyAll();
     sessionManager.revokeAll();
     if (pam) {
       await pam.revokeAll();
@@ -233,14 +240,17 @@ export async function startGateServer(
     console.log(`  pam allowlist:   ${pamAllowedPolicies!.size} entitlement(s)`);
   }
   console.log("  endpoints:");
-  console.log("    GET /token            → dev-scoped access token");
-  console.log("    GET /token?level=prod → prod token (with confirmation)");
-  console.log("    GET /identity         → authenticated user email");
-  console.log("    GET /project-number   → numeric project ID");
-  console.log("    GET /universe-domain  → GCP universe domain");
-  console.log("    POST /session         → create prod session (with confirmation)");
-  console.log("    DELETE /session       → revoke prod session");
-  console.log("    GET /health           → health check");
+  console.log("    GET /token                   → dev-scoped access token");
+  console.log("    GET /token?level=prod        → prod token (with confirmation)");
+  console.log("    GET /identity                → authenticated user email");
+  console.log("    GET /project-number          → numeric project ID");
+  console.log("    GET /universe-domain         → GCP universe domain");
+  console.log("    POST /session                → create prod session (with confirmation)");
+  console.log("    DELETE /session              → revoke prod session");
+  console.log("    GET /pending                 → list pending approval requests");
+  console.log("    POST /pending/:id/approve    → approve pending request");
+  console.log("    POST /pending/:id/deny       → deny pending request");
+  console.log("    GET /health                  → health check");
 
   return { server, tcpServer, stop };
 }

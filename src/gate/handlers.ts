@@ -28,6 +28,17 @@ export async function handleRequest(req: Request, deps: GateDeps): Promise<Respo
     return jsonResponse({ error: "Method not allowed" }, 405);
   }
 
+  // /pending — list pending approval requests
+  if (url.pathname === "/pending" && req.method === "GET") {
+    return handleListPending(deps);
+  }
+
+  // /pending/<id>/approve or /pending/<id>/deny
+  const pendingMatch = url.pathname.match(/^\/pending\/([a-f0-9]+)\/(approve|deny)$/);
+  if (pendingMatch && req.method === "POST") {
+    return handleResolvePending(pendingMatch[1]!, pendingMatch[2] as "approve" | "deny", deps);
+  }
+
   if (req.method !== "GET") {
     return jsonResponse({ error: "Method not allowed" }, 405);
   }
@@ -503,6 +514,35 @@ function handleRevokeSession(url: URL, deps: GateDeps): Response {
   });
 
   return jsonResponse({ status: "revoked" });
+}
+
+function handleListPending(deps: GateDeps): Response {
+  if (!deps.pendingQueue) {
+    return jsonResponse({ error: "Pending queue not enabled" }, 501);
+  }
+  return jsonResponse({ pending: deps.pendingQueue.list() });
+}
+
+function handleResolvePending(id: string, action: "approve" | "deny", deps: GateDeps): Response {
+  if (!deps.pendingQueue) {
+    return jsonResponse({ error: "Pending queue not enabled" }, 501);
+  }
+
+  const resolved =
+    action === "approve" ? deps.pendingQueue.approve(id) : deps.pendingQueue.deny(id);
+
+  if (!resolved) {
+    return jsonResponse({ error: "Request not found or expired" }, 404);
+  }
+
+  deps.writeAuditLog({
+    endpoint: `/pending/${id}/${action}`,
+    level: "prod",
+    timestamp: new Date().toISOString(),
+    result: action === "approve" ? "granted" : "denied",
+  });
+
+  return jsonResponse({ status: action === "approve" ? "approved" : "denied" });
 }
 
 async function handleProjectNumber(deps: GateDeps): Promise<Response> {

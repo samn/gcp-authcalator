@@ -8,6 +8,7 @@ import { runWithProd } from "./commands/with-prod.ts";
 import { runKubeToken } from "./commands/kube-token.ts";
 import { runKubeSetup } from "./commands/kube-setup.ts";
 import { runInitTls } from "./commands/init-tls.ts";
+import { runApprove } from "./commands/approve.ts";
 import packageJson from "../package.json";
 
 const VERSION = packageJson.version;
@@ -45,6 +46,7 @@ Commands:
   gate              Start the host-side token daemon
   metadata-proxy    Start the GCE metadata server emulator
   with-prod         Wrap a command with prod credentials
+  approve           List/approve/deny pending prod access requests
   init-tls          Generate TLS certificates for remote devcontainer support
   kube-token        kubectl exec credential plugin (outputs ExecCredential JSON)
   kube-setup        Patch kubeconfig to use gcp-authcalator instead of gke-gcloud-auth-plugin
@@ -67,6 +69,7 @@ Options:
   --pam-location <loc>     PAM entitlement location (default: global)
   --token-ttl-seconds <secs>  Token lifetime in seconds (default: 3600)
   --session-ttl-seconds <secs>  Prod session lifetime in seconds (default: 28800 / 8h)
+  --deny                   Deny a pending request instead of approving (approve only)
   -e, --env <KEY=VALUE>    Extra env var for with-prod subprocess (repeatable, supports \${VAR} substitution)
   -c, --config <path>      Path to TOML config file
   -h, --help               Show this help message
@@ -76,12 +79,16 @@ Examples:
   gcp-authcalator gate --project-id my-project --service-account sa@my-project.iam.gserviceaccount.com
   gcp-authcalator metadata-proxy --config config.toml
   gcp-authcalator with-prod -- python some/script.py
+  gcp-authcalator approve
+  gcp-authcalator approve abc12def
+  gcp-authcalator approve --deny abc12def
   gcp-authcalator kube-setup`;
 
 const SUBCOMMANDS = [
   "gate",
   "metadata-proxy",
   "with-prod",
+  "approve",
   "init-tls",
   "kube-token",
   "kube-setup",
@@ -115,6 +122,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       "pam-location": { type: "string" },
       "token-ttl-seconds": { type: "string" },
       "session-ttl-seconds": { type: "string" },
+      deny: { type: "boolean" },
       env: { type: "string", short: "e", multiple: true },
       config: { type: "string", short: "c" },
       help: { type: "boolean", short: "h" },
@@ -168,6 +176,14 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       showPath: values["show-path"],
       tlsDir: values["tls-dir"],
     });
+    return;
+  }
+
+  if (subcommand === "approve") {
+    const { env: _envPairs, ...scalarVals } = values;
+    const approveConfig = loadConfig(mapCliArgs(scalarVals), values.config);
+    const id = positionals[1];
+    await runApprove(approveConfig, id ? [id] : [], { deny: !!values.deny });
     return;
   }
 
