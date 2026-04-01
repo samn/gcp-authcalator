@@ -36,6 +36,7 @@ describe("--help", () => {
     expect(stdout).toContain("metadata-proxy");
     expect(stdout).toContain("with-prod");
     expect(stdout).toContain("approve");
+    expect(stdout).toContain("deny");
     expect(stdout).toContain("version");
   });
 });

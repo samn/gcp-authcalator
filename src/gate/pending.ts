@@ -85,7 +85,7 @@ export function createPendingQueue(options: PendingQueueOptions = {}): PendingQu
       `gate: pending approval ${id} — ${email}${detail}${pam} — expires in ${timeoutSecs}s`,
     );
     console.error(
-      `gate: run 'gcp-authcalator approve ${id}' to approve, or 'gcp-authcalator approve --deny ${id}' to deny`,
+      `gate: run 'gcp-authcalator approve ${id}' to approve, or 'gcp-authcalator deny ${id}' to deny`,
     );
 
     return promise;

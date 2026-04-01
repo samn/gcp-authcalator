@@ -11,8 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - Multi-arch Docker image (`linux/amd64`, `linux/arm64`) published to `ghcr.io/samn/gcp-authcalator` on every release, using a minimal distroless base image
 - `Dockerfile` for packaging the compiled binary
-- `gate`: CLI fallback for approving prod escalation requests. When GUI dialogs and terminal prompts are unavailable (headless environments), requests are queued and can be listed/approved/denied via the new `approve` subcommand. New gate endpoints: `GET /pending`, `POST /pending/:id/approve`, `POST /pending/:id/deny`.
-- New `approve` subcommand to list, approve, or deny pending prod access requests on the gate server (`gcp-authcalator approve`, `gcp-authcalator approve <id>`, `gcp-authcalator approve --deny <id>`).
+- `gate`: CLI fallback for approving prod escalation requests. When GUI dialogs and terminal prompts are unavailable (headless environments), requests are queued and can be listed/approved/denied via the new `approve` and `deny` subcommands. New gate endpoints: `GET /pending`, `POST /pending/:id/approve`, `POST /pending/:id/deny`.
+- New `approve` and `deny` subcommands to list, approve, or deny pending prod access requests on the gate server (`gcp-authcalator approve`, `gcp-authcalator approve <id>`, `gcp-authcalator deny <id>`).
 
 ## [0.6.0] - 2026-03-27
 
