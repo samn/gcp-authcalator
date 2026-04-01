@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createConfirmModule, type ConfirmOptions } from "../../gate/confirm.ts";
+import { createPendingQueue } from "../../gate/pending.ts";
 
 /** Create a mock spawn function that returns a process with the given exit code. */
 function mockSpawn(exitCode: number) {
@@ -499,6 +500,80 @@ describe("createConfirmModule", () => {
       });
       await confirmProdAccess("user@example.com");
       expect(capturedCmd[0]).toBe("zenity");
+    });
+  });
+
+  describe("pending queue fallback", () => {
+    test("enqueues when GUI exits 127 and no TTY, with pendingQueue", async () => {
+      const pendingQueue = createPendingQueue({ timeoutMs: 5000, now: () => 1_000_000 });
+      const { confirmProdAccess } = createConfirmModule({
+        spawn: mockSpawn(127),
+        platform: "linux",
+        isTTY: false,
+        pendingQueue,
+      });
+
+      const promise = confirmProdAccess("user@example.com", "gcloud compute list");
+
+      // Yield to let the async GUI check resolve before inspecting the queue
+      await new Promise((r) => setTimeout(r, 10));
+
+      const pending = pendingQueue.list();
+      expect(pending).toHaveLength(1);
+      expect(pending[0]!.email).toBe("user@example.com");
+      expect(pending[0]!.command).toBe("gcloud compute list");
+
+      pendingQueue.approve(pending[0]!.id);
+      expect(await promise).toBe(true);
+    });
+
+    test("enqueues when spawn throws and no TTY, with pendingQueue", async () => {
+      const pendingQueue = createPendingQueue({ timeoutMs: 5000, now: () => 1_000_000 });
+      const spawnFn = () => {
+        throw new Error("spawn ENOENT");
+      };
+
+      const { confirmProdAccess } = createConfirmModule({
+        spawn: spawnFn as unknown as ConfirmOptions["spawn"],
+        platform: "linux",
+        isTTY: false,
+        pendingQueue,
+      });
+
+      const promise = confirmProdAccess("user@example.com");
+
+      // Yield to let the async spawn error resolve before inspecting the queue
+      await new Promise((r) => setTimeout(r, 10));
+
+      const pending = pendingQueue.list();
+      expect(pending).toHaveLength(1);
+
+      pendingQueue.deny(pending[0]!.id);
+      expect(await promise).toBe(false);
+    });
+
+    test("still auto-denies when no TTY and no pendingQueue", async () => {
+      const { confirmProdAccess } = createConfirmModule({
+        spawn: mockSpawn(127),
+        platform: "linux",
+        isTTY: false,
+      });
+      const result = await confirmProdAccess("user@example.com");
+      expect(result).toBe(false);
+    });
+
+    test("does not use pendingQueue when GUI succeeds", async () => {
+      const pendingQueue = createPendingQueue({ timeoutMs: 5000, now: () => 1_000_000 });
+      const { confirmProdAccess } = createConfirmModule({
+        spawn: mockSpawn(0),
+        platform: "linux",
+        isTTY: false,
+        pendingQueue,
+      });
+
+      const result = await confirmProdAccess("user@example.com");
+      expect(result).toBe(true);
+      expect(pendingQueue.list()).toHaveLength(0);
     });
   });
 });

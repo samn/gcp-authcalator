@@ -243,17 +243,20 @@ gcp-authcalator gate \
 
 **API endpoints** (over Unix socket or TCP+mTLS):
 
-| Endpoint                  | Behavior                                                               |
-| ------------------------- | ---------------------------------------------------------------------- |
-| `GET /token`              | Returns a dev-scoped access token (impersonated service account)       |
-| `GET /token?level=prod`   | Prompts for confirmation, then returns the engineer's own token        |
-| `GET /token?session=<id>` | Refreshes a token within a pre-approved prod session                   |
-| `POST /session`           | Creates a prod session (with confirmation), returns session ID + token |
-| `DELETE /session?id=<id>` | Revokes a prod session                                                 |
-| `GET /identity`           | Returns the authenticated user's email                                 |
-| `GET /project-number`     | Returns the numeric GCP project ID                                     |
-| `GET /universe-domain`    | Returns the GCP universe domain                                        |
-| `GET /health`             | Returns `{ "status": "ok", "uptime_seconds": N }`                      |
+| Endpoint                    | Behavior                                                               |
+| --------------------------- | ---------------------------------------------------------------------- |
+| `GET /token`                | Returns a dev-scoped access token (impersonated service account)       |
+| `GET /token?level=prod`     | Prompts for confirmation, then returns the engineer's own token        |
+| `GET /token?session=<id>`   | Refreshes a token within a pre-approved prod session                   |
+| `POST /session`             | Creates a prod session (with confirmation), returns session ID + token |
+| `DELETE /session?id=<id>`   | Revokes a prod session                                                 |
+| `GET /identity`             | Returns the authenticated user's email                                 |
+| `GET /project-number`       | Returns the numeric GCP project ID                                     |
+| `GET /universe-domain`      | Returns the GCP universe domain                                        |
+| `GET /pending`              | Lists pending approval requests (for CLI-based approval)               |
+| `POST /pending/:id/approve` | Approves a pending request by ID                                       |
+| `POST /pending/:id/deny`    | Denies a pending request by ID                                         |
+| `GET /health`               | Returns `{ "status": "ok", "uptime_seconds": N }`                      |
 
 Both `/token` and `/token?level=prod` accept an optional `scopes` query parameter (comma-separated) to request tokens with specific OAuth scopes. For example: `/token?scopes=https://www.googleapis.com/auth/sqlservice.login`. When omitted, tokens are minted with the default `cloud-platform` scope.
 
@@ -263,7 +266,8 @@ Both `/token` and `/token?level=prod` accept an optional `scopes` query paramete
 
 1. Shows a desktop confirmation dialog (`osascript` on macOS, `zenity` on Linux)
 2. Falls back to a terminal prompt if no GUI is available
-3. Denies access if no interactive method is available
+3. Falls back to a pending approval queue for CLI-based approval (see `approve` command)
+4. Denies access if no interactive method is available and the request times out (120 seconds)
 
 Prod token requests are rate-limited: one confirmation dialog at a time, a 5-second cooldown after denial, and a maximum of 5 attempts per minute.
 
@@ -332,6 +336,25 @@ This command:
 8. Revokes the session on exit (best-effort cleanup)
 
 The temporary proxy uses PID-based process restriction — only the wrapped command and its descendants can request tokens from it. The session ID (which authorizes token refresh) stays in the `with-prod` process and never reaches the subprocess — an attacker inside the subprocess cannot refresh tokens independently.
+
+### `approve` — CLI approval of pending requests
+
+Lists, approves, or denies pending prod access requests on the gate server. This is the CLI fallback for environments where GUI dialogs and terminal prompts are unavailable (headless servers, containers without a display, CI).
+
+```bash
+# List pending requests:
+gcp-authcalator approve
+
+# Approve a request by ID:
+gcp-authcalator approve abc12def
+
+# Deny a request by ID:
+gcp-authcalator approve --deny abc12def
+```
+
+When the gate's confirmation module cannot show a GUI dialog or terminal prompt, it queues the request and logs the request ID to stderr with instructions. The request auto-denies after 120 seconds if not resolved.
+
+The `approve` command connects to the gate via the same Unix socket or TCP+mTLS transport as other commands. It does not require `--project-id` — only `--socket-path` (or `--gate-url` for remote).
 
 ### `init-tls` — TLS certificate management
 
@@ -549,7 +572,7 @@ gcp-authcalator is designed for environments where a coding agent (or other untr
 - **Credentials never enter the container.** The host daemon holds ADC; the container only receives short-lived, downscoped tokens. Even if the container is fully compromised, the attacker gets only a dev service account token — not the engineer's identity.
 - **Cross-user isolation.** The Unix socket is set to `0600` (owner-only) and lives in a `0700` directory (`$XDG_RUNTIME_DIR` or `~/.gcp-authcalator/`). Processes running as other OS users cannot connect. **For strongest isolation, run coding agents as a separate OS user** — they will be unable to access the socket at all.
 - **Mutual TLS for remote transport.** When using TCP for remote devcontainers, both gate and the client verify each other's identity via self-signed certificates. The gate only listens on localhost (port forwarding is required for remote access). The `gate_url` config option enforces `https://` — plaintext `http://` connections are rejected at config parse time.
-- **Human-in-the-loop for production access.** Prod tokens require explicit confirmation via a desktop dialog (`osascript` on macOS, `zenity` on Linux) or terminal prompt on the host. If no interactive method is available, access is denied.
+- **Human-in-the-loop for production access.** Prod tokens require explicit confirmation via a desktop dialog (`osascript` on macOS, `zenity` on Linux), terminal prompt, or CLI approval (`gcp-authcalator approve`) on the host. If no method resolves within 120 seconds, access is denied.
 - **Rate limiting** prevents automated brute-forcing of the confirmation flow: one dialog at a time, a 5-second cooldown after denial, and a maximum of 5 attempts per minute.
 
 **Best-effort protections** (defense in depth against same-user attacks):

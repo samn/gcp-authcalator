@@ -5,6 +5,7 @@
 import type { ProdRateLimiter } from "./rate-limit.ts";
 import type { PamGrantResult } from "./pam.ts";
 import type { SessionManager } from "./session.ts";
+import type { PendingQueue } from "./pending.ts";
 
 /** A cached GCP access token with its expiry time. */
 export interface CachedToken {
@@ -97,4 +98,6 @@ export interface GateDeps {
   sessionManager: SessionManager;
   /** Default session TTL in seconds from config. */
   sessionTtlSeconds: number;
+  /** Pending approval queue for CLI-based confirmation fallback. */
+  pendingQueue?: PendingQueue;
 }

@@ -1,4 +1,5 @@
 import type { Subprocess } from "bun";
+import type { PendingQueue } from "./pending.ts";
 
 type SpawnFn = (cmd: string[], opts?: { stdin?: "pipe" | "inherit" }) => Subprocess;
 
@@ -9,6 +10,8 @@ export interface ConfirmOptions {
   platform?: string;
   /** Override process.stdin.isTTY for testing. */
   isTTY?: boolean;
+  /** Optional pending queue for CLI-based approval when no GUI/TTY is available. */
+  pendingQueue?: PendingQueue;
 }
 
 /**
@@ -24,6 +27,7 @@ export function createConfirmModule(options: ConfirmOptions = {}): {
   const spawnFn = options.spawn ?? (Bun.spawn as unknown as SpawnFn);
   const platform = options.platform ?? process.platform;
   const isTTY = options.isTTY ?? !!process.stdin.isTTY;
+  const pendingQueue = options.pendingQueue;
 
   async function confirmProdAccess(
     email: string,
@@ -39,8 +43,19 @@ export function createConfirmModule(options: ConfirmOptions = {}): {
       // GUI not available, fall through to terminal
     }
 
-    // Fallback to terminal prompt
-    return tryTerminalPrompt(email, isTTY, command, pamPolicy);
+    // Fallback to terminal prompt if TTY is available
+    if (isTTY) {
+      return tryTerminalPrompt(email, command, pamPolicy);
+    }
+
+    // Fallback to pending queue for CLI-based approval
+    if (pendingQueue) {
+      console.error("confirm: no interactive method available, queuing for CLI approval");
+      return pendingQueue.enqueue(email, command, pamPolicy);
+    }
+
+    console.error("confirm: no interactive method available, denying prod access");
+    return false;
   }
 
   return { confirmProdAccess };
@@ -118,15 +133,9 @@ async function tryOsascript(
 
 async function tryTerminalPrompt(
   email: string,
-  isTTY: boolean,
   command?: string,
   pamPolicy?: string,
 ): Promise<boolean> {
-  if (!isTTY) {
-    console.error("confirm: no interactive method available, denying prod access");
-    return false;
-  }
-
   if (command) {
     process.stdout.write(`gcp-gate: Reported command: ${command}\n`);
   }

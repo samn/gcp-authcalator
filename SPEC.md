@@ -127,17 +127,20 @@ A small HTTP server using the `google-auth-library` library. Runs on the host ma
 
 **API (over Unix socket or TCP+mTLS):**
 
-| Endpoint                | Behavior                                                                 |
-| ----------------------- | ------------------------------------------------------------------------ |
-| `GET /token`            | Impersonates the default SA, returns access token immediately            |
-| `GET /token?level=prod` | Shows host-side confirmation, then returns token for engineer's identity |
-| `GET /identity`         | Returns the authenticated user's email                                   |
-| `GET /project-number`   | Returns the numeric project ID (resolved via Cloud Resource Manager API) |
-| `GET /universe-domain`  | Returns the GCP universe domain (resolved via GoogleAuth)                |
-| `POST /session`         | Create a prod session (confirmation + PAM), returns session ID + token   |
-| `DELETE /session?id=..` | Revoke a prod session                                                    |
-| `GET /token?session=..` | Refresh token within a pre-approved session (no confirmation)            |
-| `GET /health`           | Health check                                                             |
+| Endpoint                    | Behavior                                                                 |
+| --------------------------- | ------------------------------------------------------------------------ |
+| `GET /token`                | Impersonates the default SA, returns access token immediately            |
+| `GET /token?level=prod`     | Shows host-side confirmation, then returns token for engineer's identity |
+| `GET /identity`             | Returns the authenticated user's email                                   |
+| `GET /project-number`       | Returns the numeric project ID (resolved via Cloud Resource Manager API) |
+| `GET /universe-domain`      | Returns the GCP universe domain (resolved via GoogleAuth)                |
+| `POST /session`             | Create a prod session (confirmation + PAM), returns session ID + token   |
+| `DELETE /session?id=..`     | Revoke a prod session                                                    |
+| `GET /token?session=..`     | Refresh token within a pre-approved session (no confirmation)            |
+| `GET /pending`              | List pending approval requests (for CLI-based approval)                  |
+| `POST /pending/:id/approve` | Approve a pending request by ID                                          |
+| `POST /pending/:id/deny`    | Deny a pending request by ID                                             |
+| `GET /health`               | Health check                                                             |
 
 Both token endpoints accept an optional `scopes` query parameter (comma-separated) to request tokens with specific OAuth scopes (e.g., `GET /token?scopes=https://www.googleapis.com/auth/sqlservice.login`). Defaults to `cloud-platform`.
 
@@ -147,7 +150,8 @@ Both token endpoints accept an optional `scopes` query parameter (comma-separate
 
 1. Desktop dialog via `zenity` (Linux) or `osascript` (macOS) with approve/deny (60-second timeout)
 2. Fallback: terminal prompt on the host (if TTY is available)
-3. Deny by default if no interactive method is available
+3. Fallback: pending approval queue for CLI-based approval via `gcp-authcalator approve` (120-second timeout)
+4. Deny by default if no interactive method is available and the request times out
 
 **Rate limiting:** Single-flight lock (one dialog at a time), 5-second cooldown after denial, maximum 5 attempts per minute. This prevents automated brute-forcing of the confirmation flow.
 
@@ -224,7 +228,19 @@ The actual implementation adds several security hardening measures beyond this p
 
 Usage: `with-prod -- python some/script.py`, `with-prod -- gcloud sql instances list`, `with-prod -- alembic upgrade head`
 
-### 5. `init-tls` -- TLS Certificate Management
+### 5. `approve` -- CLI Approval of Pending Requests
+
+When the gate's confirmation module cannot show a GUI dialog or terminal prompt (headless environments, containers without a display), prod access requests are queued as pending. The `approve` command connects to the gate and provides CLI-based approval:
+
+- `gcp-authcalator approve` — List all pending requests with IDs, emails, commands, and time remaining
+- `gcp-authcalator approve <id>` — Approve a pending request by its 8-character hex ID
+- `gcp-authcalator approve --deny <id>` — Deny a pending request
+
+Pending requests auto-deny after 120 seconds (2x the GUI dialog timeout, to allow time for terminal switching). The gate logs request IDs and approval instructions to stderr when a request is queued.
+
+The `approve` command uses the same gate connection (Unix socket or TCP+mTLS) as other commands. It does not require `--project-id` — only the socket path or gate URL is needed.
+
+### 6. `init-tls` -- TLS Certificate Management
 
 Generates and manages TLS certificates for remote devcontainer support:
 
@@ -234,7 +250,7 @@ Generates and manages TLS certificates for remote devcontainer support:
 
 Certificates are stored in `~/.gcp-authcalator/tls/` with `0600` permissions (directory `0700`). This is intentionally different from the socket directory — certificates must survive reboots (90-day lifetime), while the Unix socket is ephemeral runtime state.
 
-### 6. Remote Transport Configuration
+### 7. Remote Transport Configuration
 
 New config options and env vars for remote devcontainer support:
 
