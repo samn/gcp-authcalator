@@ -28,6 +28,18 @@ export function getDefaultSocketPath(): string {
   return join(getDefaultRuntimeDir(), "gcp-authcalator.sock");
 }
 
+/**
+ * Default admin socket path in /tmp.
+ *
+ * Uses /tmp because host /tmp is almost never mounted into containers
+ * (containers get their own tmpfs), keeping the admin socket unreachable
+ * from devcontainer processes.
+ */
+export function getDefaultAdminSocketPath(): string {
+  const uid = process.getuid?.() ?? 0;
+  return join(`/tmp/gcp-authcalator-admin-${uid}`, "admin.sock");
+}
+
 // ---------------------------------------------------------------------------
 // Path helpers
 // ---------------------------------------------------------------------------
@@ -54,6 +66,7 @@ export const ConfigSchema = z.object({
   project_id: z.string().min(1).optional(),
   service_account: z.email().optional(),
   socket_path: z.string().min(1).default(getDefaultSocketPath).transform(expandTilde),
+  admin_socket_path: z.string().min(1).default(getDefaultAdminSocketPath).transform(expandTilde),
   port: z.coerce.number().int().min(1).max(65535).default(8173),
   gate_tls_port: z.coerce.number().int().min(1).max(65535).optional(),
   tls_dir: z.string().min(1).transform(expandTilde).optional(),
@@ -110,6 +123,7 @@ const cliToConfigKey: Record<string, keyof Config> = {
   "project-id": "project_id",
   "service-account": "service_account",
   "socket-path": "socket_path",
+  "admin-socket-path": "admin_socket_path",
   port: "port",
   "gate-tls-port": "gate_tls_port",
   "tls-dir": "tls_dir",
@@ -155,6 +169,7 @@ const configKeys: readonly (keyof Config)[] = [
   "project_id",
   "service_account",
   "socket_path",
+  "admin_socket_path",
   "port",
   "gate_tls_port",
   "tls_dir",

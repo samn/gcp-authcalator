@@ -28,17 +28,6 @@ export async function handleRequest(req: Request, deps: GateDeps): Promise<Respo
     return jsonResponse({ error: "Method not allowed" }, 405);
   }
 
-  // /pending routes
-  if (url.pathname.startsWith("/pending")) {
-    if (url.pathname === "/pending" && req.method === "GET") {
-      return handleListPending(deps);
-    }
-    const pendingMatch = url.pathname.match(/^\/pending\/([a-f0-9]+)\/(approve|deny)$/);
-    if (pendingMatch && req.method === "POST") {
-      return handleResolvePending(pendingMatch[1]!, pendingMatch[2] as "approve" | "deny", deps);
-    }
-  }
-
   if (req.method !== "GET") {
     return jsonResponse({ error: "Method not allowed" }, 405);
   }
@@ -293,8 +282,14 @@ async function acquireProdAccess(
 
     const commandArr = parseCommandHeader(req.headers.get("X-Wrapped-Command"));
     const commandSummary = commandArr ? summarizeCommand(commandArr) : undefined;
+    const pendingId = req.headers.get("X-Pending-Id") ?? undefined;
 
-    const approved = await deps.confirmProdAccess(email, commandSummary, effectivePamPolicy);
+    const approved = await deps.confirmProdAccess(
+      email,
+      commandSummary,
+      effectivePamPolicy,
+      pendingId,
+    );
     if (!approved) {
       deps.prodRateLimiter.release("denied");
       deps.writeAuditLog({
@@ -516,14 +511,11 @@ function handleRevokeSession(url: URL, deps: GateDeps): Response {
   return jsonResponse({ status: "revoked" });
 }
 
-function handleListPending(deps: GateDeps): Response {
-  if (!deps.pendingQueue) {
-    return jsonResponse({ error: "Pending queue not enabled" }, 501);
-  }
-  return jsonResponse({ pending: deps.pendingQueue.list() });
-}
-
-function handleResolvePending(id: string, action: "approve" | "deny", deps: GateDeps): Response {
+export function handleResolvePending(
+  id: string,
+  action: "approve" | "deny",
+  deps: GateDeps,
+): Response {
   if (!deps.pendingQueue) {
     return jsonResponse({ error: "Pending queue not enabled" }, 501);
   }

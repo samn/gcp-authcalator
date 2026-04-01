@@ -22,7 +22,12 @@ export interface ConfirmOptions {
  * Default: deny if no interactive method is available.
  */
 export function createConfirmModule(options: ConfirmOptions = {}): {
-  confirmProdAccess: (email: string, command?: string) => Promise<boolean>;
+  confirmProdAccess: (
+    email: string,
+    command?: string,
+    pamPolicy?: string,
+    pendingId?: string,
+  ) => Promise<boolean>;
 } {
   const spawnFn = options.spawn ?? (Bun.spawn as unknown as SpawnFn);
   const platform = options.platform ?? process.platform;
@@ -33,6 +38,7 @@ export function createConfirmModule(options: ConfirmOptions = {}): {
     email: string,
     command?: string,
     pamPolicy?: string,
+    pendingId?: string,
   ): Promise<boolean> {
     const tryGui = platform === "darwin" ? tryOsascript : tryZenity;
 
@@ -51,7 +57,7 @@ export function createConfirmModule(options: ConfirmOptions = {}): {
     // Fallback to pending queue for CLI-based approval
     if (pendingQueue) {
       console.error("confirm: no interactive method available, queuing for CLI approval");
-      return pendingQueue.enqueue(email, command, pamPolicy);
+      return pendingQueue.enqueue(email, command, pamPolicy, pendingId);
     }
 
     console.error("confirm: no interactive method available, denying prod access");

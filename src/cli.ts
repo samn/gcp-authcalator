@@ -57,6 +57,7 @@ Options:
   --project-id <id>        GCP project ID
   --service-account <email> Service account email to impersonate
   --socket-path <path>     Unix socket path (default: $XDG_RUNTIME_DIR/gcp-authcalator.sock)
+  --admin-socket-path <path>  Admin socket path for approve/deny (default: /tmp/gcp-authcalator-admin-<uid>/admin.sock)
   -p, --port <port>        Metadata proxy port (default: 8173)
   --gate-tls-port <port>        Gate TCP+mTLS listener port (enables remote devcontainer support)
   --tls-dir <path>         TLS certificate directory (default: ~/.gcp-authcalator/tls/)
@@ -110,6 +111,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       "project-id": { type: "string" },
       "service-account": { type: "string" },
       "socket-path": { type: "string" },
+      "admin-socket-path": { type: "string" },
       port: { type: "string", short: "p" },
       "gate-tls-port": { type: "string" },
       "tls-dir": { type: "string" },

@@ -8,6 +8,7 @@ import { createAuditModule } from "./audit.ts";
 import { createProdRateLimiter } from "./rate-limit.ts";
 import { createSessionManager } from "./session.ts";
 import { handleRequest } from "./handlers.ts";
+import { handleAdminRequest } from "./admin-handlers.ts";
 import { loadAndValidateTlsFiles } from "../tls/store.ts";
 import type { BunRequestInit } from "./connection.ts";
 import { createPamModule, resolveEntitlementPath, type PamModule } from "./pam.ts";
@@ -16,6 +17,7 @@ import { createPendingQueue } from "./pending.ts";
 export interface GateServerResult {
   server: ReturnType<typeof Bun.serve>;
   tcpServer?: ReturnType<typeof Bun.serve>;
+  adminServer: ReturnType<typeof Bun.serve>;
   stop: () => void;
 }
 
@@ -185,9 +187,43 @@ export async function startGateServer(
     });
   }
 
-  // Capture the inode so stop() only removes the socket we created,
-  // not one created by a replacement instance.
+  // --- Admin socket (for approve/deny — NOT mounted into containers) ---
+  const adminSocketDir = dirname(config.admin_socket_path);
+  mkdirSync(adminSocketDir, { recursive: true, mode: 0o700 });
+
+  if (existsSync(config.admin_socket_path)) {
+    const adminStat = lstatSync(config.admin_socket_path);
+    if (adminStat.isSymbolicLink()) {
+      throw new Error(
+        `gate: admin socket path is a symlink — refusing to remove: ${config.admin_socket_path}`,
+      );
+    }
+    if (!adminStat.isSocket()) {
+      throw new Error(
+        `gate: admin socket path exists but is not a socket — refusing to remove: ${config.admin_socket_path}`,
+      );
+    }
+    if (adminStat.uid !== process.getuid!()) {
+      throw new Error(
+        `gate: admin socket is owned by uid ${adminStat.uid}, not current user (${process.getuid!()}) — refusing to remove: ${config.admin_socket_path}`,
+      );
+    }
+    unlinkSync(config.admin_socket_path);
+  }
+
+  const adminServer = Bun.serve({
+    unix: config.admin_socket_path,
+    fetch(req) {
+      return handleAdminRequest(req, deps);
+    },
+  });
+
+  chmodSync(config.admin_socket_path, 0o600);
+
+  // Capture inodes so stop() only removes the sockets we created,
+  // not ones created by a replacement instance.
   const socketIno = lstatSync(config.socket_path).ino;
+  const adminSocketIno = lstatSync(config.admin_socket_path).ino;
 
   function stop() {
     try {
@@ -201,10 +237,25 @@ export async function startGateServer(
       // Already stopped
     }
     try {
+      adminServer.stop(true);
+    } catch {
+      // Already stopped
+    }
+    try {
       if (existsSync(config.socket_path)) {
         const current = lstatSync(config.socket_path);
         if (current.ino === socketIno && !current.isSymbolicLink()) {
           unlinkSync(config.socket_path);
+        }
+      }
+    } catch {
+      // Ignore cleanup errors
+    }
+    try {
+      if (existsSync(config.admin_socket_path)) {
+        const current = lstatSync(config.admin_socket_path);
+        if (current.ino === adminSocketIno && !current.isSymbolicLink()) {
+          unlinkSync(config.admin_socket_path);
         }
       }
     } catch {
@@ -232,6 +283,7 @@ export async function startGateServer(
   console.log(`  token TTL:       ${defaultTokenTtlSeconds}s`);
   console.log(`  session TTL:     ${sessionTtlSeconds}s`);
   console.log(`  socket path:     ${config.socket_path}`);
+  console.log(`  admin socket:    ${config.admin_socket_path}`);
   if (tcpServer) {
     console.log(`  tcp listener:    127.0.0.1:${config.gate_tls_port} (mTLS)`);
   }
@@ -239,7 +291,7 @@ export async function startGateServer(
     console.log(`  pam policy:      ${config.pam_policy} (default)`);
     console.log(`  pam allowlist:   ${pamAllowedPolicies!.size} entitlement(s)`);
   }
-  console.log("  endpoints:");
+  console.log("  endpoints (main socket):");
   console.log("    GET /token                   → dev-scoped access token");
   console.log("    GET /token?level=prod        → prod token (with confirmation)");
   console.log("    GET /identity                → authenticated user email");
@@ -247,10 +299,11 @@ export async function startGateServer(
   console.log("    GET /universe-domain         → GCP universe domain");
   console.log("    POST /session                → create prod session (with confirmation)");
   console.log("    DELETE /session              → revoke prod session");
-  console.log("    GET /pending                 → list pending approval requests");
+  console.log("    GET /health                  → health check");
+  console.log("  endpoints (admin socket):");
   console.log("    POST /pending/:id/approve    → approve pending request");
   console.log("    POST /pending/:id/deny       → deny pending request");
   console.log("    GET /health                  → health check");
 
-  return { server, tcpServer, stop };
+  return { server, tcpServer, adminServer, stop };
 }

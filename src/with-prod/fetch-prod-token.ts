@@ -13,6 +13,8 @@ export interface FetchProdTokenOptions {
   tokenTtlSeconds?: number;
   /** Session TTL override in seconds (for createProdSession). */
   sessionTtlSeconds?: number;
+  /** Client-generated pending ID for CLI approval flow (32 hex chars). */
+  pendingId?: string;
 }
 
 export interface ProdTokenResult {
@@ -42,6 +44,9 @@ export async function fetchProdToken(
   const headers: Record<string, string> = {};
   if (options.command && options.command.length > 0) {
     headers["X-Wrapped-Command"] = JSON.stringify(options.command);
+  }
+  if (options.pendingId) {
+    headers["X-Pending-Id"] = options.pendingId;
   }
 
   const fetchOpts = { ...extraOpts, headers };
@@ -119,6 +124,9 @@ export async function createProdSession(
   const headers: Record<string, string> = {};
   if (options.command && options.command.length > 0) {
     headers["X-Wrapped-Command"] = JSON.stringify(options.command);
+  }
+  if (options.pendingId) {
+    headers["X-Pending-Id"] = options.pendingId;
   }
 
   let sessionUrl = `${baseUrl}/session`;

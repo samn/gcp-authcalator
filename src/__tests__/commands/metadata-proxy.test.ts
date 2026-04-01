@@ -8,6 +8,7 @@ describe("runMetadataProxy", () => {
       runMetadataProxy({
         socket_path: "/tmp/gate.sock",
         port: 8173,
+        admin_socket_path: "/tmp/test-admin.sock",
       }),
     ).rejects.toThrow(z.ZodError);
   });
@@ -24,6 +25,7 @@ describe("runMetadataProxy", () => {
           project_id: "test-project",
           socket_path: "/tmp/nonexistent-test-gate.sock",
           port: 19999,
+          admin_socket_path: "/tmp/test-admin.sock",
         }),
       ).rejects.toThrow("process.exit(1)");
 
@@ -62,6 +64,7 @@ describe("runMetadataProxy", () => {
           project_id: "test-project",
           socket_path: socketPath,
           port: 19999,
+          admin_socket_path: "/tmp/test-admin.sock",
         }),
       ).rejects.toThrow("process.exit(1)");
 

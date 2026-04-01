@@ -103,15 +103,15 @@ describe("createPendingQueue", () => {
     expect(await p2).toBe(false);
   });
 
-  test("request IDs are 8-char hex strings", () => {
+  test("auto-generated IDs are 32-char hex strings", () => {
     const queue = createPendingQueue(baseOpts);
     queue.enqueue("user@example.com");
     const [req] = queue.list();
-    expect(req!.id).toHaveLength(8);
-    expect(req!.id).toMatch(/^[0-9a-f]{8}$/);
+    expect(req!.id).toHaveLength(32);
+    expect(req!.id).toMatch(/^[0-9a-f]{32}$/);
   });
 
-  test("request IDs are unique", () => {
+  test("auto-generated IDs are unique", () => {
     const queue = createPendingQueue(baseOpts);
     const ids = new Set<string>();
     for (let i = 0; i < 50; i++) {
@@ -121,6 +121,41 @@ describe("createPendingQueue", () => {
       ids.add(req.id);
     }
     expect(ids.size).toBe(50);
+  });
+
+  test("accepts a valid client-provided ID", async () => {
+    const queue = createPendingQueue(baseOpts);
+    const clientId = "a".repeat(32);
+    const promise = queue.enqueue("user@example.com", "cmd", undefined, clientId);
+    const [req] = queue.list();
+
+    expect(req!.id).toBe(clientId);
+    queue.approve(clientId);
+    expect(await promise).toBe(true);
+  });
+
+  test("rejects client-provided ID with wrong length", () => {
+    const queue = createPendingQueue(baseOpts);
+    expect(() => queue.enqueue("user@example.com", undefined, undefined, "tooshort")).toThrow(
+      "Invalid pending ID format",
+    );
+  });
+
+  test("rejects client-provided ID with uppercase chars", () => {
+    const queue = createPendingQueue(baseOpts);
+    expect(() => queue.enqueue("user@example.com", undefined, undefined, "A".repeat(32))).toThrow(
+      "Invalid pending ID format",
+    );
+  });
+
+  test("rejects duplicate client-provided ID", () => {
+    const queue = createPendingQueue(baseOpts);
+    const clientId = "b".repeat(32);
+    queue.enqueue("a@example.com", undefined, undefined, clientId);
+
+    expect(() => queue.enqueue("b@example.com", undefined, undefined, clientId)).toThrow(
+      "Pending ID already in use",
+    );
   });
 
   test("createdAt and expiresAt are set correctly", () => {

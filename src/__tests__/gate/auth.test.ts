@@ -7,6 +7,7 @@ const TEST_CONFIG: GateConfig = {
   project_id: "test-project",
   service_account: "sa@test-project.iam.gserviceaccount.com",
   socket_path: "/tmp/test.sock",
+  admin_socket_path: "/tmp/test-admin.sock",
   port: 8173,
 };
 
