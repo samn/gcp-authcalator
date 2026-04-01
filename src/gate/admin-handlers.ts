@@ -1,11 +1,5 @@
 import type { GateDeps } from "./types.ts";
-import { handleResolvePending } from "./handlers.ts";
-
-const JSON_HEADERS = { "Content-Type": "application/json" };
-
-function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
-}
+import { handleResolvePending, jsonResponse } from "./handlers.ts";
 
 /**
  * Request handler for the admin socket.
@@ -22,7 +16,7 @@ export async function handleAdminRequest(req: Request, deps: GateDeps): Promise<
     return jsonResponse({ status: "ok", uptime_seconds: Math.floor(uptimeMs / 1000) });
   }
 
-  const pendingMatch = url.pathname.match(/^\/pending\/([a-f0-9]+)\/(approve|deny)$/);
+  const pendingMatch = url.pathname.match(/^\/pending\/([a-f0-9]{32})\/(approve|deny)$/);
   if (pendingMatch && req.method === "POST") {
     return handleResolvePending(pendingMatch[1]!, pendingMatch[2] as "approve" | "deny", deps);
   }

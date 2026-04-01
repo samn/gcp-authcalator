@@ -4,32 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createPendingQueue } from "../../gate/pending.ts";
 import { handleAdminRequest } from "../../gate/admin-handlers.ts";
-import type { GateDeps, CachedToken } from "../../gate/types.ts";
-import { createProdRateLimiter } from "../../gate/rate-limit.ts";
-import { createSessionManager } from "../../gate/session.ts";
-
-function makeDeps(overrides: Partial<GateDeps> = {}): GateDeps {
-  const token: CachedToken = {
-    access_token: "test-access-token",
-    expires_at: new Date(Date.now() + 3600 * 1000),
-  };
-
-  return {
-    mintDevToken: async () => token,
-    mintProdToken: async () => token,
-    getIdentityEmail: async () => "user@example.com",
-    getProjectNumber: async () => "123456789012",
-    getUniverseDomain: async () => "googleapis.com",
-    confirmProdAccess: async () => true,
-    writeAuditLog: () => {},
-    prodRateLimiter: createProdRateLimiter(),
-    startTime: new Date(Date.now() - 60_000),
-    defaultTokenTtlSeconds: 3600,
-    sessionManager: createSessionManager(),
-    sessionTtlSeconds: 28800,
-    ...overrides,
-  };
-}
+import { makeGateDeps as makeDeps } from "../gate/test-helpers.ts";
 
 describe("approve command (admin socket)", () => {
   let server: ReturnType<typeof Bun.serve> | null = null;

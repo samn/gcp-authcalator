@@ -1,36 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { handleRequest } from "../../gate/handlers.ts";
-import type { GateDeps, AuditEntry, CachedToken } from "../../gate/types.ts";
-import { createProdRateLimiter } from "../../gate/rate-limit.ts";
+import type { AuditEntry, CachedToken } from "../../gate/types.ts";
 import type { ProdRateLimiter } from "../../gate/rate-limit.ts";
 import { createSessionManager } from "../../gate/session.ts";
 import { createPendingQueue } from "../../gate/pending.ts";
-
-function makeDeps(overrides: Partial<GateDeps> = {}): GateDeps {
-  const token: CachedToken = {
-    access_token: "test-access-token",
-    expires_at: new Date(Date.now() + 3600 * 1000),
-  };
-
-  return {
-    mintDevToken: async () => token,
-    mintProdToken: async () => ({
-      access_token: "prod-access-token",
-      expires_at: new Date(Date.now() + 3600 * 1000),
-    }),
-    getIdentityEmail: async () => "user@example.com",
-    getProjectNumber: async () => "123456789012",
-    getUniverseDomain: async () => "googleapis.com",
-    confirmProdAccess: async () => true,
-    writeAuditLog: () => {},
-    prodRateLimiter: createProdRateLimiter(),
-    startTime: new Date(Date.now() - 60_000),
-    defaultTokenTtlSeconds: 3600,
-    sessionManager: createSessionManager(),
-    sessionTtlSeconds: 28800,
-    ...overrides,
-  };
-}
+import { makeGateDeps as makeDeps, makeRequest } from "./test-helpers.ts";
 
 /** A rate limiter that always blocks. */
 function blockedRateLimiter(reason = "rate limited"): ProdRateLimiter {
@@ -38,10 +12,6 @@ function blockedRateLimiter(reason = "rate limited"): ProdRateLimiter {
     acquire: () => ({ allowed: false, reason }),
     release: () => {},
   };
-}
-
-function makeRequest(path: string, method = "GET", headers?: Record<string, string>): Request {
-  return new Request(`http://localhost${path}`, { method, headers });
 }
 
 // ---------------------------------------------------------------------------
@@ -1391,14 +1361,14 @@ describe("/pending routes on main socket", () => {
     expect(res.status).toBe(404);
   });
 
-  test("POST /pending/:id/approve returns 404 on main socket", async () => {
+  test("POST /pending/:id/approve returns 405 on main socket", async () => {
     const pendingQueue = createPendingQueue({ timeoutMs: 5000, now: () => 1_000_000 });
     const deps = makeDeps({ pendingQueue });
     const res = await handleRequest(makeRequest("/pending/deadbeef/approve", "POST"), deps);
     expect(res.status).toBe(405);
   });
 
-  test("POST /pending/:id/deny returns 404 on main socket", async () => {
+  test("POST /pending/:id/deny returns 405 on main socket", async () => {
     const pendingQueue = createPendingQueue({ timeoutMs: 5000, now: () => 1_000_000 });
     const deps = makeDeps({ pendingQueue });
     const res = await handleRequest(makeRequest("/pending/deadbeef/deny", "POST"), deps);

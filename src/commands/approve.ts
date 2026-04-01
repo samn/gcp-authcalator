@@ -1,8 +1,6 @@
 import type { Config } from "../config.ts";
+import type { BunRequestInit } from "../gate/connection.ts";
 import type { ErrorResponse } from "../gate/types.ts";
-
-/** Bun-specific extension of RequestInit with `unix` field. */
-type BunRequestInit = RequestInit & { unix?: string };
 
 interface ResolveResponse {
   status: string;
