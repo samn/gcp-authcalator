@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [0.7.0] - 2026-04-01
+
 ### Added
 
 - Multi-arch Docker image (`linux/amd64`, `linux/arm64`) published to `ghcr.io/samn/gcp-authcalator` on every release, using a minimal distroless base image
