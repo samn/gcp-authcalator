@@ -180,10 +180,22 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
   }
 
   if (subcommand === "approve") {
-    const { env: _envPairs, ...scalarVals } = values;
-    const approveConfig = loadConfig(mapCliArgs(scalarVals), values.config);
-    const id = positionals[1];
-    await runApprove(approveConfig, id ? [id] : [], { deny: !!values.deny });
+    try {
+      const { env: _envPairs, ...scalarVals } = values;
+      const approveConfig = loadConfig(mapCliArgs(scalarVals), values.config);
+      const id = positionals[1];
+      await runApprove(approveConfig, id ? [id] : [], { deny: !!values.deny });
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        console.error("error: invalid configuration for 'approve'");
+        for (const issue of err.issues) {
+          console.error(`  ${issue.path.join(".")}: ${issue.message}`);
+        }
+        process.exit(1);
+      }
+      console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
     return;
   }
 

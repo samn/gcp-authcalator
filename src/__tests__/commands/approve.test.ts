@@ -14,14 +14,18 @@ describe("approve command", () => {
     }
   });
 
-  function startFakeGate(pendingQueue: ReturnType<typeof createPendingQueue>, socketPath: string) {
+  function setup() {
+    const dir = mkdtempSync(join(tmpdir(), "approve-test-"));
+    const socketPath = join(dir, "gate.sock");
+    const queue = createPendingQueue({ timeoutMs: 30000, now: () => Date.now() });
+
     server = Bun.serve({
       unix: socketPath,
       fetch(req) {
         const url = new URL(req.url, "http://localhost");
 
         if (url.pathname === "/pending" && req.method === "GET") {
-          return new Response(JSON.stringify({ pending: pendingQueue.list() }), {
+          return new Response(JSON.stringify({ pending: queue.list() }), {
             headers: { "Content-Type": "application/json" },
           });
         }
@@ -29,8 +33,7 @@ describe("approve command", () => {
         const match = url.pathname.match(/^\/pending\/([a-f0-9]+)\/(approve|deny)$/);
         if (match && req.method === "POST") {
           const [, id, action] = match;
-          const resolved =
-            action === "approve" ? pendingQueue.approve(id!) : pendingQueue.deny(id!);
+          const resolved = action === "approve" ? queue.approve(id!) : queue.deny(id!);
           if (!resolved) {
             return new Response(JSON.stringify({ error: "Request not found or expired" }), {
               status: 404,
@@ -49,16 +52,13 @@ describe("approve command", () => {
         });
       },
     });
-    return server;
+
+    return { socketPath, queue };
   }
 
   test("lists pending requests via gate socket", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "approve-test-"));
-    const socketPath = join(dir, "gate.sock");
-    const queue = createPendingQueue({ timeoutMs: 30000, now: () => Date.now() });
+    const { socketPath, queue } = setup();
     queue.enqueue("user@example.com", "gcloud compute list");
-
-    startFakeGate(queue, socketPath);
 
     const res = await fetch("http://localhost/pending", {
       unix: socketPath,
@@ -72,13 +72,9 @@ describe("approve command", () => {
   });
 
   test("approves a pending request via gate socket", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "approve-test-"));
-    const socketPath = join(dir, "gate.sock");
-    const queue = createPendingQueue({ timeoutMs: 30000, now: () => Date.now() });
+    const { socketPath, queue } = setup();
     const promise = queue.enqueue("user@example.com");
     const [req] = queue.list();
-
-    startFakeGate(queue, socketPath);
 
     const res = await fetch(`http://localhost/pending/${req!.id}/approve`, {
       method: "POST",
@@ -92,13 +88,9 @@ describe("approve command", () => {
   });
 
   test("denies a pending request via gate socket", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "approve-test-"));
-    const socketPath = join(dir, "gate.sock");
-    const queue = createPendingQueue({ timeoutMs: 30000, now: () => Date.now() });
+    const { socketPath, queue } = setup();
     const promise = queue.enqueue("user@example.com");
     const [req] = queue.list();
-
-    startFakeGate(queue, socketPath);
 
     const res = await fetch(`http://localhost/pending/${req!.id}/deny`, {
       method: "POST",
@@ -112,11 +104,7 @@ describe("approve command", () => {
   });
 
   test("returns 404 for unknown request ID", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "approve-test-"));
-    const socketPath = join(dir, "gate.sock");
-    const queue = createPendingQueue({ timeoutMs: 30000, now: () => Date.now() });
-
-    startFakeGate(queue, socketPath);
+    const { socketPath } = setup();
 
     const res = await fetch("http://localhost/pending/deadbeef/approve", {
       method: "POST",
@@ -128,11 +116,7 @@ describe("approve command", () => {
   });
 
   test("returns empty list when no pending requests", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "approve-test-"));
-    const socketPath = join(dir, "gate.sock");
-    const queue = createPendingQueue({ timeoutMs: 30000, now: () => Date.now() });
-
-    startFakeGate(queue, socketPath);
+    const { socketPath } = setup();
 
     const res = await fetch("http://localhost/pending", {
       unix: socketPath,

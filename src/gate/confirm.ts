@@ -43,8 +43,19 @@ export function createConfirmModule(options: ConfirmOptions = {}): {
       // GUI not available, fall through to terminal
     }
 
-    // Fallback to terminal prompt, then pending queue
-    return tryTerminalPrompt(email, isTTY, command, pamPolicy, pendingQueue);
+    // Fallback to terminal prompt if TTY is available
+    if (isTTY) {
+      return tryTerminalPrompt(email, command, pamPolicy);
+    }
+
+    // Fallback to pending queue for CLI-based approval
+    if (pendingQueue) {
+      console.error("confirm: no interactive method available, queuing for CLI approval");
+      return pendingQueue.enqueue(email, command, pamPolicy);
+    }
+
+    console.error("confirm: no interactive method available, denying prod access");
+    return false;
   }
 
   return { confirmProdAccess };
@@ -122,20 +133,9 @@ async function tryOsascript(
 
 async function tryTerminalPrompt(
   email: string,
-  isTTY: boolean,
   command?: string,
   pamPolicy?: string,
-  queue?: PendingQueue,
 ): Promise<boolean> {
-  if (!isTTY) {
-    if (queue) {
-      console.error("confirm: no interactive method available, queuing for CLI approval");
-      return queue.enqueue(email, command, pamPolicy);
-    }
-    console.error("confirm: no interactive method available, denying prod access");
-    return false;
-  }
-
   if (command) {
     process.stdout.write(`gcp-gate: Reported command: ${command}\n`);
   }

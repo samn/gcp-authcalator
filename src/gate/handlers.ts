@@ -28,15 +28,15 @@ export async function handleRequest(req: Request, deps: GateDeps): Promise<Respo
     return jsonResponse({ error: "Method not allowed" }, 405);
   }
 
-  // /pending — list pending approval requests
-  if (url.pathname === "/pending" && req.method === "GET") {
-    return handleListPending(deps);
-  }
-
-  // /pending/<id>/approve or /pending/<id>/deny
-  const pendingMatch = url.pathname.match(/^\/pending\/([a-f0-9]+)\/(approve|deny)$/);
-  if (pendingMatch && req.method === "POST") {
-    return handleResolvePending(pendingMatch[1]!, pendingMatch[2] as "approve" | "deny", deps);
+  // /pending routes
+  if (url.pathname.startsWith("/pending")) {
+    if (url.pathname === "/pending" && req.method === "GET") {
+      return handleListPending(deps);
+    }
+    const pendingMatch = url.pathname.match(/^\/pending\/([a-f0-9]+)\/(approve|deny)$/);
+    if (pendingMatch && req.method === "POST") {
+      return handleResolvePending(pendingMatch[1]!, pendingMatch[2] as "approve" | "deny", deps);
+    }
   }
 
   if (req.method !== "GET") {

@@ -4,18 +4,23 @@ import {
   connectionFetchOpts,
   type BunRequestInit,
 } from "../gate/connection.ts";
-import type { PendingRequest } from "../gate/pending.ts";
+import type { ErrorResponse } from "../gate/types.ts";
+
+/** Wire-format of PendingRequest (dates serialized as ISO strings over JSON). */
+interface PendingRequestJSON {
+  id: string;
+  email: string;
+  command?: string;
+  pamPolicy?: string;
+  expiresAt: string;
+}
 
 interface PendingListResponse {
-  pending: PendingRequest[];
+  pending: PendingRequestJSON[];
 }
 
 interface ResolveResponse {
   status: string;
-}
-
-interface ErrorResponse {
-  error: string;
 }
 
 export async function runApprove(
@@ -54,8 +59,10 @@ async function listPending(baseUrl: string, extraOpts: BunRequestInit): Promise<
 
   console.log("Pending approval requests:\n");
   for (const req of body.pending) {
-    const expiresAt = new Date(req.expiresAt);
-    const remainingSecs = Math.max(0, Math.floor((expiresAt.getTime() - Date.now()) / 1000));
+    const remainingSecs = Math.max(
+      0,
+      Math.floor((new Date(req.expiresAt).getTime() - Date.now()) / 1000),
+    );
     const command = req.command ? `  ${req.command}` : "";
     const pam = req.pamPolicy ? `  [PAM: ${req.pamPolicy}]` : "";
     console.log(`  ${req.id}  ${req.email}${command}${pam}  (expires in ${remainingSecs}s)`);
