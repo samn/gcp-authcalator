@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [0.7.2] - 2026-04-01
+
 ### Changed
 
 - `approve` and `deny` commands now connect to a separate admin socket instead of the main gate socket. The admin socket is not mounted into devcontainers, preventing container processes from self-approving requests.
