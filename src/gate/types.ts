@@ -80,7 +80,12 @@ export interface GateDeps {
   getIdentityEmail: () => Promise<string>;
   getProjectNumber: () => Promise<string>;
   getUniverseDomain: () => Promise<string>;
-  confirmProdAccess: (email: string, command?: string, pamPolicy?: string) => Promise<boolean>;
+  confirmProdAccess: (
+    email: string,
+    command?: string,
+    pamPolicy?: string,
+    pendingId?: string,
+  ) => Promise<boolean>;
   writeAuditLog: (entry: AuditEntry) => void;
   prodRateLimiter: ProdRateLimiter;
   startTime: Date;

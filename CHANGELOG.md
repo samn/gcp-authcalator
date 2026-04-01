@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Changed
+
+- `approve` and `deny` commands now connect to a separate admin socket instead of the main gate socket. The admin socket is not mounted into devcontainers, preventing container processes from self-approving requests.
+- `with-prod` now generates and prints a pending approval ID before requesting a prod session, enabling CLI-based approval without a two-phase protocol.
+- Pending request IDs increased from 8 hex chars (32 bits) to 32 hex chars (128 bits).
+- Removed `GET /pending` listing endpoint. With single-flight ensuring at most one pending request, the ID is printed by `with-prod` directly.
+
+### Security
+
+- **Admin socket isolation**: Approve/deny endpoints moved from the main gate socket (mounted into containers) to a separate admin socket in `/tmp` (not mounted). This prevents a malicious process in the devcontainer from self-approving its own prod token request.
+- Client-generated pending IDs (`X-Pending-Id` header) allow `with-prod` to display the approval ID immediately. The gate validates format and rejects duplicates.
+
 ## [0.7.1] - 2026-04-01
 
 ### Fixed

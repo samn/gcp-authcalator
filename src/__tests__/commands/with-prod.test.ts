@@ -180,6 +180,7 @@ describe("runWithProd", () => {
           project_id: "test-proj",
           socket_path: "/tmp/gate.sock",
           port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
         },
         [],
       ),
@@ -196,6 +197,7 @@ describe("runWithProd", () => {
         {
           socket_path: "/tmp/gate.sock",
           port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
         },
         ["python", "script.py"],
       ),
@@ -222,6 +224,7 @@ describe("runWithProd", () => {
           project_id: "my-proj",
           socket_path: "/tmp/gate.sock",
           port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
         },
         ["echo", "hello"],
         {
@@ -281,6 +284,7 @@ describe("runWithProd", () => {
           project_id: "my-proj",
           socket_path: "/tmp/gate.sock",
           port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
         },
         ["echo", "test"],
         {
@@ -317,6 +321,7 @@ describe("runWithProd", () => {
           project_id: "my-proj",
           socket_path: "/tmp/gate.sock",
           port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
         },
         ["echo", "test"],
         {
@@ -355,6 +360,7 @@ describe("runWithProd", () => {
           project_id: "my-proj",
           socket_path: "/tmp/gate.sock",
           port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
         },
         ["echo", "test"],
         {
@@ -389,6 +395,7 @@ describe("runWithProd", () => {
           project_id: "my-proj",
           socket_path: "/tmp/gate.sock",
           port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
         },
         ["echo", "test"],
         {
@@ -431,6 +438,7 @@ describe("runWithProd", () => {
           project_id: "my-proj",
           socket_path: "/tmp/gate.sock",
           port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
         },
         ["echo", "test"],
         {
@@ -479,6 +487,7 @@ describe("runWithProd", () => {
           project_id: "my-proj",
           socket_path: "/tmp/gate.sock",
           port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
         },
         ["echo", "hello"],
         {
@@ -508,6 +517,7 @@ describe("runWithProd", () => {
           project_id: "my-proj",
           socket_path: "/tmp/gate.sock",
           port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
         },
         ["failing-command"],
         {
@@ -557,6 +567,7 @@ describe("runWithProd", () => {
           project_id: "my-proj",
           socket_path: "/tmp/gate.sock",
           port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
           scopes: ["https://www.googleapis.com/auth/sqlservice.login"],
         },
         ["echo", "test"],
@@ -584,6 +595,7 @@ describe("runWithProd", () => {
           project_id: "my-proj",
           socket_path: "/tmp/gate.sock",
           port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
         },
         ["echo", "test"],
         {
@@ -642,10 +654,14 @@ describe("runWithProd nested sessions", () => {
     const { mockSpawnFn, getCapturedCmd } = mockSpawnCapture();
 
     await expect(
-      runWithProd({ socket_path: "/tmp/gate.sock", port: 8173 }, ["echo", "hello"], {
-        fetchOptions: { fetchFn: mockFetchFn },
-        spawnFn: mockSpawnFn,
-      }),
+      runWithProd(
+        { socket_path: "/tmp/gate.sock", port: 8173, admin_socket_path: "/tmp/test-admin.sock" },
+        ["echo", "hello"],
+        {
+          fetchOptions: { fetchFn: mockFetchFn },
+          spawnFn: mockSpawnFn,
+        },
+      ),
     ).rejects.toThrow("process.exit called");
 
     expect(getCapturedCmd()).toEqual(["echo", "hello"]);
@@ -664,10 +680,14 @@ describe("runWithProd nested sessions", () => {
     const { mockSpawnFn, getCapturedEnv } = mockSpawnCapture();
 
     try {
-      await runWithProd({ socket_path: "/tmp/gate.sock", port: 8173 }, ["echo", "test"], {
-        fetchOptions: { fetchFn: mockFetchFn },
-        spawnFn: mockSpawnFn,
-      });
+      await runWithProd(
+        { socket_path: "/tmp/gate.sock", port: 8173, admin_socket_path: "/tmp/test-admin.sock" },
+        ["echo", "test"],
+        {
+          fetchOptions: { fetchFn: mockFetchFn },
+          spawnFn: mockSpawnFn,
+        },
+      );
     } catch {
       // process.exit mock throws
     }
@@ -686,10 +706,14 @@ describe("runWithProd nested sessions", () => {
     const { mockSpawnFn, getCapturedEnv } = mockSpawnCapture();
 
     try {
-      await runWithProd({ socket_path: "/tmp/gate.sock", port: 8173 }, ["echo", "test"], {
-        fetchOptions: { fetchFn: mockFetchFn },
-        spawnFn: mockSpawnFn,
-      });
+      await runWithProd(
+        { socket_path: "/tmp/gate.sock", port: 8173, admin_socket_path: "/tmp/test-admin.sock" },
+        ["echo", "test"],
+        {
+          fetchOptions: { fetchFn: mockFetchFn },
+          spawnFn: mockSpawnFn,
+        },
+      );
     } catch {
       // process.exit mock throws
     }
@@ -707,10 +731,14 @@ describe("runWithProd nested sessions", () => {
     const { mockSpawnFn, getCapturedEnv } = mockSpawnCapture();
 
     try {
-      await runWithProd({ socket_path: "/tmp/gate.sock", port: 8173 }, ["echo", "test"], {
-        fetchOptions: { fetchFn: mockFetchFn },
-        spawnFn: mockSpawnFn,
-      });
+      await runWithProd(
+        { socket_path: "/tmp/gate.sock", port: 8173, admin_socket_path: "/tmp/test-admin.sock" },
+        ["echo", "test"],
+        {
+          fetchOptions: { fetchFn: mockFetchFn },
+          spawnFn: mockSpawnFn,
+        },
+      );
     } catch {
       // process.exit mock throws
     }
@@ -727,10 +755,14 @@ describe("runWithProd nested sessions", () => {
     const { mockSpawnFn, getCapturedEnv } = mockSpawnCapture();
 
     try {
-      await runWithProd({ socket_path: "/tmp/gate.sock", port: 8173 }, ["echo", "test"], {
-        fetchOptions: { fetchFn: mockFetchFn },
-        spawnFn: mockSpawnFn,
-      });
+      await runWithProd(
+        { socket_path: "/tmp/gate.sock", port: 8173, admin_socket_path: "/tmp/test-admin.sock" },
+        ["echo", "test"],
+        {
+          fetchOptions: { fetchFn: mockFetchFn },
+          spawnFn: mockSpawnFn,
+        },
+      );
     } catch {
       // process.exit mock throws
     }
@@ -750,10 +782,14 @@ describe("runWithProd nested sessions", () => {
     const { mockSpawnFn, getCapturedEnv } = mockSpawnCapture();
 
     try {
-      await runWithProd({ socket_path: "/tmp/gate.sock", port: 8173 }, ["echo", "test"], {
-        fetchOptions: { fetchFn: mockFetchFn },
-        spawnFn: mockSpawnFn,
-      });
+      await runWithProd(
+        { socket_path: "/tmp/gate.sock", port: 8173, admin_socket_path: "/tmp/test-admin.sock" },
+        ["echo", "test"],
+        {
+          fetchOptions: { fetchFn: mockFetchFn },
+          spawnFn: mockSpawnFn,
+        },
+      );
     } catch {
       // process.exit mock throws
     }
@@ -777,10 +813,14 @@ describe("runWithProd nested sessions", () => {
       }) as unknown as Subprocess;
 
     await expect(
-      runWithProd({ socket_path: "/tmp/gate.sock", port: 8173 }, ["failing-cmd"], {
-        fetchOptions: { fetchFn: mockFetchFn },
-        spawnFn: mockSpawnFn,
-      }),
+      runWithProd(
+        { socket_path: "/tmp/gate.sock", port: 8173, admin_socket_path: "/tmp/test-admin.sock" },
+        ["failing-cmd"],
+        {
+          fetchOptions: { fetchFn: mockFetchFn },
+          spawnFn: mockSpawnFn,
+        },
+      ),
     ).rejects.toThrow("process.exit called");
 
     expect(exitSpy).toHaveBeenCalledWith(42);
@@ -795,7 +835,12 @@ describe("runWithProd nested sessions", () => {
 
     try {
       await runWithProd(
-        { project_id: "my-proj", socket_path: "/tmp/gate.sock", port: 8173 },
+        {
+          project_id: "my-proj",
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
+        },
         ["echo", "test"],
         { fetchOptions: { fetchFn: mockFetchFn }, spawnFn: mockSpawnFn },
       );
@@ -823,7 +868,12 @@ describe("runWithProd nested sessions", () => {
 
     try {
       await runWithProd(
-        { project_id: "different-project", socket_path: "/tmp/gate.sock", port: 8173 },
+        {
+          project_id: "different-project",
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
+        },
         ["echo", "test"],
         { fetchOptions: { fetchFn: mockFetchFn }, spawnFn: mockSpawnFn },
       );
@@ -854,7 +904,12 @@ describe("runWithProd nested sessions", () => {
 
     try {
       await runWithProd(
-        { project_id: "same-project", socket_path: "/tmp/gate.sock", port: 8173 },
+        {
+          project_id: "same-project",
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
+        },
         ["echo", "test"],
         { fetchOptions: { fetchFn: mockFetchFn }, spawnFn: mockSpawnFn },
       );
@@ -879,10 +934,14 @@ describe("runWithProd nested sessions", () => {
     const { mockSpawnFn, getCapturedEnv } = mockSpawnCapture();
 
     try {
-      await runWithProd({ socket_path: "/tmp/gate.sock", port: 8173 }, ["echo", "test"], {
-        fetchOptions: { fetchFn: mockFetchFn },
-        spawnFn: mockSpawnFn,
-      });
+      await runWithProd(
+        { socket_path: "/tmp/gate.sock", port: 8173, admin_socket_path: "/tmp/test-admin.sock" },
+        ["echo", "test"],
+        {
+          fetchOptions: { fetchFn: mockFetchFn },
+          spawnFn: mockSpawnFn,
+        },
+      );
     } catch {
       // process.exit mock throws
     }
@@ -901,10 +960,14 @@ describe("runWithProd nested sessions", () => {
     const { mockSpawnFn } = mockSpawnCapture();
 
     try {
-      await runWithProd({ socket_path: "/tmp/gate.sock", port: 8173 }, ["echo", "test"], {
-        fetchOptions: { fetchFn: mockFetchFn },
-        spawnFn: mockSpawnFn,
-      });
+      await runWithProd(
+        { socket_path: "/tmp/gate.sock", port: 8173, admin_socket_path: "/tmp/test-admin.sock" },
+        ["echo", "test"],
+        {
+          fetchOptions: { fetchFn: mockFetchFn },
+          spawnFn: mockSpawnFn,
+        },
+      );
     } catch {
       // process.exit mock throws
     }
@@ -983,6 +1046,7 @@ describe("runWithProd extra env vars", () => {
           project_id: "my-proj",
           socket_path: "/tmp/gate.sock",
           port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
           env: { CPL_MACHINE_IS_GCE: "YES", CUSTOM_VAR: "hello" },
         },
         ["echo", "test"],
@@ -1010,6 +1074,7 @@ describe("runWithProd extra env vars", () => {
           project_id: "my-proj",
           socket_path: "/tmp/gate.sock",
           port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
           env: {
             CPL_GCE_CREDENTIALS_URL:
               "http://${GCE_METADATA_HOST}/computeMetadata/v1/instance/service-accounts/default/token",
@@ -1041,6 +1106,7 @@ describe("runWithProd extra env vars", () => {
           project_id: "my-proj",
           socket_path: "/tmp/gate.sock",
           port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
           env: {
             CPL_GCE_CREDENTIALS_URL:
               "http://${GCE_METADATA_HOST:-127.0.0.1:8173}/computeMetadata/v1/instance/service-accounts/default/token",
@@ -1074,6 +1140,7 @@ describe("runWithProd extra env vars", () => {
           project_id: "my-proj",
           socket_path: "/tmp/gate.sock",
           port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
           env: { BASE_URL: "http://${GCE_METADATA_HOST}", FULL_URL: "${BASE_URL}/token" },
         },
         ["echo", "test"],
@@ -1104,6 +1171,7 @@ describe("runWithProd extra env vars", () => {
         {
           socket_path: "/tmp/gate.sock",
           port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
           env: {
             CPL_MACHINE_IS_GCE: "YES",
             CPL_GCE_CREDENTIALS_URL:
@@ -1139,6 +1207,7 @@ describe("runWithProd extra env vars", () => {
           project_id: "my-proj",
           socket_path: "/tmp/gate.sock",
           port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
         },
         ["echo", "test"],
         {

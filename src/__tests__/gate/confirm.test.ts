@@ -575,5 +575,27 @@ describe("createConfirmModule", () => {
       expect(result).toBe(true);
       expect(pendingQueue.list()).toHaveLength(0);
     });
+
+    test("passes pendingId through to pendingQueue.enqueue", async () => {
+      const pendingQueue = createPendingQueue({ timeoutMs: 5000, now: () => 1_000_000 });
+      const clientId = "c".repeat(32);
+      const { confirmProdAccess } = createConfirmModule({
+        spawn: mockSpawn(127),
+        platform: "linux",
+        isTTY: false,
+        pendingQueue,
+      });
+
+      const promise = confirmProdAccess("user@example.com", "cmd", undefined, clientId);
+
+      await new Promise((r) => setTimeout(r, 10));
+
+      const pending = pendingQueue.list();
+      expect(pending).toHaveLength(1);
+      expect(pending[0]!.id).toBe(clientId);
+
+      pendingQueue.approve(clientId);
+      expect(await promise).toBe(true);
+    });
   });
 });

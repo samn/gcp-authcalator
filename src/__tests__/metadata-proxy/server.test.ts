@@ -47,6 +47,7 @@ function makeConfig(port: number): MetadataProxyConfig {
     project_id: "test-project",
     service_account: "sa@test-project.iam.gserviceaccount.com",
     socket_path: "/tmp/test-gate.sock",
+    admin_socket_path: "/tmp/test-admin.sock",
     port,
   };
 }
@@ -283,6 +284,7 @@ describe("startMetadataProxyServer", () => {
       project_id: "test-project",
       service_account: "sa@test-project.iam.gserviceaccount.com",
       socket_path: "/tmp/test-gate.sock",
+      admin_socket_path: "/tmp/test-admin.sock",
       port: 0,
     };
 

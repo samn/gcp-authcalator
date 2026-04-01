@@ -21,11 +21,12 @@ function mockFetch(email: string): typeof globalThis.fetch {
     })) as unknown as typeof globalThis.fetch;
 }
 
-function makeConfig(socketPath: string): GateConfig {
+function makeConfig(socketPath: string, adminSocketPath?: string): GateConfig {
   return {
     project_id: "test-project",
     service_account: "sa@test-project.iam.gserviceaccount.com",
     socket_path: socketPath,
+    admin_socket_path: adminSocketPath ?? join(socketPath + "-admin-dir", "admin.sock"),
     port: 8173,
   };
 }
@@ -265,5 +266,110 @@ describe("startGateServer", () => {
     result = null;
 
     expect(existsSync(socketPath)).toBe(false);
+  });
+
+  test("starts admin socket and serves /health on it", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "gate-srv-"));
+    const socketPath = join(tempDir, "gate.sock");
+    const adminSocketPath = join(tempDir, "admin.sock");
+    const config = makeConfig(socketPath, adminSocketPath);
+
+    result = await startGateServer(config, {
+      authOptions: {
+        sourceClient: mockClient("source-tok"),
+        impersonatedClient: mockClient("dev-tok"),
+        fetchFn: mockFetch("test@example.com"),
+      },
+      auditLogDir: join(tempDir, "audit"),
+    });
+
+    const res = await fetch("http://localhost/health", {
+      unix: adminSocketPath,
+    } as BunRequestInit);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { status: string };
+    expect(body.status).toBe("ok");
+  });
+
+  test("admin socket does not serve /token", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "gate-srv-"));
+    const socketPath = join(tempDir, "gate.sock");
+    const adminSocketPath = join(tempDir, "admin.sock");
+    const config = makeConfig(socketPath, adminSocketPath);
+
+    result = await startGateServer(config, {
+      authOptions: {
+        sourceClient: mockClient("source-tok"),
+        impersonatedClient: mockClient("dev-tok"),
+        fetchFn: mockFetch("test@example.com"),
+      },
+      auditLogDir: join(tempDir, "audit"),
+    });
+
+    const res = await fetch("http://localhost/token", {
+      unix: adminSocketPath,
+    } as BunRequestInit);
+    expect(res.status).toBe(404);
+  });
+
+  test("main socket does not serve /pending routes", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "gate-srv-"));
+    const socketPath = join(tempDir, "gate.sock");
+    const config = makeConfig(socketPath);
+
+    result = await startGateServer(config, {
+      authOptions: {
+        sourceClient: mockClient("source-tok"),
+        impersonatedClient: mockClient("dev-tok"),
+        fetchFn: mockFetch("test@example.com"),
+      },
+      auditLogDir: join(tempDir, "audit"),
+    });
+
+    const res = await fetchUnix(socketPath, "/pending");
+    expect(res.status).toBe(404);
+  });
+
+  test("stop() cleans up admin socket file", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "gate-srv-"));
+    const socketPath = join(tempDir, "gate.sock");
+    const adminSocketPath = join(tempDir, "admin.sock");
+    const config = makeConfig(socketPath, adminSocketPath);
+
+    result = await startGateServer(config, {
+      authOptions: {
+        sourceClient: mockClient("source-tok"),
+        impersonatedClient: mockClient("dev-tok"),
+        fetchFn: mockFetch("test@example.com"),
+      },
+      auditLogDir: join(tempDir, "audit"),
+    });
+
+    expect(existsSync(adminSocketPath)).toBe(true);
+
+    result.stop();
+    result = null;
+
+    expect(existsSync(adminSocketPath)).toBe(false);
+  });
+
+  test("admin socket has 0600 permissions", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "gate-srv-"));
+    const socketPath = join(tempDir, "gate.sock");
+    const adminSocketPath = join(tempDir, "admin.sock");
+    const config = makeConfig(socketPath, adminSocketPath);
+
+    result = await startGateServer(config, {
+      authOptions: {
+        sourceClient: mockClient("source-tok"),
+        impersonatedClient: mockClient("dev-tok"),
+        fetchFn: mockFetch("test@example.com"),
+      },
+      auditLogDir: join(tempDir, "audit"),
+    });
+
+    const stats = statSync(adminSocketPath);
+    const permissions = stats.mode & 0o777;
+    expect(permissions).toBe(0o600);
   });
 });

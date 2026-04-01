@@ -3,8 +3,10 @@ import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createPendingQueue } from "../../gate/pending.ts";
+import { handleAdminRequest } from "../../gate/admin-handlers.ts";
+import { makeGateDeps as makeDeps } from "../gate/test-helpers.ts";
 
-describe("approve command", () => {
+describe("approve command (admin socket)", () => {
   let server: ReturnType<typeof Bun.serve> | null = null;
 
   afterEach(() => {
@@ -16,69 +18,28 @@ describe("approve command", () => {
 
   function setup() {
     const dir = mkdtempSync(join(tmpdir(), "approve-test-"));
-    const socketPath = join(dir, "gate.sock");
+    const adminSocketPath = join(dir, "admin.sock");
     const queue = createPendingQueue({ timeoutMs: 30000, now: () => Date.now() });
+    const deps = makeDeps({ pendingQueue: queue });
 
     server = Bun.serve({
-      unix: socketPath,
+      unix: adminSocketPath,
       fetch(req) {
-        const url = new URL(req.url, "http://localhost");
-
-        if (url.pathname === "/pending" && req.method === "GET") {
-          return new Response(JSON.stringify({ pending: queue.list() }), {
-            headers: { "Content-Type": "application/json" },
-          });
-        }
-
-        const match = url.pathname.match(/^\/pending\/([a-f0-9]+)\/(approve|deny)$/);
-        if (match && req.method === "POST") {
-          const [, id, action] = match;
-          const resolved = action === "approve" ? queue.approve(id!) : queue.deny(id!);
-          if (!resolved) {
-            return new Response(JSON.stringify({ error: "Request not found or expired" }), {
-              status: 404,
-              headers: { "Content-Type": "application/json" },
-            });
-          }
-          return new Response(
-            JSON.stringify({ status: action === "approve" ? "approved" : "denied" }),
-            { headers: { "Content-Type": "application/json" } },
-          );
-        }
-
-        return new Response(JSON.stringify({ error: "Not found" }), {
-          status: 404,
-          headers: { "Content-Type": "application/json" },
-        });
+        return handleAdminRequest(req, deps);
       },
     });
 
-    return { socketPath, queue };
+    return { adminSocketPath, queue };
   }
 
-  test("lists pending requests via gate socket", async () => {
-    const { socketPath, queue } = setup();
-    queue.enqueue("user@example.com", "gcloud compute list");
-
-    const res = await fetch("http://localhost/pending", {
-      unix: socketPath,
-    } as RequestInit);
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { pending: Array<{ email: string }> };
-    expect(body.pending).toHaveLength(1);
-    expect(body.pending[0]!.email).toBe("user@example.com");
-
-    queue.denyAll();
-  });
-
-  test("approves a pending request via gate socket", async () => {
-    const { socketPath, queue } = setup();
+  test("approves a pending request via admin socket", async () => {
+    const { adminSocketPath, queue } = setup();
     const promise = queue.enqueue("user@example.com");
     const [req] = queue.list();
 
     const res = await fetch(`http://localhost/pending/${req!.id}/approve`, {
       method: "POST",
-      unix: socketPath,
+      unix: adminSocketPath,
     } as RequestInit);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { status: string };
@@ -87,14 +48,14 @@ describe("approve command", () => {
     expect(await promise).toBe(true);
   });
 
-  test("denies a pending request via gate socket", async () => {
-    const { socketPath, queue } = setup();
+  test("denies a pending request via admin socket", async () => {
+    const { adminSocketPath, queue } = setup();
     const promise = queue.enqueue("user@example.com");
     const [req] = queue.list();
 
     const res = await fetch(`http://localhost/pending/${req!.id}/deny`, {
       method: "POST",
-      unix: socketPath,
+      unix: adminSocketPath,
     } as RequestInit);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { status: string };
@@ -104,25 +65,34 @@ describe("approve command", () => {
   });
 
   test("returns 404 for unknown request ID", async () => {
-    const { socketPath } = setup();
+    const { adminSocketPath } = setup();
 
-    const res = await fetch("http://localhost/pending/deadbeef/approve", {
+    const res = await fetch(`http://localhost/pending/${"f".repeat(32)}/approve`, {
       method: "POST",
-      unix: socketPath,
+      unix: adminSocketPath,
     } as RequestInit);
     expect(res.status).toBe(404);
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe("Request not found or expired");
   });
 
-  test("returns empty list when no pending requests", async () => {
-    const { socketPath } = setup();
+  test("GET /pending returns 404 on admin socket (no listing)", async () => {
+    const { adminSocketPath } = setup();
 
     const res = await fetch("http://localhost/pending", {
-      unix: socketPath,
+      unix: adminSocketPath,
+    } as RequestInit);
+    expect(res.status).toBe(404);
+  });
+
+  test("GET /health returns 200 on admin socket", async () => {
+    const { adminSocketPath } = setup();
+
+    const res = await fetch("http://localhost/health", {
+      unix: adminSocketPath,
     } as RequestInit);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { pending: unknown[] };
-    expect(body.pending).toHaveLength(0);
+    const body = (await res.json()) as { status: string };
+    expect(body.status).toBe("ok");
   });
 });

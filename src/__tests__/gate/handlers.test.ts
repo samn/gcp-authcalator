@@ -1,36 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { handleRequest } from "../../gate/handlers.ts";
-import type { GateDeps, AuditEntry, CachedToken } from "../../gate/types.ts";
-import { createProdRateLimiter } from "../../gate/rate-limit.ts";
+import type { AuditEntry, CachedToken } from "../../gate/types.ts";
 import type { ProdRateLimiter } from "../../gate/rate-limit.ts";
 import { createSessionManager } from "../../gate/session.ts";
 import { createPendingQueue } from "../../gate/pending.ts";
-
-function makeDeps(overrides: Partial<GateDeps> = {}): GateDeps {
-  const token: CachedToken = {
-    access_token: "test-access-token",
-    expires_at: new Date(Date.now() + 3600 * 1000),
-  };
-
-  return {
-    mintDevToken: async () => token,
-    mintProdToken: async () => ({
-      access_token: "prod-access-token",
-      expires_at: new Date(Date.now() + 3600 * 1000),
-    }),
-    getIdentityEmail: async () => "user@example.com",
-    getProjectNumber: async () => "123456789012",
-    getUniverseDomain: async () => "googleapis.com",
-    confirmProdAccess: async () => true,
-    writeAuditLog: () => {},
-    prodRateLimiter: createProdRateLimiter(),
-    startTime: new Date(Date.now() - 60_000),
-    defaultTokenTtlSeconds: 3600,
-    sessionManager: createSessionManager(),
-    sessionTtlSeconds: 28800,
-    ...overrides,
-  };
-}
+import { makeGateDeps as makeDeps, makeRequest } from "./test-helpers.ts";
 
 /** A rate limiter that always blocks. */
 function blockedRateLimiter(reason = "rate limited"): ProdRateLimiter {
@@ -38,10 +12,6 @@ function blockedRateLimiter(reason = "rate limited"): ProdRateLimiter {
     acquire: () => ({ allowed: false, reason }),
     release: () => {},
   };
-}
-
-function makeRequest(path: string, method = "GET", headers?: Record<string, string>): Request {
-  return new Request(`http://localhost${path}`, { method, headers });
 }
 
 // ---------------------------------------------------------------------------
@@ -1380,114 +1350,78 @@ describe("GET /token?session=<id>", () => {
 });
 
 // ---------------------------------------------------------------------------
-// GET /pending
+// /pending routes removed from main socket (served on admin socket only)
 // ---------------------------------------------------------------------------
 
-describe("GET /pending", () => {
-  test("returns empty list when no pending requests", async () => {
+describe("/pending routes on main socket", () => {
+  test("GET /pending returns 404 on main socket", async () => {
     const pendingQueue = createPendingQueue({ timeoutMs: 5000, now: () => 1_000_000 });
     const deps = makeDeps({ pendingQueue });
     const res = await handleRequest(makeRequest("/pending"), deps);
-
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { pending: unknown[] };
-    expect(body.pending).toEqual([]);
-  });
-
-  test("returns pending requests", async () => {
-    const pendingQueue = createPendingQueue({ timeoutMs: 5000, now: () => 1_000_000 });
-    pendingQueue.enqueue("user@example.com", "gcloud compute list", "prod-policy");
-
-    const deps = makeDeps({ pendingQueue });
-    const res = await handleRequest(makeRequest("/pending"), deps);
-
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as {
-      pending: Array<{ email: string; command: string; pamPolicy: string }>;
-    };
-    expect(body.pending).toHaveLength(1);
-    expect(body.pending[0]!.email).toBe("user@example.com");
-    expect(body.pending[0]!.command).toBe("gcloud compute list");
-    expect(body.pending[0]!.pamPolicy).toBe("prod-policy");
-
-    pendingQueue.denyAll();
-  });
-
-  test("returns 501 when pendingQueue not in deps", async () => {
-    const deps = makeDeps();
-    const res = await handleRequest(makeRequest("/pending"), deps);
-
-    expect(res.status).toBe(501);
-    const body = (await res.json()) as Record<string, unknown>;
-    expect(body.error).toBe("Pending queue not enabled");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// POST /pending/:id/approve and /pending/:id/deny
-// ---------------------------------------------------------------------------
-
-describe("POST /pending/:id/approve", () => {
-  test("approves a pending request", async () => {
-    const pendingQueue = createPendingQueue({ timeoutMs: 5000, now: () => 1_000_000 });
-    const promise = pendingQueue.enqueue("user@example.com");
-    const [req] = pendingQueue.list();
-
-    const auditLog: AuditEntry[] = [];
-    const deps = makeDeps({
-      pendingQueue,
-      writeAuditLog: (entry) => auditLog.push(entry),
-    });
-
-    const res = await handleRequest(makeRequest(`/pending/${req!.id}/approve`, "POST"), deps);
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as Record<string, unknown>;
-    expect(body.status).toBe("approved");
-
-    expect(await promise).toBe(true);
-
-    expect(auditLog).toHaveLength(1);
-    expect(auditLog[0]!.result).toBe("granted");
-    expect(auditLog[0]!.endpoint).toContain(req!.id);
-  });
-
-  test("returns 404 for unknown ID", async () => {
-    const pendingQueue = createPendingQueue({ timeoutMs: 5000, now: () => 1_000_000 });
-    const deps = makeDeps({ pendingQueue });
-
-    const res = await handleRequest(makeRequest("/pending/deadbeef/approve", "POST"), deps);
     expect(res.status).toBe(404);
-    const body = (await res.json()) as Record<string, unknown>;
-    expect(body.error).toBe("Request not found or expired");
   });
 
-  test("returns 501 when pendingQueue not in deps", async () => {
-    const deps = makeDeps();
+  test("POST /pending/:id/approve returns 405 on main socket", async () => {
+    const pendingQueue = createPendingQueue({ timeoutMs: 5000, now: () => 1_000_000 });
+    const deps = makeDeps({ pendingQueue });
     const res = await handleRequest(makeRequest("/pending/deadbeef/approve", "POST"), deps);
-    expect(res.status).toBe(501);
+    expect(res.status).toBe(405);
+  });
+
+  test("POST /pending/:id/deny returns 405 on main socket", async () => {
+    const pendingQueue = createPendingQueue({ timeoutMs: 5000, now: () => 1_000_000 });
+    const deps = makeDeps({ pendingQueue });
+    const res = await handleRequest(makeRequest("/pending/deadbeef/deny", "POST"), deps);
+    expect(res.status).toBe(405);
   });
 });
 
-describe("POST /pending/:id/deny", () => {
-  test("denies a pending request", async () => {
-    const pendingQueue = createPendingQueue({ timeoutMs: 5000, now: () => 1_000_000 });
-    const promise = pendingQueue.enqueue("user@example.com");
-    const [req] = pendingQueue.list();
+// ---------------------------------------------------------------------------
+// X-Pending-Id header passthrough
+// ---------------------------------------------------------------------------
 
-    const auditLog: AuditEntry[] = [];
+describe("X-Pending-Id header", () => {
+  test("passes X-Pending-Id to confirmProdAccess", async () => {
+    let capturedPendingId: string | undefined;
     const deps = makeDeps({
-      pendingQueue,
-      writeAuditLog: (entry) => auditLog.push(entry),
+      confirmProdAccess: async (_email, _cmd, _pam, pendingId) => {
+        capturedPendingId = pendingId;
+        return true;
+      },
     });
 
-    const res = await handleRequest(makeRequest(`/pending/${req!.id}/deny`, "POST"), deps);
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as Record<string, unknown>;
-    expect(body.status).toBe("denied");
+    const headers = { "X-Pending-Id": "a".repeat(32) };
+    await handleRequest(makeRequest("/token?level=prod", "GET", headers), deps);
 
-    expect(await promise).toBe(false);
+    expect(capturedPendingId).toBe("a".repeat(32));
+  });
 
-    expect(auditLog).toHaveLength(1);
-    expect(auditLog[0]!.result).toBe("denied");
+  test("passes undefined when X-Pending-Id header is missing", async () => {
+    let capturedPendingId: string | undefined = "should-be-replaced";
+    const deps = makeDeps({
+      confirmProdAccess: async (_email, _cmd, _pam, pendingId) => {
+        capturedPendingId = pendingId;
+        return true;
+      },
+    });
+
+    await handleRequest(makeRequest("/token?level=prod"), deps);
+
+    expect(capturedPendingId).toBeUndefined();
+  });
+
+  test("passes X-Pending-Id to confirmProdAccess on POST /session", async () => {
+    let capturedPendingId: string | undefined;
+    const deps = makeDeps({
+      confirmProdAccess: async (_email, _cmd, _pam, pendingId) => {
+        capturedPendingId = pendingId;
+        return true;
+      },
+    });
+
+    const headers = { "X-Pending-Id": "b".repeat(32) };
+    await handleRequest(makeRequest("/session", "POST", headers), deps);
+
+    expect(capturedPendingId).toBe("b".repeat(32));
   });
 });

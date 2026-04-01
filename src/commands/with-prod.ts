@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { chmodSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Config } from "../config.ts";
@@ -162,7 +163,11 @@ export async function runWithProd(
   const wpConfig = WithProdConfigSchema.parse(config);
 
   // Step 1: Create prod session at gcp-gate (triggers confirmation dialog)
+  const pendingId = randomBytes(16).toString("hex");
   console.log("with-prod: requesting prod session from gcp-gate...");
+  console.log(
+    `with-prod: if no prompt appears, approve with: gcp-authcalator approve ${pendingId}`,
+  );
   let conn: GateConnection;
   let sessionResult;
   try {
@@ -174,6 +179,7 @@ export async function runWithProd(
       pamPolicy: wpConfig.pam_policy,
       tokenTtlSeconds: wpConfig.token_ttl_seconds,
       sessionTtlSeconds: wpConfig.session_ttl_seconds,
+      pendingId,
     });
   } catch (err) {
     console.error(
@@ -221,6 +227,7 @@ export async function runWithProd(
       project_id: wpConfig.project_id,
       service_account: sessionResult.email,
       socket_path: wpConfig.socket_path,
+      admin_socket_path: wpConfig.admin_socket_path,
       port: 0,
     },
     {

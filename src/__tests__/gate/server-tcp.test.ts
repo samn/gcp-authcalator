@@ -55,6 +55,7 @@ describe("Gate TCP+mTLS server", () => {
       project_id: "test-project",
       service_account: "sa@test-project.iam.gserviceaccount.com",
       socket_path: socketPath,
+      admin_socket_path: join(socketPath + "-admin-dir", "admin.sock"),
       port: 8173,
       gate_tls_port: 0, // random port
       tls_dir: tlsDir,
@@ -95,6 +96,7 @@ describe("Gate TCP+mTLS server", () => {
       project_id: "test-project",
       service_account: "sa@test-project.iam.gserviceaccount.com",
       socket_path: socketPath,
+      admin_socket_path: join(socketPath + "-admin-dir", "admin.sock"),
       port: 8173,
       gate_tls_port: 0,
       tls_dir: tlsDir,
@@ -133,6 +135,7 @@ describe("Gate TCP+mTLS server", () => {
       project_id: "test-project",
       service_account: "sa@test-project.iam.gserviceaccount.com",
       socket_path: socketPath,
+      admin_socket_path: join(socketPath + "-admin-dir", "admin.sock"),
       port: 8173,
       gate_tls_port: 0,
       tls_dir: tlsDir,
@@ -171,6 +174,7 @@ describe("Gate TCP+mTLS server", () => {
       project_id: "test-project",
       service_account: "sa@test-project.iam.gserviceaccount.com",
       socket_path: socketPath,
+      admin_socket_path: join(socketPath + "-admin-dir", "admin.sock"),
       port: 8173,
       gate_tls_port: 0,
       tls_dir: tlsDir,
@@ -214,6 +218,7 @@ describe("Gate TCP+mTLS server", () => {
       project_id: "test-project",
       service_account: "sa@test-project.iam.gserviceaccount.com",
       socket_path: socketPath,
+      admin_socket_path: join(socketPath + "-admin-dir", "admin.sock"),
       port: 8173,
       gate_tls_port: 0,
       tls_dir: tlsDir,
@@ -239,6 +244,7 @@ describe("Gate TCP+mTLS server", () => {
       project_id: "test-project",
       service_account: "sa@test-project.iam.gserviceaccount.com",
       socket_path: socketPath,
+      admin_socket_path: join(socketPath + "-admin-dir", "admin.sock"),
       port: 8173,
       // No gate_tls_port
     };

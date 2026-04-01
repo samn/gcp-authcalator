@@ -8,9 +8,12 @@
 
 import { randomBytes } from "node:crypto";
 
+/** Validates a client-provided pending ID: must be exactly 32 lowercase hex chars. */
+const PENDING_ID_RE = /^[a-f0-9]{32}$/;
+
 /** A confirmation request waiting for external approval. */
 export interface PendingRequest {
-  /** Short random hex ID (8 chars) for human-friendly CLI use. */
+  /** Random hex ID (32 chars / 128 bits). */
   id: string;
   /** Engineer's email requesting prod access. */
   email: string;
@@ -32,8 +35,9 @@ export interface PendingQueueOptions {
 }
 
 export interface PendingQueue {
-  /** Enqueue a confirmation request. Returns a promise that resolves when approved, denied, or timed out. */
-  enqueue(email: string, command?: string, pamPolicy?: string): Promise<boolean>;
+  /** Enqueue a confirmation request. Returns a promise that resolves when approved, denied, or timed out.
+   *  If clientId is provided, it must be exactly 32 lowercase hex chars and not already in use. */
+  enqueue(email: string, command?: string, pamPolicy?: string, clientId?: string): Promise<boolean>;
   /** List all currently pending requests. */
   list(): PendingRequest[];
   /** Approve a pending request by ID. Returns false if not found or expired. */
@@ -57,8 +61,21 @@ export function createPendingQueue(options: PendingQueueOptions = {}): PendingQu
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const entries = new Map<string, QueueEntry>();
 
-  function enqueue(email: string, command?: string, pamPolicy?: string): Promise<boolean> {
-    const id = randomBytes(4).toString("hex");
+  function enqueue(
+    email: string,
+    command?: string,
+    pamPolicy?: string,
+    clientId?: string,
+  ): Promise<boolean> {
+    if (clientId !== undefined) {
+      if (!PENDING_ID_RE.test(clientId)) {
+        throw new Error(`Invalid pending ID format: must be 32 lowercase hex chars`);
+      }
+      if (entries.has(clientId)) {
+        throw new Error(`Pending ID already in use: ${clientId}`);
+      }
+    }
+    const id = clientId ?? randomBytes(16).toString("hex");
     const createdAt = new Date(now());
     const expiresAt = new Date(now() + timeoutMs);
 
