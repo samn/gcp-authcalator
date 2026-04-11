@@ -16,6 +16,24 @@ All user-facing changes must be documented in `CHANGELOG.md` following the
 `[Unreleased]` section as you make changes. Categories: Added, Changed,
 Deprecated, Removed, Fixed, Security.
 
+## Documentation
+
+When making changes that affect user-facing behavior, CLI flags, endpoints,
+configuration options, or security properties, update **all** relevant
+documentation to stay in sync with the implementation:
+
+- `README.md` — primary user guide (CLI flags, env vars, API tables, examples,
+  security model)
+- `SPEC.md` — technical specification (architecture, API tables, design
+  decisions)
+- `config.example.toml` — reference configuration with all options
+- `docs/releasing.md` — release process
+- CLI `--help` output in `src/cli.ts`
+
+Verify that documented values (rate limits, timeouts, defaults, ID formats)
+match the actual constants and code. Stale documentation is a security risk in
+a security-focused project.
+
 ## Pre-commit checks
 
 Before committing code, always run the full verification suite:
