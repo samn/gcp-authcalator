@@ -53,6 +53,7 @@
    - Generate SHA256 checksums
    - Create a GitHub Release with the changelog entry as the body
    - Attach the binaries and checksums as release assets
+   - Build and push a multi-arch Docker image (`linux/amd64`, `linux/arm64`) to `ghcr.io/samn/gcp-authcalator`
 
 ## Version format
 

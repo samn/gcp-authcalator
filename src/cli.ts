@@ -80,9 +80,8 @@ Examples:
   gcp-authcalator gate --project-id my-project --service-account sa@my-project.iam.gserviceaccount.com
   gcp-authcalator metadata-proxy --config config.toml
   gcp-authcalator with-prod -- python some/script.py
-  gcp-authcalator approve
-  gcp-authcalator approve abc12def
-  gcp-authcalator deny abc12def
+  gcp-authcalator approve <id>
+  gcp-authcalator deny <id>
   gcp-authcalator kube-setup`;
 
 const SUBCOMMANDS = [

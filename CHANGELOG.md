@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Fixed
+
+- Documentation: corrected rate limiting values in README and SPEC (1-second cooldown and 10 attempts/minute, matching implementation)
+- Documentation: updated approve/deny command docs to reflect admin socket isolation from v0.7.2 (separate socket, not the main gate socket)
+- Documentation: removed stale `GET /pending` endpoint from API tables (removed in v0.7.2)
+- Documentation: fixed pending request ID size in SPEC (32-character hex / 128 bits, not 8-character)
+- Documentation: added missing `--admin-socket-path` CLI flag and `GCP_AUTHCALATOR_ADMIN_SOCKET_PATH` env var to README
+- Documentation: added missing `GCP_AUTHCALATOR_GATE_TLS_PORT` and `GCP_AUTHCALATOR_TLS_DIR` env vars to SPEC remote transport table
+- Documentation: added Docker image build step to releasing guide
+- Fixed stale comment in rate limiter (said "max 5" but constant is 10)
+
 ## [0.7.2] - 2026-04-01
 
 ### Changed
