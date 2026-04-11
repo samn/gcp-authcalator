@@ -4,7 +4,7 @@
 // Three layers of protection:
 //   1. Single-flight — only one confirmation dialog at a time
 //   2. Cooldown — 5 s pause after a denied request
-//   3. Sliding window — max 5 attempts per 1-minute window
+//   3. Sliding window — max 10 attempts per 1-minute window
 // ---------------------------------------------------------------------------
 
 /** Tunables (intentionally not user-configurable). */

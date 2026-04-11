@@ -14,6 +14,10 @@ service_account = "dev-runner@my-gcp-project.iam.gserviceaccount.com"
 # (or ~/.gcp-authcalator/gcp-authcalator.sock if XDG_RUNTIME_DIR is unset)
 # socket_path = "/run/user/1000/gcp-authcalator.sock"
 
+# Path to the admin socket for approve/deny commands (not mounted into containers)
+# Default: /tmp/gcp-authcalator-admin-<uid>/admin.sock
+# admin_socket_path = "/tmp/gcp-authcalator-admin-1000/admin.sock"
+
 # TCP port for the metadata proxy
 # Default: 8173
 # port = 8173
