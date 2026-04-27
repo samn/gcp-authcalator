@@ -1,5 +1,13 @@
 import { type GateConnection, connectionFetchOpts } from "../gate/connection.ts";
 
+/** Raised when the gate signals that sessions are disabled on this socket. */
+export class SessionNotPermittedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SessionNotPermittedError";
+  }
+}
+
 export interface FetchProdTokenOptions {
   /** Override fetch for testing. */
   fetchFn?: typeof globalThis.fetch;
@@ -25,19 +33,14 @@ export interface ProdTokenResult {
 }
 
 /**
- * One-shot fetch of a prod-level token and engineer identity from gcp-gate.
- *
- * 1. Hits `/token?level=prod` (triggers host-side confirmation).
- * 2. Hits `/identity` to retrieve the engineer's email address.
- *
- * The email is needed so the temporary metadata proxy can advertise a real
- * service-account email — gcloud ignores the "default" alias and only
- * recognises email-keyed accounts.
+ * Fetch only `/token?level=prod` from gcp-gate. May trigger host-side
+ * confirmation. Used by token-refresh paths that already know the engineer's
+ * email and don't need to round-trip `/identity` again.
  */
-export async function fetchProdToken(
+export async function fetchProdAccessToken(
   conn: GateConnection,
   options: FetchProdTokenOptions = {},
-): Promise<ProdTokenResult> {
+): Promise<{ access_token: string; expires_in: number }> {
   const fetchFn = options.fetchFn ?? globalThis.fetch;
   const { baseUrl, extraOpts } = connectionFetchOpts(conn);
 
@@ -49,9 +52,6 @@ export async function fetchProdToken(
     headers["X-Pending-Id"] = options.pendingId;
   }
 
-  const fetchOpts = { ...extraOpts, headers };
-
-  // Fetch prod token (may trigger host-side confirmation dialog)
   let tokenUrl = `${baseUrl}/token?level=prod`;
   if (options.scopes && options.scopes.length > 0) {
     tokenUrl += `&scopes=${options.scopes.map(encodeURIComponent).join(",")}`;
@@ -62,7 +62,7 @@ export async function fetchProdToken(
   if (options.tokenTtlSeconds !== undefined) {
     tokenUrl += `&token_ttl_seconds=${options.tokenTtlSeconds}`;
   }
-  const tokenRes = await fetchFn(tokenUrl, fetchOpts);
+  const tokenRes = await fetchFn(tokenUrl, { ...extraOpts, headers });
 
   if (!tokenRes.ok) {
     const text = await tokenRes.text();
@@ -75,23 +75,39 @@ export async function fetchProdToken(
     throw new Error("gcp-gate returned no access_token");
   }
 
-  // Fetch engineer identity
-  const identityRes = await fetchFn(`${baseUrl}/identity`, extraOpts);
+  return {
+    access_token: tokenBody.access_token,
+    expires_in: tokenBody.expires_in ?? 3600,
+  };
+}
 
+/**
+ * One-shot fetch of a prod-level token and engineer identity from gcp-gate.
+ * The email is needed so the temporary metadata proxy can advertise a real
+ * service-account email (gcloud ignores the "default" alias).
+ */
+export async function fetchProdToken(
+  conn: GateConnection,
+  options: FetchProdTokenOptions = {},
+): Promise<ProdTokenResult> {
+  const fetchFn = options.fetchFn ?? globalThis.fetch;
+  const { baseUrl, extraOpts } = connectionFetchOpts(conn);
+
+  const token = await fetchProdAccessToken(conn, options);
+
+  const identityRes = await fetchFn(`${baseUrl}/identity`, extraOpts);
   if (!identityRes.ok) {
     const text = await identityRes.text();
     throw new Error(`gcp-gate /identity returned ${identityRes.status}: ${text}`);
   }
-
   const identityBody = (await identityRes.json()) as { email?: string };
-
   if (!identityBody.email) {
     throw new Error("gcp-gate /identity returned no email");
   }
 
   return {
-    access_token: tokenBody.access_token,
-    expires_in: tokenBody.expires_in ?? 3600,
+    access_token: token.access_token,
+    expires_in: token.expires_in,
     email: identityBody.email,
   };
 }
@@ -151,6 +167,17 @@ export async function createProdSession(
 
   if (!res.ok) {
     const text = await res.text();
+    if (res.status === 403) {
+      try {
+        const body = JSON.parse(text) as { code?: string; error?: string };
+        if (body.code === "session_not_permitted_on_operator_socket") {
+          throw new SessionNotPermittedError(body.error ?? "Session creation not permitted");
+        }
+      } catch (err) {
+        if (err instanceof SessionNotPermittedError) throw err;
+        // body wasn't JSON — fall through to generic error
+      }
+    }
     throw new Error(`gcp-gate returned ${res.status}: ${text}`);
   }
 

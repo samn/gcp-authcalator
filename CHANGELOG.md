@@ -7,9 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- **Operator socket** for allowlisted auto-approve. A new third Unix socket
+  (`--operator-socket-path`) auto-approves prod requests whose PAM policy is
+  in `--auto-approve-pam-policies`, removing the confirmation prompt on the
+  human operator's path. Trust attaches to the _socket_ (via filesystem group
+  permissions, mode `0660`) rather than to a per-request UID, so the agent
+  UID can never reach this code path. Designed for two-UID devcontainer
+  setups: the operator runs as one UID with the operator socket bind-mounted
+  into their environment, the agent runs as a different UID with only the
+  main socket mounted.
+- New CLI flags: `--operator-socket-path`, `--operator-socket-group`,
+  `--auto-approve-pam-policies`, `--agent-uid`. Same names as snake-case TOML
+  keys and `GCP_AUTHCALATOR_*` env vars.
+- New audit-log fields: `socket` (`"main" | "operator" | "tcp" | "admin"`)
+  on every entry, and `auto_approved: true` on operator-socket grants.
+
 ### Changed
 
 - Upgraded Bun from 1.3.11 to 1.3.13.
+
+### Security
+
+- Operator-socket startup misconfiguration check: gate refuses to start when
+  `agent_uid` is in `operator_socket_group`, when `agent_uid` equals the gate
+  UID, or when the configured group is not in `/etc/group`.
+- Sessions are explicitly rejected on the operator socket (`POST /session`
+  and `GET /token?session=…` both return 403). Auto-approve is strictly
+  per-request — no 8-hour bearer-token refresh credential ever exists from
+  the operator-socket path. `with-prod` against the operator socket
+  transparently falls back to per-request token mode.
+- `X-Pending-Id` is rejected with 400 on the operator-socket auto-approve
+  path: auto-approve does not enqueue, so a client-supplied pending ID
+  indicates client confusion or attempted protocol misuse.
 
 ### Fixed
 

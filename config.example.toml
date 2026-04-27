@@ -46,6 +46,41 @@ service_account = "dev-runner@my-gcp-project.iam.gserviceaccount.com"
 # Controls how long with-prod can refresh tokens without re-confirmation.
 # session_ttl_seconds = 28800
 
+# ---------------------------------------------------------------------------
+# Operator socket — auto-approve for the human operator (gate only)
+# ---------------------------------------------------------------------------
+#
+# Adds a third Unix socket alongside the main + admin sockets. Prod requests
+# arriving on this socket auto-approve (no confirmation dialog) when their
+# resolved PAM policy is in auto_approve_pam_policies. Trust is a property of
+# the socket: filesystem group permissions decide who can connect.
+#
+# DEPLOYMENT MODEL: human operator and coding agent run as different UIDs in
+# the same environment. The operator UID is in operator_socket_group; the
+# agent UID is NOT.
+#
+# SECURITY:
+#   - The agent UID MUST NOT be a member of operator_socket_group, or the
+#     gate refuses to start (verified at startup against /etc/group).
+#   - Sessions (POST /session, GET /token?session=…) return 403 on this
+#     socket — there is no 8-hour bearer credential to steal.
+#   - auto_approve_pam_policies must be a subset of pam_allowed_policies
+#     (or equal pam_policy). Treat additions to this list with the same
+#     review rigor as IAM policy changes — anything in this list is granted
+#     by *any* code that runs as the operator UID, including malicious code
+#     planted via the operator's tooling.
+#   - This is Unix-socket-only. Remote (TCP+mTLS) operators do not get
+#     auto-approve; they take the standard prompt path.
+#
+# operator_socket_path = "/run/user/1000/gcp-authcalator-operator.sock"
+# operator_socket_group = "gcp-operators"
+# auto_approve_pam_policies = ["prod-readonly"]
+#
+# agent_uid: numeric UID or username. Required when operator_socket_path is
+# set so the gate can verify the agent's group memberships at startup.
+# agent_uid = 1001
+# agent_uid = "claude"
+
 # Extra environment variables for with-prod subprocess.
 # Values support ${VAR} and ${VAR:-default} substitution resolved against the
 # elevated environment (after GCE_METADATA_HOST etc. are set).

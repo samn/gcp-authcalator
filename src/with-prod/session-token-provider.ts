@@ -1,8 +1,6 @@
 import { type GateConnection, connectionFetchOpts } from "../gate/connection.ts";
 import type { CachedToken, TokenProvider } from "../metadata-proxy/types.ts";
-
-/** Minimum remaining lifetime before we re-fetch a cached token (5 minutes). */
-const CACHE_MARGIN_MS = 5 * 60 * 1000;
+import { createCachingTokenProvider } from "./caching-token-provider.ts";
 
 export interface SessionTokenProviderOptions {
   /** Override fetch for testing. */
@@ -29,17 +27,7 @@ export function createSessionTokenProvider(
   const fetchFn = options.fetchFn ?? globalThis.fetch;
   const { baseUrl, extraOpts } = connectionFetchOpts(conn);
 
-  let tokenCache: CachedToken = initialToken;
-
-  function isCacheValid(): boolean {
-    return tokenCache.expires_at.getTime() - Date.now() > CACHE_MARGIN_MS;
-  }
-
-  async function getToken(): Promise<CachedToken> {
-    if (isCacheValid()) {
-      return tokenCache;
-    }
-
+  return createCachingTokenProvider(initialToken, options.onRefresh, async () => {
     const url = `${baseUrl}/token?session=${encodeURIComponent(sessionId)}`;
     const res = await fetchFn(url, extraOpts);
 
@@ -50,28 +38,19 @@ export function createSessionTokenProvider(
           "The gcp-gate daemon may have restarted. Re-run with-prod to start a new session.",
       );
     }
-
     if (!res.ok) {
       const text = await res.text();
       throw new Error(`gcp-gate returned ${res.status}: ${text}`);
     }
 
     const body = (await res.json()) as { access_token?: string; expires_in?: number };
-
     if (!body.access_token) {
       throw new Error("gcp-gate returned no access_token");
     }
 
-    const expiresIn = body.expires_in ?? 3600;
-    tokenCache = {
+    return {
       access_token: body.access_token,
-      expires_at: new Date(Date.now() + expiresIn * 1000),
+      expires_at: new Date(Date.now() + (body.expires_in ?? 3600) * 1000),
     };
-
-    options.onRefresh?.(tokenCache);
-
-    return tokenCache;
-  }
-
-  return { getToken };
+  });
 }

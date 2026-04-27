@@ -260,7 +260,7 @@ describe("runWithProd", () => {
     // Verify log messages include the engineer's email
     const logOutput = logSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
     expect(logOutput).toContain("requesting prod session");
-    expect(logOutput).toContain("prod session created for eng@example.com");
+    expect(logOutput).toContain("prod access acquired for eng@example.com");
   });
 
   test("sets gcloudConfigDir permissions to 0o700 (owner-only)", async () => {
@@ -477,6 +477,81 @@ describe("runWithProd", () => {
     process.env = originalEnv;
   });
 
+  test("operator socket: falls back to per-request token mode on 403 session-not-permitted", async () => {
+    // Gate rejects POST /session (operator socket), then serves /identity for
+    // initial fetchProdToken, and serves /token?level=prod (no session) for
+    // the initial token. We assert that the wrapped command is spawned and
+    // that the log output mentions the per-request fallback.
+    let sessionPostCount = 0;
+    let tokenLevelProdCount = 0;
+    const mockFetchFn = (async (url: string, init?: RequestInit) => {
+      const parsed = new URL(url);
+      const method = init?.method ?? "GET";
+      if (parsed.pathname === "/session" && method === "POST") {
+        sessionPostCount++;
+        return new Response(
+          JSON.stringify({
+            error: "Session creation not permitted on operator socket",
+            code: "session_not_permitted_on_operator_socket",
+          }),
+          { status: 403, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (parsed.pathname === "/token" && parsed.searchParams.get("level") === "prod") {
+        tokenLevelProdCount++;
+        return new Response(
+          JSON.stringify({
+            access_token: "per-request-token",
+            expires_in: 1800,
+            token_type: "Bearer",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (parsed.pathname === "/identity") {
+        return new Response(JSON.stringify({ email: "human@example.com" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response("Not found", { status: 404 });
+    }) as unknown as typeof globalThis.fetch;
+
+    let capturedEnv: Record<string, string | undefined> = {};
+    const mockSpawnFn = (_cmd: string[], opts: { env: Record<string, string | undefined> }) => {
+      capturedEnv = opts.env;
+      return {
+        exited: Promise.resolve(0),
+        kill: () => {},
+      } as unknown as Subprocess;
+    };
+
+    await expect(
+      runWithProd(
+        {
+          project_id: "my-proj",
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
+        },
+        ["echo", "hello"],
+        {
+          fetchOptions: { fetchFn: mockFetchFn },
+          spawnFn: mockSpawnFn,
+        },
+      ),
+    ).rejects.toThrow("process.exit called");
+
+    expect(sessionPostCount).toBe(1);
+    expect(tokenLevelProdCount).toBe(1);
+    expect(capturedEnv.CLOUDSDK_CORE_ACCOUNT).toBe("human@example.com");
+    expect(exitSpy).toHaveBeenCalledWith(0);
+
+    const logOutput = logSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
+    expect(logOutput).toContain("falling back to per-request token mode");
+    expect(logOutput).toContain("prod access acquired for human@example.com");
+  });
+
   test("exits 1 with error message when token fetch fails", async () => {
     const mockFetchFn = (async () =>
       new Response("denied", { status: 403 })) as unknown as typeof globalThis.fetch;
@@ -498,7 +573,7 @@ describe("runWithProd", () => {
 
     expect(exitSpy).toHaveBeenCalledWith(1);
     const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
-    expect(errorOutput).toContain("failed to create prod session");
+    expect(errorOutput).toContain("failed to acquire prod token");
   });
 
   test("propagates non-zero exit code from child process", async () => {

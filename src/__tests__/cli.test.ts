@@ -247,7 +247,7 @@ describe("with-prod subcommand", () => {
       "hello",
     ]);
     expect(exitCode).toBe(1);
-    expect(stderr).toContain("failed to create prod session");
+    expect(stderr).toContain("failed to acquire prod token");
   });
 
   test("exits 1 when no wrapped command provided", async () => {

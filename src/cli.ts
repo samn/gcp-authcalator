@@ -71,10 +71,21 @@ Options:
   --pam-location <loc>     PAM entitlement location (default: global)
   --token-ttl-seconds <secs>  Token lifetime in seconds (default: 3600)
   --session-ttl-seconds <secs>  Prod session lifetime in seconds (default: 28800 / 8h)
+  --operator-socket-path <path>      Operator socket path (auto-approve eligible — see docs)
+  --operator-socket-group <name>     Unix group whose members can connect to the operator socket
+  --auto-approve-pam-policies <ids>  PAM entitlements that auto-approve on the operator socket (comma-separated; subset of --pam-allowed-policies)
+  --agent-uid <uid|name>             Agent UID (or username) — required with --operator-socket-path; gate refuses to start if this UID is in the operator group
   -e, --env <KEY=VALUE>    Extra env var for with-prod subprocess (repeatable, supports \${VAR} substitution)
   -c, --config <path>      Path to TOML config file
   -h, --help               Show this help message
   -v, --version            Show version
+
+Operator socket (gate only):
+  Reduces confirmation fatigue by auto-approving allowlisted prod requests
+  on a separate Unix socket only the operator UID can reach. Requires the
+  operator and the agent to run as different UIDs in the same environment;
+  the agent UID MUST NOT be a member of the operator group, or the gate
+  refuses to start.
 
 Examples:
   gcp-authcalator gate --project-id my-project --service-account sa@my-project.iam.gserviceaccount.com
@@ -124,6 +135,10 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       "pam-location": { type: "string" },
       "token-ttl-seconds": { type: "string" },
       "session-ttl-seconds": { type: "string" },
+      "operator-socket-path": { type: "string" },
+      "operator-socket-group": { type: "string" },
+      "auto-approve-pam-policies": { type: "string" },
+      "agent-uid": { type: "string" },
       env: { type: "string", short: "e", multiple: true },
       config: { type: "string", short: "c" },
       help: { type: "boolean", short: "h" },

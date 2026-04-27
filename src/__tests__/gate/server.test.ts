@@ -6,6 +6,7 @@ import { startGateServer, type GateServerResult } from "../../gate/server.ts";
 import type { GateConfig } from "../../config.ts";
 import type { AuthClient } from "google-auth-library";
 import type { BunRequestInit } from "../../gate/connection.ts";
+import { execSync } from "node:child_process";
 
 function mockClient(token: string): AuthClient {
   return {
@@ -381,5 +382,184 @@ setInterval(() => {}, 1000);`;
     const stats = statSync(adminSocketPath);
     const permissions = stats.mode & 0o777;
     expect(permissions).toBe(0o600);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Operator socket
+// ---------------------------------------------------------------------------
+
+/** Resolve a usable operator-group name + matching agent UID for tests. */
+function operatorGroupForCurrentUser(): { groupName: string; agentUid: number } {
+  const groupName = execSync("id -gn", { encoding: "utf-8" }).trim();
+  // Pick a UID that definitely is not in the current user's primary group.
+  // UID 0 (root) usually has its own primary group and isn't in users' groups.
+  return { groupName, agentUid: 0 };
+}
+
+describe("operator socket", () => {
+  let result: GateServerResult | null = null;
+
+  afterEach(() => {
+    if (result) {
+      result.stop();
+      result = null;
+    }
+  });
+
+  test("creates operator socket with mode 0660 and group ownership", async () => {
+    const { groupName, agentUid } = operatorGroupForCurrentUser();
+    const tempDir = mkdtempSync(join(tmpdir(), "gate-op-"));
+    const config: GateConfig = {
+      ...makeConfig(join(tempDir, "gate.sock"), join(tempDir, "admin.sock")),
+      operator_socket_path: join(tempDir, "operator.sock"),
+      operator_socket_group: groupName,
+      agent_uid: agentUid,
+    };
+
+    result = await startGateServer(config, {
+      authOptions: {
+        sourceClient: mockClient("source-tok"),
+        impersonatedClient: mockClient("dev-tok"),
+        fetchFn: mockFetch("test@example.com"),
+      },
+      auditLogDir: join(tempDir, "audit"),
+    });
+
+    const stats = statSync(config.operator_socket_path!);
+    expect(stats.mode & 0o777).toBe(0o660);
+
+    // Main socket still 0600, unaffected.
+    expect(statSync(config.socket_path).mode & 0o777).toBe(0o600);
+  });
+
+  test("operator socket auto-approves allowlisted PAM policy", async () => {
+    const { groupName, agentUid } = operatorGroupForCurrentUser();
+    const tempDir = mkdtempSync(join(tmpdir(), "gate-op-"));
+    const operatorSocketPath = join(tempDir, "operator.sock");
+    // PAM policies aren't relevant here — we test session rejection only.
+    const config: GateConfig = {
+      ...makeConfig(join(tempDir, "gate.sock"), join(tempDir, "admin.sock")),
+      operator_socket_path: operatorSocketPath,
+      operator_socket_group: groupName,
+      agent_uid: agentUid,
+    };
+
+    result = await startGateServer(config, {
+      authOptions: {
+        sourceClient: mockClient("source-tok"),
+        impersonatedClient: mockClient("dev-tok"),
+        fetchFn: mockFetch("test@example.com"),
+      },
+      auditLogDir: join(tempDir, "audit"),
+    });
+
+    // Sessions are explicitly disabled on the operator socket — easy probe.
+    const res = await fetch("http://localhost/session", {
+      method: "POST",
+      unix: operatorSocketPath,
+    } as BunRequestInit);
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("operator socket");
+  });
+
+  test("stop() cleans up operator socket file", async () => {
+    const { groupName, agentUid } = operatorGroupForCurrentUser();
+    const tempDir = mkdtempSync(join(tmpdir(), "gate-op-"));
+    const operatorSocketPath = join(tempDir, "operator.sock");
+    const config: GateConfig = {
+      ...makeConfig(join(tempDir, "gate.sock"), join(tempDir, "admin.sock")),
+      operator_socket_path: operatorSocketPath,
+      operator_socket_group: groupName,
+      agent_uid: agentUid,
+    };
+
+    result = await startGateServer(config, {
+      authOptions: {
+        sourceClient: mockClient("source-tok"),
+        impersonatedClient: mockClient("dev-tok"),
+        fetchFn: mockFetch("test@example.com"),
+      },
+      auditLogDir: join(tempDir, "audit"),
+    });
+
+    expect(existsSync(operatorSocketPath)).toBe(true);
+
+    result.stop();
+    result = null;
+
+    expect(existsSync(operatorSocketPath)).toBe(false);
+  });
+
+  test("refuses to start when operator_socket_group does not exist", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "gate-op-"));
+    const config: GateConfig = {
+      ...makeConfig(join(tempDir, "gate.sock"), join(tempDir, "admin.sock")),
+      operator_socket_path: join(tempDir, "operator.sock"),
+      operator_socket_group: "nonexistent-group-zzzzzzz",
+      agent_uid: 0,
+    };
+
+    await expect(
+      startGateServer(config, {
+        authOptions: {
+          sourceClient: mockClient("source-tok"),
+          impersonatedClient: mockClient("dev-tok"),
+          fetchFn: mockFetch("test@example.com"),
+        },
+        auditLogDir: join(tempDir, "audit"),
+      }),
+    ).rejects.toThrow(/not found in \/etc\/group/);
+  });
+
+  test("refuses to start when agent_uid equals gate uid", async () => {
+    const { groupName } = operatorGroupForCurrentUser();
+    const tempDir = mkdtempSync(join(tmpdir(), "gate-op-"));
+    const config: GateConfig = {
+      ...makeConfig(join(tempDir, "gate.sock"), join(tempDir, "admin.sock")),
+      operator_socket_path: join(tempDir, "operator.sock"),
+      operator_socket_group: groupName,
+      agent_uid: process.getuid!(),
+    };
+
+    await expect(
+      startGateServer(config, {
+        authOptions: {
+          sourceClient: mockClient("source-tok"),
+          impersonatedClient: mockClient("dev-tok"),
+          fetchFn: mockFetch("test@example.com"),
+        },
+        auditLogDir: join(tempDir, "audit"),
+      }),
+    ).rejects.toThrow(/equals gate uid/);
+  });
+
+  test("refuses to start when operator socket path is a symlink", async () => {
+    const { groupName, agentUid } = operatorGroupForCurrentUser();
+    const tempDir = mkdtempSync(join(tmpdir(), "gate-op-"));
+    const operatorSocketPath = join(tempDir, "operator.sock");
+    const target = join(tempDir, "target");
+    writeFileSync(target, "x");
+    symlinkSync(target, operatorSocketPath);
+
+    const config: GateConfig = {
+      ...makeConfig(join(tempDir, "gate.sock"), join(tempDir, "admin.sock")),
+      operator_socket_path: operatorSocketPath,
+      operator_socket_group: groupName,
+      agent_uid: agentUid,
+    };
+
+    await expect(
+      startGateServer(config, {
+        authOptions: {
+          sourceClient: mockClient("source-tok"),
+          impersonatedClient: mockClient("dev-tok"),
+          fetchFn: mockFetch("test@example.com"),
+        },
+        auditLogDir: join(tempDir, "audit"),
+      }),
+    ).rejects.toThrow(/symlink/);
+    expect(existsSync(target)).toBe(true);
   });
 });
