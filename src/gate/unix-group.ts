@@ -57,16 +57,31 @@ export function parsePasswdFile(content: string): PasswdEntry[] {
   return result;
 }
 
-export function lookupGroup(name: string, groupFile = "/etc/group"): GroupEntry | undefined {
-  const content = readFileSync(groupFile, "utf-8");
-  return parseGroupFile(content).find((g) => g.name === name);
+/**
+ * Snapshot of /etc/group + /etc/passwd. Read once per gate startup and reused
+ * across all lookups to avoid re-reading the same files for each check.
+ */
+export interface UnixGroupDb {
+  groups: GroupEntry[];
+  passwd: PasswdEntry[];
+}
+
+export function loadUnixGroupDb(groupFile = "/etc/group", passwdFile = "/etc/passwd"): UnixGroupDb {
+  return {
+    groups: parseGroupFile(readFileSync(groupFile, "utf-8")),
+    passwd: parsePasswdFile(readFileSync(passwdFile, "utf-8")),
+  };
+}
+
+export function lookupGroup(name: string, db: UnixGroupDb): GroupEntry | undefined {
+  return db.groups.find((g) => g.name === name);
 }
 
 /**
  * Resolve a user-supplied agent identifier (numeric UID or username) to a UID.
  * Throws if the username cannot be found in /etc/passwd.
  */
-export function resolveAgentUid(value: number | string, passwdFile = "/etc/passwd"): number {
+export function resolveAgentUid(value: number | string, db: UnixGroupDb): number {
   if (typeof value === "number") {
     if (!Number.isInteger(value) || value < 0) {
       throw new Error(`agent_uid must be a non-negative integer, got ${value}`);
@@ -77,10 +92,9 @@ export function resolveAgentUid(value: number | string, passwdFile = "/etc/passw
   if (/^\d+$/.test(trimmed)) {
     return Number(trimmed);
   }
-  const content = readFileSync(passwdFile, "utf-8");
-  const entry = parsePasswdFile(content).find((p) => p.name === trimmed);
+  const entry = db.passwd.find((p) => p.name === trimmed);
   if (!entry) {
-    throw new Error(`agent_uid: user '${trimmed}' not found in ${passwdFile}`);
+    throw new Error(`agent_uid: user '${trimmed}' not found in /etc/passwd`);
   }
   return entry.uid;
 }
@@ -90,18 +104,12 @@ export function resolveAgentUid(value: number | string, passwdFile = "/etc/passw
  * plus every supplementary gid where the username appears in /etc/group's
  * member list. Returns an empty array if the UID is not in /etc/passwd.
  */
-export function getGroupsForUid(
-  uid: number,
-  groupFile = "/etc/group",
-  passwdFile = "/etc/passwd",
-): number[] {
-  const passwd = parsePasswdFile(readFileSync(passwdFile, "utf-8"));
-  const user = passwd.find((p) => p.uid === uid);
+export function getGroupsForUid(uid: number, db: UnixGroupDb): number[] {
+  const user = db.passwd.find((p) => p.uid === uid);
   if (!user) return [];
 
-  const groups = parseGroupFile(readFileSync(groupFile, "utf-8"));
   const gids = new Set<number>([user.gid]);
-  for (const g of groups) {
+  for (const g of db.groups) {
     if (g.members.includes(user.name)) gids.add(g.gid);
   }
   return [...gids];

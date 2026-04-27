@@ -41,9 +41,10 @@ export interface HealthResponse {
   uptime_seconds: number;
 }
 
-/** JSON error response. */
+/** JSON error response. The optional `code` discriminates errors that clients want to handle programmatically. */
 export interface ErrorResponse {
   error: string;
+  code?: string;
 }
 
 /** JSON response for session creation. */
@@ -74,12 +75,9 @@ export interface AuditEntry {
   auto_approved?: boolean;
 }
 
-/**
- * Per-request metadata threaded through the handler chain. The {@link trusted}
- * flag is set only by the operator-socket fetch handler and gates the
- * auto-approve check in `acquireProdAccess`.
- */
+/** Per-request metadata threaded through the handler chain. */
 export interface RequestContext {
+  /** True if the connecting socket has been pre-authorised for auto-approve via filesystem permissions. */
   trusted: boolean;
   socket: "main" | "operator" | "tcp" | "admin";
 }

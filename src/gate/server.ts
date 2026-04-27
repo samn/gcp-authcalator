@@ -13,7 +13,7 @@ import { loadAndValidateTlsFiles } from "../tls/store.ts";
 import type { BunRequestInit } from "./connection.ts";
 import { createPamModule, resolveEntitlementPath, type PamModule } from "./pam.ts";
 import { createPendingQueue } from "./pending.ts";
-import { lookupGroup, resolveAgentUid, getGroupsForUid } from "./unix-group.ts";
+import { lookupGroup, loadUnixGroupDb, resolveAgentUid, getGroupsForUid } from "./unix-group.ts";
 
 export interface GateServerResult {
   server: ReturnType<typeof Bun.serve>;
@@ -237,22 +237,25 @@ export async function startGateServer(
     // Schema refinement guarantees these are set when operator_socket_path is.
     const groupName = config.operator_socket_group!;
     const agentUidValue = config.agent_uid!;
+    const gateUid = process.getuid!();
 
-    const grp = lookupGroup(groupName);
+    // Read /etc/group + /etc/passwd once and reuse for all three lookups.
+    const unixDb = loadUnixGroupDb();
+
+    const grp = lookupGroup(groupName, unixDb);
     if (!grp) {
       throw new Error(
         `gate: operator socket group '${groupName}' not found in /etc/group — refusing to start`,
       );
     }
 
-    const agentUid = resolveAgentUid(agentUidValue);
-    if (agentUid === process.getuid!()) {
+    const agentUid = resolveAgentUid(agentUidValue, unixDb);
+    if (agentUid === gateUid) {
       throw new Error(
         `gate: agent_uid (${agentUid}) equals gate uid — operator-socket trust boundary cannot exist`,
       );
     }
-    const agentGroups = getGroupsForUid(agentUid);
-    if (agentGroups.includes(grp.gid)) {
+    if (getGroupsForUid(agentUid, unixDb).includes(grp.gid)) {
       throw new Error(
         `gate: agent uid ${agentUid} is a member of operator group '${grp.name}' (gid ${grp.gid}) — refusing to start. ` +
           `Remove the agent uid from the group, or unset operator_socket_path.`,
@@ -261,10 +264,7 @@ export async function startGateServer(
 
     const operatorSocketDir = dirname(config.operator_socket_path);
     mkdirSync(operatorSocketDir, { recursive: true, mode: 0o750 });
-    // chown the directory to {gate uid : operator group} so only those can
-    // traverse into it. Best-effort: if we don't have CAP_CHOWN this throws,
-    // which is the right outcome — fail loudly rather than ship a hole.
-    chownSync(operatorSocketDir, process.getuid!(), grp.gid);
+    chownSync(operatorSocketDir, gateUid, grp.gid);
 
     await cleanStaleSocket(config.operator_socket_path, "operator socket");
 
@@ -277,7 +277,7 @@ export async function startGateServer(
 
     // chown then chmod, in that order: chown clears setgid/setuid bits on
     // some kernels, so apply mode afterwards.
-    chownSync(config.operator_socket_path, process.getuid!(), grp.gid);
+    chownSync(config.operator_socket_path, gateUid, grp.gid);
     chmodSync(config.operator_socket_path, 0o660);
     operatorSocketIno = lstatSync(config.operator_socket_path).ino;
   }

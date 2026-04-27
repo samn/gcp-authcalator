@@ -125,7 +125,13 @@ async function handleSessionTokenRefresh(
   // session-creation path, so any session_id presented here would have to
   // have been minted elsewhere — reject defensively.
   if (ctx.trusted) {
-    return jsonResponse({ error: "Session refresh not permitted on operator socket" }, 403);
+    return jsonResponse(
+      {
+        error: "Session refresh not permitted on operator socket",
+        code: "session_not_permitted_on_operator_socket",
+      },
+      403,
+    );
   }
 
   const session = deps.sessionManager.validate(sessionId);
@@ -306,12 +312,9 @@ async function acquireProdAccess(
     return jsonResponse({ error: "PAM policy requested but PAM module not configured" }, 500);
   }
 
-  // Operator-socket auto-approve check. The trust flag is set only by the
-  // operator socket's fetch handler; the agent socket can never reach this
-  // branch. Auto-approve fires only when the resolved PAM policy is in the
-  // explicit allowlist, so out-of-allowlist requests on the operator socket
-  // were already rejected above (we deliberately do NOT fall through to a
-  // confirmation prompt — see plans/i-want-to-be-eventual-pinwheel.md §3a).
+  // Out-of-allowlist requests on the operator socket were already rejected
+  // by the pam_allowed_policies check above; we deliberately do NOT fall
+  // through to a confirmation prompt for them.
   const autoApprove =
     ctx.trusted &&
     effectivePamPolicy !== undefined &&
@@ -489,7 +492,13 @@ async function handleCreateSession(
   ctx: RequestContext,
 ): Promise<Response> {
   if (ctx.trusted) {
-    return jsonResponse({ error: "Session creation not permitted on operator socket" }, 403);
+    return jsonResponse(
+      {
+        error: "Session creation not permitted on operator socket",
+        code: "session_not_permitted_on_operator_socket",
+      },
+      403,
+    );
   }
 
   const scopesParam = url.searchParams.get("scopes");

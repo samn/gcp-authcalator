@@ -6,6 +6,7 @@ import {
   parseGroupFile,
   parsePasswdFile,
   lookupGroup,
+  loadUnixGroupDb,
   resolveAgentUid,
   getGroupsForUid,
 } from "../../gate/unix-group.ts";
@@ -53,86 +54,87 @@ describe("parsePasswdFile", () => {
   });
 });
 
+function makeDb(opts: { group?: string; passwd?: string } = {}): {
+  gf: string;
+  pf: string;
+  db: ReturnType<typeof loadUnixGroupDb>;
+} {
+  const dir = mkdtempSync(join(tmpdir(), "ug-"));
+  const gf = join(dir, "group");
+  const pf = join(dir, "passwd");
+  writeFileSync(gf, opts.group ?? "");
+  writeFileSync(pf, opts.passwd ?? "");
+  return { gf, pf, db: loadUnixGroupDb(gf, pf) };
+}
+
 describe("lookupGroup", () => {
   test("finds group by name", () => {
-    const dir = mkdtempSync(join(tmpdir(), "ug-"));
-    const gf = join(dir, "group");
-    writeFileSync(gf, "ops:x:2000:alice\nother:x:2001:bob\n");
-    expect(lookupGroup("ops", gf)).toEqual({ name: "ops", gid: 2000, members: ["alice"] });
+    const { db } = makeDb({ group: "ops:x:2000:alice\nother:x:2001:bob\n" });
+    expect(lookupGroup("ops", db)).toEqual({ name: "ops", gid: 2000, members: ["alice"] });
   });
 
   test("returns undefined when missing", () => {
-    const dir = mkdtempSync(join(tmpdir(), "ug-"));
-    const gf = join(dir, "group");
-    writeFileSync(gf, "other:x:2001:bob\n");
-    expect(lookupGroup("ops", gf)).toBeUndefined();
+    const { db } = makeDb({ group: "other:x:2001:bob\n" });
+    expect(lookupGroup("ops", db)).toBeUndefined();
   });
 });
 
 describe("resolveAgentUid", () => {
+  const emptyDb = { groups: [], passwd: [] };
+
   test("returns numeric UID directly", () => {
-    expect(resolveAgentUid(1001)).toBe(1001);
+    expect(resolveAgentUid(1001, emptyDb)).toBe(1001);
   });
 
   test("parses numeric strings", () => {
-    expect(resolveAgentUid("1001")).toBe(1001);
+    expect(resolveAgentUid("1001", emptyDb)).toBe(1001);
   });
 
   test("looks up username in /etc/passwd", () => {
-    const dir = mkdtempSync(join(tmpdir(), "ug-"));
-    const pf = join(dir, "passwd");
-    writeFileSync(pf, "claude:x:1500:1500::/home/claude:/bin/sh\n");
-    expect(resolveAgentUid("claude", pf)).toBe(1500);
+    const { db } = makeDb({ passwd: "claude:x:1500:1500::/home/claude:/bin/sh\n" });
+    expect(resolveAgentUid("claude", db)).toBe(1500);
   });
 
   test("throws when user is not found", () => {
-    const dir = mkdtempSync(join(tmpdir(), "ug-"));
-    const pf = join(dir, "passwd");
-    writeFileSync(pf, "alice:x:1000:1000::/home/alice:/bin/sh\n");
-    expect(() => resolveAgentUid("missing", pf)).toThrow(/not found/);
+    const { db } = makeDb({ passwd: "alice:x:1000:1000::/home/alice:/bin/sh\n" });
+    expect(() => resolveAgentUid("missing", db)).toThrow(/not found/);
   });
 
   test("throws on negative integer", () => {
-    expect(() => resolveAgentUid(-1)).toThrow(/non-negative/);
+    expect(() => resolveAgentUid(-1, emptyDb)).toThrow(/non-negative/);
   });
 });
 
 describe("getGroupsForUid", () => {
   test("returns primary plus supplementary gids", () => {
-    const dir = mkdtempSync(join(tmpdir(), "ug-"));
-    const gf = join(dir, "group");
-    const pf = join(dir, "passwd");
-    writeFileSync(pf, "alice:x:1000:1000::/home/alice:/bin/sh\n");
-    writeFileSync(gf, "alice:x:1000:\nops:x:2000:alice,bob\nextra:x:2001:alice\n");
-    const out = getGroupsForUid(1000, gf, pf).sort();
-    expect(out).toEqual([1000, 2000, 2001]);
+    const { db } = makeDb({
+      passwd: "alice:x:1000:1000::/home/alice:/bin/sh\n",
+      group: "alice:x:1000:\nops:x:2000:alice,bob\nextra:x:2001:alice\n",
+    });
+    expect(getGroupsForUid(1000, db).sort()).toEqual([1000, 2000, 2001]);
   });
 
   test("returns only primary gid when no supplementary memberships", () => {
-    const dir = mkdtempSync(join(tmpdir(), "ug-"));
-    const gf = join(dir, "group");
-    const pf = join(dir, "passwd");
-    writeFileSync(pf, "alice:x:1000:1000::/home/alice:/bin/sh\n");
-    writeFileSync(gf, "ops:x:2000:bob\n");
-    expect(getGroupsForUid(1000, gf, pf)).toEqual([1000]);
+    const { db } = makeDb({
+      passwd: "alice:x:1000:1000::/home/alice:/bin/sh\n",
+      group: "ops:x:2000:bob\n",
+    });
+    expect(getGroupsForUid(1000, db)).toEqual([1000]);
   });
 
   test("returns empty array when uid not in passwd", () => {
-    const dir = mkdtempSync(join(tmpdir(), "ug-"));
-    const gf = join(dir, "group");
-    const pf = join(dir, "passwd");
-    writeFileSync(pf, "alice:x:1000:1000::/home/alice:/bin/sh\n");
-    writeFileSync(gf, "ops:x:2000:alice\n");
-    expect(getGroupsForUid(9999, gf, pf)).toEqual([]);
+    const { db } = makeDb({
+      passwd: "alice:x:1000:1000::/home/alice:/bin/sh\n",
+      group: "ops:x:2000:alice\n",
+    });
+    expect(getGroupsForUid(9999, db)).toEqual([]);
   });
 
   test("does not double-count primary gid in supplementary list", () => {
-    const dir = mkdtempSync(join(tmpdir(), "ug-"));
-    const gf = join(dir, "group");
-    const pf = join(dir, "passwd");
-    writeFileSync(pf, "alice:x:1000:1000::/home/alice:/bin/sh\n");
-    writeFileSync(gf, "alice:x:1000:alice\nops:x:2000:alice\n");
-    const out = getGroupsForUid(1000, gf, pf).sort();
-    expect(out).toEqual([1000, 2000]);
+    const { db } = makeDb({
+      passwd: "alice:x:1000:1000::/home/alice:/bin/sh\n",
+      group: "alice:x:1000:alice\nops:x:2000:alice\n",
+    });
+    expect(getGroupsForUid(1000, db).sort()).toEqual([1000, 2000]);
   });
 });

@@ -490,7 +490,10 @@ describe("runWithProd", () => {
       if (parsed.pathname === "/session" && method === "POST") {
         sessionPostCount++;
         return new Response(
-          JSON.stringify({ error: "Session creation not permitted on operator socket" }),
+          JSON.stringify({
+            error: "Session creation not permitted on operator socket",
+            code: "session_not_permitted_on_operator_socket",
+          }),
           { status: 403, headers: { "Content-Type": "application/json" } },
         );
       }

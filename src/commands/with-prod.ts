@@ -7,6 +7,7 @@ import {
   createProdSession,
   fetchProdToken,
   revokeProdSession,
+  SessionNotPermittedError,
   type FetchProdTokenOptions,
 } from "../with-prod/fetch-prod-token.ts";
 import { createSessionTokenProvider } from "../with-prod/session-token-provider.ts";
@@ -196,8 +197,7 @@ export async function runWithProd(
       initialAccessToken = sessionResult.access_token;
       initialExpiresIn = sessionResult.expires_in;
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes("Session creation not permitted on operator socket")) {
+      if (err instanceof SessionNotPermittedError) {
         console.log(
           "with-prod: operator socket — falling back to per-request token mode (no session)",
         );
