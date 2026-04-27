@@ -144,14 +144,24 @@ describe("startGateServer", () => {
       auditLogDir: join(tempDir, "audit"),
     };
 
-    // Start then stop a server to leave a real stale socket behind.
-    const first = await startGateServer(config, serverOpts);
-    first.stop();
-
-    // The stop() above deletes the socket, so re-create a stale one
-    // by starting and hard-killing (just stop the server, leave the file).
-    const second = await startGateServer(config, serverOpts);
-    second.server.stop(true); // stop server but don't clean up socket
+    // Simulate a crashed prior instance: spawn a child that binds the socket,
+    // then SIGKILL it so the kernel leaves the socket file on disk. Since
+    // bun 1.3.12, graceful close auto-unlinks, so only an abrupt kernel-level
+    // termination reproduces a true stale-socket state.
+    const childCode = `Bun.serve({ unix: ${JSON.stringify(
+      socketPath,
+    )}, fetch() { return new Response("stale"); } });
+process.stdout.write("ready\\n");
+setInterval(() => {}, 1000);`;
+    const child = Bun.spawn({
+      cmd: ["bun", "-e", childCode],
+      stdio: ["ignore", "pipe", "inherit"],
+    });
+    for await (const chunk of child.stdout) {
+      if (new TextDecoder().decode(chunk).includes("ready")) break;
+    }
+    child.kill("SIGKILL");
+    await child.exited;
     expect(existsSync(socketPath)).toBe(true);
 
     // Now starting a new server should succeed by removing the stale socket.
