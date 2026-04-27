@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Changed
+
+- Upgraded Bun from 1.3.11 to 1.3.13.
+
 ### Fixed
 
 - Documentation: corrected rate limiting values in README and SPEC (1-second cooldown and 10 attempts/minute, matching implementation)

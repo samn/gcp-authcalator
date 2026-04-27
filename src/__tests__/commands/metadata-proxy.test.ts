@@ -50,22 +50,28 @@ describe("runMetadataProxy", () => {
 
     const tmpDir = mkdtempSync(join(tmpdir(), "mp-cmd-test-"));
     const socketPath = join(tmpDir, "test.sock");
+    // Keep a server running so the socket file exists, and inject a fetch
+    // that always fails to simulate an unresponsive daemon.
     const tempServer = Bun.serve({
       unix: socketPath,
       fetch() {
         return new Response("ok");
       },
     });
-    tempServer.stop(true);
+    const failingFetch = (() =>
+      Promise.reject(new Error("ECONNREFUSED"))) as unknown as typeof globalThis.fetch;
 
     try {
       await expect(
-        runMetadataProxy({
-          project_id: "test-project",
-          socket_path: socketPath,
-          port: 19999,
-          admin_socket_path: "/tmp/test-admin.sock",
-        }),
+        runMetadataProxy(
+          {
+            project_id: "test-project",
+            socket_path: socketPath,
+            port: 19999,
+            admin_socket_path: "/tmp/test-admin.sock",
+          },
+          { checkFetchFn: failingFetch },
+        ),
       ).rejects.toThrow("process.exit(1)");
 
       const output = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
@@ -73,6 +79,7 @@ describe("runMetadataProxy", () => {
     } finally {
       errorSpy.mockRestore();
       exitSpy.mockRestore();
+      tempServer.stop(true);
       rmSync(tmpDir, { recursive: true, force: true });
     }
   });

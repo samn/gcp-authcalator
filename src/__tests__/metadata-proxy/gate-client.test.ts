@@ -260,7 +260,8 @@ describe("checkGateSocket", () => {
   });
 
   test("throws when socket exists but daemon is not responding", async () => {
-    // Create a real Unix socket that nothing is listening on
+    // Keep a server running so the socket file exists and isSocket() is true,
+    // but inject a fetch that always fails to simulate an unresponsive daemon.
     const socketPath = join(tmpDir, "dead.sock");
     const tempServer = Bun.serve({
       unix: socketPath,
@@ -268,10 +269,14 @@ describe("checkGateSocket", () => {
         return new Response("ok");
       },
     });
-    tempServer.stop(true);
+    const failingFetch = (() =>
+      Promise.reject(new Error("ECONNREFUSED"))) as unknown as typeof globalThis.fetch;
 
-    // The socket file still exists but nobody is listening
-    await expect(checkGateSocket(socketPath)).rejects.toThrow(/not responding/);
+    try {
+      await expect(checkGateSocket(socketPath, failingFetch)).rejects.toThrow(/not responding/);
+    } finally {
+      tempServer.stop(true);
+    }
   });
 
   test("throws when health check returns non-OK status", async () => {
