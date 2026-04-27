@@ -245,6 +245,78 @@ describe("GateConfigSchema", () => {
     expect(config.service_account).toBe("sa@proj.iam.gserviceaccount.com");
     expect(config.socket_path).toBe(getDefaultSocketPath());
   });
+
+  test("rejects operator_socket_path without operator_socket_group", () => {
+    expect(() =>
+      GateConfigSchema.parse({
+        project_id: "my-proj",
+        service_account: "sa@proj.iam.gserviceaccount.com",
+        operator_socket_path: "/tmp/op.sock",
+        agent_uid: 1001,
+      }),
+    ).toThrow(z.ZodError);
+  });
+
+  test("rejects operator_socket_path without agent_uid", () => {
+    expect(() =>
+      GateConfigSchema.parse({
+        project_id: "my-proj",
+        service_account: "sa@proj.iam.gserviceaccount.com",
+        operator_socket_path: "/tmp/op.sock",
+        operator_socket_group: "operators",
+      }),
+    ).toThrow(z.ZodError);
+  });
+
+  test("accepts complete operator-socket config", () => {
+    const config = GateConfigSchema.parse({
+      project_id: "my-proj",
+      service_account: "sa@proj.iam.gserviceaccount.com",
+      operator_socket_path: "/tmp/op.sock",
+      operator_socket_group: "operators",
+      agent_uid: 1001,
+      pam_policy: "projects/p/locations/global/entitlements/x",
+      auto_approve_pam_policies: ["projects/p/locations/global/entitlements/x"],
+    });
+    expect(config.operator_socket_path).toBe("/tmp/op.sock");
+    expect(config.operator_socket_group).toBe("operators");
+    expect(config.agent_uid).toBe(1001);
+  });
+
+  test("rejects auto_approve_pam_policies entry not in pam_allowed_policies", () => {
+    expect(() =>
+      GateConfigSchema.parse({
+        project_id: "my-proj",
+        service_account: "sa@proj.iam.gserviceaccount.com",
+        pam_policy: "projects/p/locations/global/entitlements/a",
+        pam_allowed_policies: ["projects/p/locations/global/entitlements/a"],
+        auto_approve_pam_policies: ["projects/p/locations/global/entitlements/b"],
+      }),
+    ).toThrow(z.ZodError);
+  });
+
+  test("accepts auto_approve_pam_policies that matches pam_policy default", () => {
+    const config = GateConfigSchema.parse({
+      project_id: "my-proj",
+      service_account: "sa@proj.iam.gserviceaccount.com",
+      pam_policy: "projects/p/locations/global/entitlements/a",
+      auto_approve_pam_policies: ["projects/p/locations/global/entitlements/a"],
+    });
+    expect(config.auto_approve_pam_policies).toEqual([
+      "projects/p/locations/global/entitlements/a",
+    ]);
+  });
+
+  test("agent_uid accepts a username string", () => {
+    const config = GateConfigSchema.parse({
+      project_id: "my-proj",
+      service_account: "sa@proj.iam.gserviceaccount.com",
+      operator_socket_path: "/tmp/op.sock",
+      operator_socket_group: "operators",
+      agent_uid: "claude",
+    });
+    expect(config.agent_uid).toBe("claude");
+  });
 });
 
 describe("MetadataProxyConfigSchema", () => {

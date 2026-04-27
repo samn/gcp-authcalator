@@ -1,0 +1,108 @@
+// ---------------------------------------------------------------------------
+// Tiny /etc/group + /etc/passwd parser used by the operator-socket startup
+// misconfiguration check.
+//
+// Bun does not expose getgrnam / getpwnam, and we do not want to pull in a
+// native dependency for a one-shot lookup. The format is stable, the files
+// are small, and reading them at startup is cheap.
+// ---------------------------------------------------------------------------
+
+import { readFileSync } from "node:fs";
+
+export interface GroupEntry {
+  name: string;
+  gid: number;
+  members: string[];
+}
+
+export interface PasswdEntry {
+  name: string;
+  uid: number;
+  gid: number;
+}
+
+function* iterRecords(content: string): Iterable<string[]> {
+  for (const rawLine of content.split("\n")) {
+    const line = rawLine.trim();
+    if (line === "" || line.startsWith("#")) continue;
+    yield line.split(":");
+  }
+}
+
+export function parseGroupFile(content: string): GroupEntry[] {
+  const result: GroupEntry[] = [];
+  for (const fields of iterRecords(content)) {
+    if (fields.length < 4) continue;
+    const name = fields[0]!;
+    const gidStr = fields[2]!;
+    const memberStr = fields[3]!;
+    const gid = Number(gidStr);
+    if (!Number.isInteger(gid)) continue;
+    const members = memberStr === "" ? [] : memberStr.split(",").filter((m) => m !== "");
+    result.push({ name, gid, members });
+  }
+  return result;
+}
+
+export function parsePasswdFile(content: string): PasswdEntry[] {
+  const result: PasswdEntry[] = [];
+  for (const fields of iterRecords(content)) {
+    if (fields.length < 4) continue;
+    const name = fields[0]!;
+    const uid = Number(fields[2]!);
+    const gid = Number(fields[3]!);
+    if (!Number.isInteger(uid) || !Number.isInteger(gid)) continue;
+    result.push({ name, uid, gid });
+  }
+  return result;
+}
+
+export function lookupGroup(name: string, groupFile = "/etc/group"): GroupEntry | undefined {
+  const content = readFileSync(groupFile, "utf-8");
+  return parseGroupFile(content).find((g) => g.name === name);
+}
+
+/**
+ * Resolve a user-supplied agent identifier (numeric UID or username) to a UID.
+ * Throws if the username cannot be found in /etc/passwd.
+ */
+export function resolveAgentUid(value: number | string, passwdFile = "/etc/passwd"): number {
+  if (typeof value === "number") {
+    if (!Number.isInteger(value) || value < 0) {
+      throw new Error(`agent_uid must be a non-negative integer, got ${value}`);
+    }
+    return value;
+  }
+  const trimmed = value.trim();
+  if (/^\d+$/.test(trimmed)) {
+    return Number(trimmed);
+  }
+  const content = readFileSync(passwdFile, "utf-8");
+  const entry = parsePasswdFile(content).find((p) => p.name === trimmed);
+  if (!entry) {
+    throw new Error(`agent_uid: user '${trimmed}' not found in ${passwdFile}`);
+  }
+  return entry.uid;
+}
+
+/**
+ * Return all gids the given UID is a member of: primary gid from /etc/passwd
+ * plus every supplementary gid where the username appears in /etc/group's
+ * member list. Returns an empty array if the UID is not in /etc/passwd.
+ */
+export function getGroupsForUid(
+  uid: number,
+  groupFile = "/etc/group",
+  passwdFile = "/etc/passwd",
+): number[] {
+  const passwd = parsePasswdFile(readFileSync(passwdFile, "utf-8"));
+  const user = passwd.find((p) => p.uid === uid);
+  if (!user) return [];
+
+  const groups = parseGroupFile(readFileSync(groupFile, "utf-8"));
+  const gids = new Set<number>([user.gid]);
+  for (const g of groups) {
+    if (g.members.includes(user.name)) gids.add(g.gid);
+  }
+  return [...gids];
+}

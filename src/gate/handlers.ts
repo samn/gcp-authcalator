@@ -5,10 +5,14 @@ import type {
   ProjectNumberResponse,
   UniverseDomainResponse,
   AuditEntry,
+  RequestContext,
 } from "./types.ts";
 import { parseCommandHeader, summarizeCommand } from "./summarize-command.ts";
 
 const JSON_HEADERS = { "Content-Type": "application/json" };
+
+/** Default context for tests and any production caller that hasn't been updated yet. */
+const DEFAULT_CTX: RequestContext = { trusted: false, socket: "main" };
 
 export function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
@@ -17,14 +21,22 @@ export function jsonResponse(body: unknown, status = 200): Response {
 /**
  * Pure request handler — routes incoming requests and delegates to deps.
  * All responses are JSON. Audit entries are written for token requests.
+ *
+ * The `ctx` argument carries which socket the request arrived on. Only the
+ * operator socket sets `ctx.trusted = true`, which gates the auto-approve
+ * path inside `acquireProdAccess`.
  */
-export async function handleRequest(req: Request, deps: GateDeps): Promise<Response> {
+export async function handleRequest(
+  req: Request,
+  deps: GateDeps,
+  ctx: RequestContext = DEFAULT_CTX,
+): Promise<Response> {
   const url = new URL(req.url, "http://localhost");
 
   // /session accepts POST (create) and DELETE (revoke)
   if (url.pathname === "/session") {
-    if (req.method === "POST") return handleCreateSession(req, url, deps);
-    if (req.method === "DELETE") return handleRevokeSession(url, deps);
+    if (req.method === "POST") return handleCreateSession(req, url, deps, ctx);
+    if (req.method === "DELETE") return handleRevokeSession(url, deps, ctx);
     return jsonResponse({ error: "Method not allowed" }, 405);
   }
 
@@ -34,7 +46,7 @@ export async function handleRequest(req: Request, deps: GateDeps): Promise<Respo
 
   switch (url.pathname) {
     case "/token":
-      return handleToken(req, url, deps);
+      return handleToken(req, url, deps, ctx);
     case "/identity":
       return handleIdentity(deps);
     case "/project-number":
@@ -73,11 +85,16 @@ function parseTtlParam(
   return { ttlSeconds: n };
 }
 
-async function handleToken(req: Request, url: URL, deps: GateDeps): Promise<Response> {
+async function handleToken(
+  req: Request,
+  url: URL,
+  deps: GateDeps,
+  ctx: RequestContext,
+): Promise<Response> {
   // Session-based token refresh: bypass confirmation and rate limiting
   const sessionId = url.searchParams.get("session");
   if (sessionId) {
-    return handleSessionTokenRefresh(sessionId, deps);
+    return handleSessionTokenRefresh(sessionId, deps, ctx);
   }
 
   const level = url.searchParams.get("level") === "prod" ? "prod" : "dev";
@@ -92,25 +109,38 @@ async function handleToken(req: Request, url: URL, deps: GateDeps): Promise<Resp
   if ("error" in ttlResult) return ttlResult.error;
 
   if (level === "prod") {
-    return handleProdToken(req, deps, scopes, pamPolicyParam, ttlResult.ttlSeconds);
+    return handleProdToken(req, deps, ctx, scopes, pamPolicyParam, ttlResult.ttlSeconds);
   }
 
-  return handleDevToken(deps, scopes, ttlResult.ttlSeconds);
+  return handleDevToken(deps, ctx, scopes, ttlResult.ttlSeconds);
 }
 
 /** Mint a fresh prod token using a pre-approved session (no confirmation). */
-async function handleSessionTokenRefresh(sessionId: string, deps: GateDeps): Promise<Response> {
+async function handleSessionTokenRefresh(
+  sessionId: string,
+  deps: GateDeps,
+  ctx: RequestContext,
+): Promise<Response> {
+  // Sessions are a main-socket feature only. The operator socket has no
+  // session-creation path, so any session_id presented here would have to
+  // have been minted elsewhere — reject defensively.
+  if (ctx.trusted) {
+    return jsonResponse({ error: "Session refresh not permitted on operator socket" }, 403);
+  }
+
   const session = deps.sessionManager.validate(sessionId);
   if (!session) {
     return jsonResponse({ error: "Session expired or invalid" }, 401);
   }
 
-  const auditBase: Pick<AuditEntry, "endpoint" | "level" | "session_id" | "pam_policy"> = {
-    endpoint: "/token?session=...",
-    level: "prod",
-    session_id: sessionId,
-    pam_policy: session.pamPolicy,
-  };
+  const auditBase: Pick<AuditEntry, "endpoint" | "level" | "session_id" | "pam_policy" | "socket"> =
+    {
+      endpoint: "/token?session=...",
+      level: "prod",
+      session_id: sessionId,
+      pam_policy: session.pamPolicy,
+      socket: ctx.socket,
+    };
 
   try {
     // Renew PAM grant if the session has a PAM policy (grants expire
@@ -160,13 +190,15 @@ async function handleSessionTokenRefresh(sessionId: string, deps: GateDeps): Pro
 
 async function handleDevToken(
   deps: GateDeps,
+  ctx: RequestContext,
   scopes?: string[],
   ttlSeconds?: number,
 ): Promise<Response> {
-  const auditBase: Pick<AuditEntry, "endpoint" | "level" | "token_ttl_seconds"> = {
+  const auditBase: Pick<AuditEntry, "endpoint" | "level" | "token_ttl_seconds" | "socket"> = {
     endpoint: "/token",
     level: "dev",
     token_ttl_seconds: ttlSeconds,
+    socket: ctx.socket,
   };
 
   try {
@@ -205,12 +237,16 @@ interface ProdAccessGrant {
   email: string;
   effectivePamPolicy?: string;
   pamAuditFields: Pick<AuditEntry, "pam_grant" | "pam_cached">;
-  auditBase: Pick<AuditEntry, "endpoint" | "level" | "pam_policy" | "token_ttl_seconds">;
+  auditBase: Pick<
+    AuditEntry,
+    "endpoint" | "level" | "pam_policy" | "token_ttl_seconds" | "socket" | "auto_approved"
+  >;
 }
 
 /**
  * Shared flow for acquiring prod access: resolve PAM policy, check allowlist,
- * rate-limit, confirm, and ensure PAM grant.
+ * rate-limit, confirm (or auto-approve on the operator socket), and ensure
+ * PAM grant.
  *
  * Returns a ProdAccessGrant on success or a Response on error.
  * On success the rate limiter has been acquired — the caller MUST call
@@ -219,6 +255,7 @@ interface ProdAccessGrant {
 async function acquireProdAccess(
   req: Request,
   deps: GateDeps,
+  ctx: RequestContext,
   opts: {
     pamPolicyParam?: string;
     auditEndpoint: string;
@@ -240,11 +277,15 @@ async function acquireProdAccess(
     effectivePamPolicy = deps.pamDefaultPolicy;
   }
 
-  const auditBase: Pick<AuditEntry, "endpoint" | "level" | "pam_policy" | "token_ttl_seconds"> = {
+  const auditBase: Pick<
+    AuditEntry,
+    "endpoint" | "level" | "pam_policy" | "token_ttl_seconds" | "socket"
+  > = {
     endpoint: opts.auditEndpoint,
     level: "prod",
     pam_policy: effectivePamPolicy,
     token_ttl_seconds: opts.ttlSeconds,
+    socket: ctx.socket,
   };
 
   // Allowlist check
@@ -265,7 +306,30 @@ async function acquireProdAccess(
     return jsonResponse({ error: "PAM policy requested but PAM module not configured" }, 500);
   }
 
-  // Rate-limit check before showing any confirmation dialog
+  // Operator-socket auto-approve check. The trust flag is set only by the
+  // operator socket's fetch handler; the agent socket can never reach this
+  // branch. Auto-approve fires only when the resolved PAM policy is in the
+  // explicit allowlist, so out-of-allowlist requests on the operator socket
+  // were already rejected above (we deliberately do NOT fall through to a
+  // confirmation prompt — see plans/i-want-to-be-eventual-pinwheel.md §3a).
+  const autoApprove =
+    ctx.trusted &&
+    effectivePamPolicy !== undefined &&
+    deps.autoApprovePamPolicies?.has(effectivePamPolicy) === true;
+
+  // X-Pending-Id is meaningless on the auto-approve path: we never enqueue
+  // a pending request, so a client supplying this header indicates client
+  // confusion (or attempted protocol misuse).
+  if (autoApprove && req.headers.get("X-Pending-Id")) {
+    return jsonResponse(
+      { error: "X-Pending-Id is not permitted on the operator socket auto-approve path" },
+      400,
+    );
+  }
+
+  // Rate-limit check before showing any confirmation dialog. Auto-approved
+  // requests still consume a slot — the limiter is shared across sockets so
+  // a flooding agent surfaces as a real rate-limit signal to the operator.
   const gate = deps.prodRateLimiter.acquire();
   if (!gate.allowed) {
     deps.writeAuditLog({
@@ -284,12 +348,12 @@ async function acquireProdAccess(
     const commandSummary = commandArr ? summarizeCommand(commandArr) : undefined;
     const pendingId = req.headers.get("X-Pending-Id") ?? undefined;
 
-    const approved = await deps.confirmProdAccess(
-      email,
-      commandSummary,
-      effectivePamPolicy,
-      pendingId,
-    );
+    let approved: boolean;
+    if (autoApprove) {
+      approved = true;
+    } else {
+      approved = await deps.confirmProdAccess(email, commandSummary, effectivePamPolicy, pendingId);
+    }
     if (!approved) {
       deps.prodRateLimiter.release("denied");
       deps.writeAuditLog({
@@ -311,7 +375,8 @@ async function acquireProdAccess(
       };
     }
 
-    return { email, effectivePamPolicy, pamAuditFields, auditBase };
+    const grantedAuditBase = autoApprove ? { ...auditBase, auto_approved: true } : auditBase;
+    return { email, effectivePamPolicy, pamAuditFields, auditBase: grantedAuditBase };
   } catch (err) {
     deps.prodRateLimiter.release("error");
 
@@ -331,11 +396,12 @@ async function acquireProdAccess(
 async function handleProdToken(
   req: Request,
   deps: GateDeps,
+  ctx: RequestContext,
   scopes?: string[],
   pamPolicyParam?: string,
   ttlSeconds?: number,
 ): Promise<Response> {
-  const grant = await acquireProdAccess(req, deps, {
+  const grant = await acquireProdAccess(req, deps, ctx, {
     pamPolicyParam,
     auditEndpoint: "/token?level=prod",
     ttlSeconds,
@@ -410,8 +476,22 @@ function parseSessionTtlParam(
  *
  * Uses acquireProdAccess for the shared confirmation + PAM flow, then creates
  * a session that allows subsequent token refreshes without re-confirmation.
+ *
+ * Sessions are rejected on the operator socket: the 8-hour bearer-token
+ * attack surface they introduce is exactly what auto-approve is designed
+ * to avoid. Operators wanting `with-prod` should point it at the operator
+ * socket; the client falls back to per-request token mode automatically.
  */
-async function handleCreateSession(req: Request, url: URL, deps: GateDeps): Promise<Response> {
+async function handleCreateSession(
+  req: Request,
+  url: URL,
+  deps: GateDeps,
+  ctx: RequestContext,
+): Promise<Response> {
+  if (ctx.trusted) {
+    return jsonResponse({ error: "Session creation not permitted on operator socket" }, 403);
+  }
+
   const scopesParam = url.searchParams.get("scopes");
   const scopes = scopesParam ? scopesParam.split(",") : undefined;
   const pamPolicyParam = url.searchParams.get("pam_policy") ?? undefined;
@@ -428,7 +508,7 @@ async function handleCreateSession(req: Request, url: URL, deps: GateDeps): Prom
   );
   if ("error" in sessionTtlResult) return sessionTtlResult.error;
 
-  const grant = await acquireProdAccess(req, deps, {
+  const grant = await acquireProdAccess(req, deps, ctx, {
     pamPolicyParam,
     auditEndpoint: "/session",
     ttlSeconds: ttlResult.ttlSeconds,
@@ -489,7 +569,7 @@ async function handleCreateSession(req: Request, url: URL, deps: GateDeps): Prom
 }
 
 /** Revoke a prod session by ID. */
-function handleRevokeSession(url: URL, deps: GateDeps): Response {
+function handleRevokeSession(url: URL, deps: GateDeps, ctx: RequestContext): Response {
   const sessionId = url.searchParams.get("id");
   if (!sessionId) {
     return jsonResponse({ error: "Missing session id" }, 400);
@@ -506,6 +586,7 @@ function handleRevokeSession(url: URL, deps: GateDeps): Response {
     timestamp: new Date().toISOString(),
     result: "revoked",
     session_id: sessionId,
+    socket: ctx.socket,
   });
 
   return jsonResponse({ status: "revoked" });
@@ -532,6 +613,7 @@ export function handleResolvePending(
     level: "prod",
     timestamp: new Date().toISOString(),
     result: action === "approve" ? "granted" : "denied",
+    socket: "admin",
   });
 
   return jsonResponse({ status: action === "approve" ? "approved" : "denied" });

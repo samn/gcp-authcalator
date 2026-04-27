@@ -5,10 +5,13 @@ import type { Config } from "../config.ts";
 import { getDefaultRuntimeDir, WithProdConfigSchema } from "../config.ts";
 import {
   createProdSession,
+  fetchProdToken,
   revokeProdSession,
   type FetchProdTokenOptions,
 } from "../with-prod/fetch-prod-token.ts";
 import { createSessionTokenProvider } from "../with-prod/session-token-provider.ts";
+import { createPerRequestTokenProvider } from "../with-prod/per-request-token-provider.ts";
+import type { TokenProvider } from "../metadata-proxy/types.ts";
 import { startMetadataProxyServer } from "../metadata-proxy/server.ts";
 import { detectNestedSession, PROD_SESSION_ENV_VAR } from "../with-prod/detect-nested-session.ts";
 import { buildGateConnection } from "../gate/connection.ts";
@@ -162,32 +165,65 @@ export async function runWithProd(
   // Normal flow: create a prod session and start a fresh proxy.
   const wpConfig = WithProdConfigSchema.parse(config);
 
-  // Step 1: Create prod session at gcp-gate (triggers confirmation dialog)
+  // Step 1: Create prod session at gcp-gate (triggers confirmation dialog).
+  // If the gate is the operator socket, session creation returns 403 and we
+  // fall back to per-request token mode (each refresh hits the gate, which
+  // auto-approves silently if the PAM policy is allowlisted).
   const pendingId = randomBytes(16).toString("hex");
   console.log("with-prod: requesting prod session from gcp-gate...");
   console.log(
     `with-prod: if no prompt appears, approve with: gcp-authcalator approve ${pendingId}`,
   );
   let conn: GateConnection;
-  let sessionResult;
+  let initialEmail: string;
+  let initialAccessToken: string;
+  let initialExpiresIn: number;
+  let sessionId: string | undefined;
   try {
     conn = await buildGateConnection(wpConfig);
-    sessionResult = await createProdSession(conn, {
-      ...options.fetchOptions,
-      command: wrappedCommand,
-      scopes: wpConfig.scopes,
-      pamPolicy: wpConfig.pam_policy,
-      tokenTtlSeconds: wpConfig.token_ttl_seconds,
-      sessionTtlSeconds: wpConfig.session_ttl_seconds,
-      pendingId,
-    });
+    try {
+      const sessionResult = await createProdSession(conn, {
+        ...options.fetchOptions,
+        command: wrappedCommand,
+        scopes: wpConfig.scopes,
+        pamPolicy: wpConfig.pam_policy,
+        tokenTtlSeconds: wpConfig.token_ttl_seconds,
+        sessionTtlSeconds: wpConfig.session_ttl_seconds,
+        pendingId,
+      });
+      sessionId = sessionResult.session_id;
+      initialEmail = sessionResult.email;
+      initialAccessToken = sessionResult.access_token;
+      initialExpiresIn = sessionResult.expires_in;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("Session creation not permitted on operator socket")) {
+        console.log(
+          "with-prod: operator socket — falling back to per-request token mode (no session)",
+        );
+        // pendingId is for the CLI approve flow which doesn't apply on the
+        // operator socket auto-approve path; the gate would 400 if we sent it.
+        const tokenResult = await fetchProdToken(conn, {
+          ...options.fetchOptions,
+          command: wrappedCommand,
+          scopes: wpConfig.scopes,
+          pamPolicy: wpConfig.pam_policy,
+          tokenTtlSeconds: wpConfig.token_ttl_seconds,
+        });
+        initialEmail = tokenResult.email;
+        initialAccessToken = tokenResult.access_token;
+        initialExpiresIn = tokenResult.expires_in;
+      } else {
+        throw err;
+      }
+    }
   } catch (err) {
     console.error(
-      `with-prod: failed to create prod session: ${err instanceof Error ? err.message : String(err)}`,
+      `with-prod: failed to acquire prod token: ${err instanceof Error ? err.message : String(err)}`,
     );
     process.exit(1);
   }
-  console.log(`with-prod: prod session created for ${sessionResult.email}`);
+  console.log(`with-prod: prod access acquired for ${initialEmail}`);
 
   // Step 2: Create an isolated gcloud config directory BEFORE the token
   // provider so onRefresh can capture the file path in its closure.
@@ -197,35 +233,47 @@ export async function runWithProd(
   chmodSync(gcloudConfigDir, 0o700);
 
   const tokenFilePath = join(gcloudConfigDir, "access_token");
-  writeFileSync(tokenFilePath, sessionResult.access_token, { mode: 0o600 });
+  writeFileSync(tokenFilePath, initialAccessToken, { mode: 0o600 });
   writeFileSync(
     join(gcloudConfigDir, "properties"),
     `[auth]\naccess_token_file = ${tokenFilePath}\n`,
     { mode: 0o600 },
   );
 
-  // Step 3: Create a session token provider that auto-refreshes from the gate.
-  // The session ID stays in this closure — the subprocess never sees it.
+  // Step 3: Create a token provider that auto-refreshes from the gate.
+  // The session ID (when present) stays in this closure — the subprocess
+  // never sees it. In per-request mode there is no session; each refresh
+  // re-hits the gate (auto-approved on the operator socket).
   const initialToken = {
-    access_token: sessionResult.access_token,
-    expires_at: new Date(Date.now() + sessionResult.expires_in * 1000),
+    access_token: initialAccessToken,
+    expires_at: new Date(Date.now() + initialExpiresIn * 1000),
   };
-  const tokenProvider = createSessionTokenProvider(conn, sessionResult.session_id, initialToken, {
-    fetchFn: options.fetchOptions?.fetchFn,
-    onRefresh: (token) => {
-      // Atomically update gcloud's access_token_file (write to temp, rename)
-      const tmpPath = `${tokenFilePath}.tmp`;
-      writeFileSync(tmpPath, token.access_token, { mode: 0o600 });
-      renameSync(tmpPath, tokenFilePath);
-    },
-  });
+  const onRefresh = (token: { access_token: string }) => {
+    // Atomically update gcloud's access_token_file (write to temp, rename)
+    const tmpPath = `${tokenFilePath}.tmp`;
+    writeFileSync(tmpPath, token.access_token, { mode: 0o600 });
+    renameSync(tmpPath, tokenFilePath);
+  };
+  const tokenProvider: TokenProvider = sessionId
+    ? createSessionTokenProvider(conn, sessionId, initialToken, {
+        fetchFn: options.fetchOptions?.fetchFn,
+        onRefresh,
+      })
+    : createPerRequestTokenProvider(conn, initialToken, {
+        fetchFn: options.fetchOptions?.fetchFn,
+        command: wrappedCommand,
+        scopes: wpConfig.scopes,
+        pamPolicy: wpConfig.pam_policy,
+        tokenTtlSeconds: wpConfig.token_ttl_seconds,
+        onRefresh,
+      });
 
   // Step 4: Start temporary metadata proxy with the engineer's email so
   // gcloud can discover the account (it ignores the "default" alias).
   const { server, stop } = startMetadataProxyServer(
     {
       project_id: wpConfig.project_id,
-      service_account: sessionResult.email,
+      service_account: initialEmail,
       socket_path: wpConfig.socket_path,
       admin_socket_path: wpConfig.admin_socket_path,
       port: 0,
@@ -256,7 +304,7 @@ export async function runWithProd(
         // gcloud's internal account-enumeration code may not honor
         // GCE_METADATA_HOST, falling back to the original metadata proxy.
         // Tokens still flow through the PID-validated metadata proxy.
-        CLOUDSDK_CORE_ACCOUNT: sessionResult.email,
+        CLOUDSDK_CORE_ACCOUNT: initialEmail,
         CLOUDSDK_CORE_PROJECT: wpConfig.project_id,
         [PROD_SESSION_ENV_VAR]: metadataHost,
       },
@@ -281,10 +329,13 @@ export async function runWithProd(
     exitCode = (await child.exited) ?? undefined;
   } finally {
     stop();
-    // Best-effort revoke the session so gate can clean up immediately
-    void revokeProdSession(conn, sessionResult.session_id, {
-      fetchFn: options.fetchOptions?.fetchFn,
-    });
+    // Best-effort revoke the session so gate can clean up immediately.
+    // In per-request mode (operator socket) there is no session to revoke.
+    if (sessionId) {
+      void revokeProdSession(conn, sessionId, {
+        fetchFn: options.fetchOptions?.fetchFn,
+      });
+    }
     rmSync(gcloudConfigDir, { recursive: true, force: true });
   }
 

@@ -1,4 +1,4 @@
-import { unlinkSync, existsSync, chmodSync, lstatSync, mkdirSync } from "node:fs";
+import { unlinkSync, existsSync, chmodSync, chownSync, lstatSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { GateConfig } from "../config.ts";
 import type { GateDeps } from "./types.ts";
@@ -13,11 +13,13 @@ import { loadAndValidateTlsFiles } from "../tls/store.ts";
 import type { BunRequestInit } from "./connection.ts";
 import { createPamModule, resolveEntitlementPath, type PamModule } from "./pam.ts";
 import { createPendingQueue } from "./pending.ts";
+import { lookupGroup, resolveAgentUid, getGroupsForUid } from "./unix-group.ts";
 
 export interface GateServerResult {
   server: ReturnType<typeof Bun.serve>;
   tcpServer?: ReturnType<typeof Bun.serve>;
   adminServer: ReturnType<typeof Bun.serve>;
+  operatorServer?: ReturnType<typeof Bun.serve>;
   stop: () => void;
 }
 
@@ -35,6 +37,57 @@ export interface StartGateServerOptions {
  * 3. Starts Bun.serve on the Unix socket
  * 4. Registers SIGTERM / SIGINT handlers for graceful shutdown
  */
+/**
+ * Verify a socket path is safe to remove and remove it. Mirrors the existing
+ * symlink/socket/uid checks used for all three sockets the gate creates.
+ *
+ * If `probeForRunning` is true, also probes the socket for a live HTTP
+ * health endpoint and refuses to remove it if another instance answers.
+ * Only the main socket needs that — the admin and operator sockets are
+ * always tied to a main-socket bind that has already been released.
+ */
+async function cleanStaleSocket(
+  socketPath: string,
+  label: string,
+  opts: { probeForRunning?: boolean } = {},
+): Promise<void> {
+  if (!existsSync(socketPath)) return;
+
+  const stat = lstatSync(socketPath);
+  if (stat.isSymbolicLink()) {
+    throw new Error(`gate: ${label} path is a symlink — refusing to remove: ${socketPath}`);
+  }
+  if (!stat.isSocket()) {
+    throw new Error(
+      `gate: ${label} path exists but is not a socket — refusing to remove: ${socketPath}`,
+    );
+  }
+  if (stat.uid !== process.getuid!()) {
+    throw new Error(
+      `gate: ${label} is owned by uid ${stat.uid}, not current user (${process.getuid!()}) — refusing to remove: ${socketPath}`,
+    );
+  }
+
+  if (opts.probeForRunning) {
+    try {
+      const probe = await fetch("http://localhost/health", {
+        unix: socketPath,
+        signal: AbortSignal.timeout(1000),
+      } as BunRequestInit);
+      if (probe.ok) {
+        throw new Error(`gate: another instance is already running on ${socketPath}`);
+      }
+    } catch (e: unknown) {
+      if (e instanceof Error && e.message.startsWith("gate:")) {
+        throw e;
+      }
+      // Connection refused / timeout = stale socket, safe to remove.
+    }
+  }
+
+  unlinkSync(socketPath);
+}
+
 export async function startGateServer(
   config: GateConfig,
   options: StartGateServerOptions = {},
@@ -81,6 +134,20 @@ export async function startGateServer(
     pamAllowedPolicies = allowed;
   }
 
+  // Resolve auto-approve policies through the same canonicalisation as the
+  // pam_allowed_policies set, so the operator socket's auto-approve check
+  // compares full entitlement paths. The schema refinement guarantees every
+  // entry is also in pam_allowed_policies (or equals pam_policy).
+  let autoApprovePamPolicies: Set<string> | undefined;
+  if (config.auto_approve_pam_policies?.length) {
+    const pamLocation = config.pam_location ?? "global";
+    autoApprovePamPolicies = new Set<string>(
+      config.auto_approve_pam_policies.map((p) =>
+        resolveEntitlementPath(p, config.project_id, pamLocation),
+      ),
+    );
+  }
+
   const deps: GateDeps = {
     mintDevToken: auth.mintDevToken,
     mintProdToken: auth.mintProdToken,
@@ -93,6 +160,7 @@ export async function startGateServer(
     startTime: new Date(),
     ensurePamGrant: pam?.ensureGrant,
     pamAllowedPolicies,
+    autoApprovePamPolicies,
     pamDefaultPolicy,
     resolvePamPolicy: config.pam_policy
       ? (policy: string) =>
@@ -111,54 +179,12 @@ export async function startGateServer(
   const socketDir = dirname(config.socket_path);
   mkdirSync(socketDir, { recursive: true, mode: 0o700 });
 
-  // Remove stale socket from a previous crash — with ownership verification
-  if (existsSync(config.socket_path)) {
-    const stat = lstatSync(config.socket_path);
-
-    // Refuse to follow symlinks (prevents attacker-placed symlink pointing
-    // to a file they want deleted).
-    if (stat.isSymbolicLink()) {
-      throw new Error(`gate: socket path is a symlink — refusing to remove: ${config.socket_path}`);
-    }
-
-    // Only remove actual Unix sockets, never regular files or directories.
-    if (!stat.isSocket()) {
-      throw new Error(
-        `gate: socket path exists but is not a socket — refusing to remove: ${config.socket_path}`,
-      );
-    }
-
-    // Verify the socket is owned by the current user.
-    if (stat.uid !== process.getuid!()) {
-      throw new Error(
-        `gate: socket is owned by uid ${stat.uid}, not current user (${process.getuid!()}) — refusing to remove: ${config.socket_path}`,
-      );
-    }
-
-    // Check whether another gate instance is still alive on this socket.
-    try {
-      const probe = await fetch("http://localhost/health", {
-        unix: config.socket_path,
-        signal: AbortSignal.timeout(1000),
-      } as BunRequestInit);
-      if (probe.ok) {
-        throw new Error(`gate: another instance is already running on ${config.socket_path}`);
-      }
-    } catch (e: unknown) {
-      // Re-throw our own "already running" error.
-      if (e instanceof Error && e.message.startsWith("gate:")) {
-        throw e;
-      }
-      // Connection refused / timeout = stale socket, safe to remove.
-    }
-
-    unlinkSync(config.socket_path);
-  }
+  await cleanStaleSocket(config.socket_path, "socket", { probeForRunning: true });
 
   const server = Bun.serve({
     unix: config.socket_path,
     fetch(req) {
-      return handleRequest(req, deps);
+      return handleRequest(req, deps, { trusted: false, socket: "main" });
     },
   });
 
@@ -182,7 +208,7 @@ export async function startGateServer(
         rejectUnauthorized: true,
       },
       fetch(req) {
-        return handleRequest(req, deps);
+        return handleRequest(req, deps, { trusted: false, socket: "tcp" });
       },
     });
   }
@@ -191,25 +217,7 @@ export async function startGateServer(
   const adminSocketDir = dirname(config.admin_socket_path);
   mkdirSync(adminSocketDir, { recursive: true, mode: 0o700 });
 
-  if (existsSync(config.admin_socket_path)) {
-    const adminStat = lstatSync(config.admin_socket_path);
-    if (adminStat.isSymbolicLink()) {
-      throw new Error(
-        `gate: admin socket path is a symlink — refusing to remove: ${config.admin_socket_path}`,
-      );
-    }
-    if (!adminStat.isSocket()) {
-      throw new Error(
-        `gate: admin socket path exists but is not a socket — refusing to remove: ${config.admin_socket_path}`,
-      );
-    }
-    if (adminStat.uid !== process.getuid!()) {
-      throw new Error(
-        `gate: admin socket is owned by uid ${adminStat.uid}, not current user (${process.getuid!()}) — refusing to remove: ${config.admin_socket_path}`,
-      );
-    }
-    unlinkSync(config.admin_socket_path);
-  }
+  await cleanStaleSocket(config.admin_socket_path, "admin socket");
 
   const adminServer = Bun.serve({
     unix: config.admin_socket_path,
@@ -220,10 +228,77 @@ export async function startGateServer(
 
   chmodSync(config.admin_socket_path, 0o600);
 
+  // --- Operator socket (auto-approve eligible — mounted into operator UID's
+  // view of the container, NOT into the agent UID's view, enforced by
+  // filesystem group permissions) ---
+  let operatorServer: ReturnType<typeof Bun.serve> | undefined;
+  let operatorSocketIno: number | undefined;
+  if (config.operator_socket_path) {
+    // Schema refinement guarantees these are set when operator_socket_path is.
+    const groupName = config.operator_socket_group!;
+    const agentUidValue = config.agent_uid!;
+
+    const grp = lookupGroup(groupName);
+    if (!grp) {
+      throw new Error(
+        `gate: operator socket group '${groupName}' not found in /etc/group — refusing to start`,
+      );
+    }
+
+    const agentUid = resolveAgentUid(agentUidValue);
+    if (agentUid === process.getuid!()) {
+      throw new Error(
+        `gate: agent_uid (${agentUid}) equals gate uid — operator-socket trust boundary cannot exist`,
+      );
+    }
+    const agentGroups = getGroupsForUid(agentUid);
+    if (agentGroups.includes(grp.gid)) {
+      throw new Error(
+        `gate: agent uid ${agentUid} is a member of operator group '${grp.name}' (gid ${grp.gid}) — refusing to start. ` +
+          `Remove the agent uid from the group, or unset operator_socket_path.`,
+      );
+    }
+
+    const operatorSocketDir = dirname(config.operator_socket_path);
+    mkdirSync(operatorSocketDir, { recursive: true, mode: 0o750 });
+    // chown the directory to {gate uid : operator group} so only those can
+    // traverse into it. Best-effort: if we don't have CAP_CHOWN this throws,
+    // which is the right outcome — fail loudly rather than ship a hole.
+    chownSync(operatorSocketDir, process.getuid!(), grp.gid);
+
+    await cleanStaleSocket(config.operator_socket_path, "operator socket");
+
+    operatorServer = Bun.serve({
+      unix: config.operator_socket_path,
+      fetch(req) {
+        return handleRequest(req, deps, { trusted: true, socket: "operator" });
+      },
+    });
+
+    // chown then chmod, in that order: chown clears setgid/setuid bits on
+    // some kernels, so apply mode afterwards.
+    chownSync(config.operator_socket_path, process.getuid!(), grp.gid);
+    chmodSync(config.operator_socket_path, 0o660);
+    operatorSocketIno = lstatSync(config.operator_socket_path).ino;
+  }
+
   // Capture inodes so stop() only removes the sockets we created,
   // not ones created by a replacement instance.
   const socketIno = lstatSync(config.socket_path).ino;
   const adminSocketIno = lstatSync(config.admin_socket_path).ino;
+
+  function unlinkIfOurs(path: string, ino: number) {
+    try {
+      if (existsSync(path)) {
+        const current = lstatSync(path);
+        if (current.ino === ino && !current.isSymbolicLink()) {
+          unlinkSync(path);
+        }
+      }
+    } catch {
+      // Ignore cleanup errors
+    }
+  }
 
   function stop() {
     try {
@@ -242,24 +317,14 @@ export async function startGateServer(
       // Already stopped
     }
     try {
-      if (existsSync(config.socket_path)) {
-        const current = lstatSync(config.socket_path);
-        if (current.ino === socketIno && !current.isSymbolicLink()) {
-          unlinkSync(config.socket_path);
-        }
-      }
+      operatorServer?.stop(true);
     } catch {
-      // Ignore cleanup errors
+      // Already stopped
     }
-    try {
-      if (existsSync(config.admin_socket_path)) {
-        const current = lstatSync(config.admin_socket_path);
-        if (current.ino === adminSocketIno && !current.isSymbolicLink()) {
-          unlinkSync(config.admin_socket_path);
-        }
-      }
-    } catch {
-      // Ignore cleanup errors
+    unlinkIfOurs(config.socket_path, socketIno);
+    unlinkIfOurs(config.admin_socket_path, adminSocketIno);
+    if (operatorSocketIno !== undefined && config.operator_socket_path) {
+      unlinkIfOurs(config.operator_socket_path, operatorSocketIno);
     }
   }
 
@@ -291,6 +356,15 @@ export async function startGateServer(
     console.log(`  pam policy:      ${config.pam_policy} (default)`);
     console.log(`  pam allowlist:   ${pamAllowedPolicies!.size} entitlement(s)`);
   }
+  if (operatorServer) {
+    console.log(`  operator socket: ${config.operator_socket_path}`);
+    console.log(
+      `  operator group:  ${config.operator_socket_group} (mode 0660; sessions disabled)`,
+    );
+    console.log(
+      `  auto-approve:    ${autoApprovePamPolicies?.size ?? 0} PAM entitlement(s) (operator socket only)`,
+    );
+  }
   console.log("  endpoints (main socket):");
   console.log("    GET /token                   → dev-scoped access token");
   console.log("    GET /token?level=prod        → prod token (with confirmation)");
@@ -304,6 +378,13 @@ export async function startGateServer(
   console.log("    POST /pending/:id/approve    → approve pending request");
   console.log("    POST /pending/:id/deny       → deny pending request");
   console.log("    GET /health                  → health check");
+  if (operatorServer) {
+    console.log("  endpoints (operator socket):");
+    console.log("    GET /token?level=prod        → prod token (auto-approve if allowlisted)");
+    console.log("    POST /session                → 403 (sessions disabled)");
+    console.log("    GET /token?session=...       → 403 (sessions disabled)");
+    console.log("    (other endpoints same as main socket)");
+  }
 
-  return { server, tcpServer, adminServer, stop };
+  return { server, tcpServer, adminServer, operatorServer, stop };
 }

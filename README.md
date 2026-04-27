@@ -155,24 +155,27 @@ Precedence: environment variables > CLI flags > TOML file > defaults.
 
 ### Environment variables
 
-Most config options can be set via `GCP_AUTHCALATOR_*` environment variables (uppercased key name with `GCP_AUTHCALATOR_` prefix). Options that take arrays or maps (`scopes`, `pam_allowed_policies`, `env`) are only available via CLI flags or TOML config.
+Most config options can be set via `GCP_AUTHCALATOR_*` environment variables (uppercased key name with `GCP_AUTHCALATOR_` prefix). Options that take arrays or maps (`scopes`, `pam_allowed_policies`, `auto_approve_pam_policies`, `env`) are only available via CLI flags or TOML config.
 
-| Variable                              | Description                                                        |
-| ------------------------------------- | ------------------------------------------------------------------ |
-| `GCP_AUTHCALATOR_PROJECT_ID`          | GCP project ID (same as `--project-id`)                            |
-| `GCP_AUTHCALATOR_SERVICE_ACCOUNT`     | Service account email (same as `--service-account`)                |
-| `GCP_AUTHCALATOR_SOCKET_PATH`         | Unix socket path (same as `--socket-path`)                         |
-| `GCP_AUTHCALATOR_ADMIN_SOCKET_PATH`   | Admin socket path for approve/deny (same as `--admin-socket-path`) |
-| `GCP_AUTHCALATOR_PORT`                | Metadata proxy port (same as `--port`)                             |
-| `GCP_AUTHCALATOR_GATE_TLS_PORT`       | Gate TCP+mTLS listener port (same as `--gate-tls-port`)            |
-| `GCP_AUTHCALATOR_TLS_DIR`             | TLS certificate directory (same as `--tls-dir`)                    |
-| `GCP_AUTHCALATOR_GATE_URL`            | Gate URL for remote connections (same as `--gate-url`)             |
-| `GCP_AUTHCALATOR_TLS_BUNDLE`          | Path to TLS client bundle file (same as `--tls-bundle`)            |
-| `GCP_AUTHCALATOR_TLS_BUNDLE_B64`      | Base64-encoded TLS client bundle (preferred for secrets)           |
-| `GCP_AUTHCALATOR_PAM_POLICY`          | PAM entitlement ID or path (same as `--pam-policy`)                |
-| `GCP_AUTHCALATOR_PAM_LOCATION`        | PAM entitlement location (same as `--pam-location`)                |
-| `GCP_AUTHCALATOR_TOKEN_TTL_SECONDS`   | Token lifetime in seconds (same as `--token-ttl-seconds`)          |
-| `GCP_AUTHCALATOR_SESSION_TTL_SECONDS` | Prod session lifetime in seconds (same as `--session-ttl-seconds`) |
+| Variable                                | Description                                                        |
+| --------------------------------------- | ------------------------------------------------------------------ |
+| `GCP_AUTHCALATOR_PROJECT_ID`            | GCP project ID (same as `--project-id`)                            |
+| `GCP_AUTHCALATOR_SERVICE_ACCOUNT`       | Service account email (same as `--service-account`)                |
+| `GCP_AUTHCALATOR_SOCKET_PATH`           | Unix socket path (same as `--socket-path`)                         |
+| `GCP_AUTHCALATOR_ADMIN_SOCKET_PATH`     | Admin socket path for approve/deny (same as `--admin-socket-path`) |
+| `GCP_AUTHCALATOR_PORT`                  | Metadata proxy port (same as `--port`)                             |
+| `GCP_AUTHCALATOR_GATE_TLS_PORT`         | Gate TCP+mTLS listener port (same as `--gate-tls-port`)            |
+| `GCP_AUTHCALATOR_TLS_DIR`               | TLS certificate directory (same as `--tls-dir`)                    |
+| `GCP_AUTHCALATOR_GATE_URL`              | Gate URL for remote connections (same as `--gate-url`)             |
+| `GCP_AUTHCALATOR_TLS_BUNDLE`            | Path to TLS client bundle file (same as `--tls-bundle`)            |
+| `GCP_AUTHCALATOR_TLS_BUNDLE_B64`        | Base64-encoded TLS client bundle (preferred for secrets)           |
+| `GCP_AUTHCALATOR_PAM_POLICY`            | PAM entitlement ID or path (same as `--pam-policy`)                |
+| `GCP_AUTHCALATOR_PAM_LOCATION`          | PAM entitlement location (same as `--pam-location`)                |
+| `GCP_AUTHCALATOR_TOKEN_TTL_SECONDS`     | Token lifetime in seconds (same as `--token-ttl-seconds`)          |
+| `GCP_AUTHCALATOR_SESSION_TTL_SECONDS`   | Prod session lifetime in seconds (same as `--session-ttl-seconds`) |
+| `GCP_AUTHCALATOR_OPERATOR_SOCKET_PATH`  | Operator socket path (same as `--operator-socket-path`)            |
+| `GCP_AUTHCALATOR_OPERATOR_SOCKET_GROUP` | Operator socket Unix group (same as `--operator-socket-group`)     |
+| `GCP_AUTHCALATOR_AGENT_UID`             | Agent UID or username (same as `--agent-uid`)                      |
 
 ### TOML config file
 
@@ -595,6 +598,60 @@ gcp-authcalator is designed for environments where a coding agent (or other untr
 - Once the engineer approves a prod session, elevated tokens are available to the approved process tree for the session lifetime (default 8 hours). Individual tokens are short-lived (default 1 hour) and auto-refresh, but access persists until the session expires or `with-prod` exits. A compromised process within the subprocess tree can continue receiving fresh tokens via the metadata proxy for the session's duration.
 - **Stolen client bundle** (remote mode): An attacker with the client cert can authenticate to gate over a forwarded port. Mitigation: client bundle has 90-day expiry; bundle files are `0600`; gate only listens on localhost; prod tokens still require confirmation dialog.
 - **Bundle in env var**: `GCP_AUTHCALATOR_TLS_BUNDLE_B64` is cleared from `process.env` immediately after reading to prevent inheritance by child processes. The bundle only authorizes gate communication, not GCP access directly.
+
+### Operator socket — auto-approve for human-initiated escalation
+
+The operator socket is an **opt-in** third Unix socket that auto-approves prod requests whose resolved PAM policy is in an explicit allowlist. It is designed for setups where the operator and the coding agent run as **different Unix UIDs in the same devcontainer**:
+
+- The operator UID is in a dedicated `operator_socket_group`. The agent UID is **not**.
+- Only the operator's view of the filesystem includes a path mounted at `operator_socket_path` (or, equivalently inside a single-userns container, the agent simply lacks group membership). Filesystem mode `0660` gates connect access.
+- The agent continues to use the existing main socket and goes through the standard confirmation flow.
+
+**Why it exists.** Confirmation dialogs every few minutes train operators to dismiss prompts without reading them — a worse failure mode than no prompt at all. Auto-approving an _allowlisted_ set of policies for the human path lets the prompt remain meaningful for everything else.
+
+**Enable it (gate config):**
+
+```toml
+operator_socket_path  = "/run/user/1000/gcp-authcalator-operator.sock"
+operator_socket_group = "gcp-operators"
+auto_approve_pam_policies = ["prod-readonly"]   # subset of pam_allowed_policies
+agent_uid             = "claude"                # numeric UID or username
+```
+
+Or via CLI flags / `GCP_AUTHCALATOR_*` env vars of the same names.
+
+**Operator points their client at the operator socket:**
+
+```bash
+export GCP_AUTHCALATOR_SOCKET_PATH=/run/user/1000/gcp-authcalator-operator.sock
+with-prod gcloud projects list   # no prompt; audit log shows auto_approved=true
+```
+
+`with-prod` automatically falls back to per-request token mode on the operator socket — sessions are explicitly disabled there (see below).
+
+**Setup requirements (you are responsible for these):**
+
+1. Create a dedicated Unix group (e.g. `gcp-operators`). Do **not** reuse `wheel`, `staff`, or anyone's primary group.
+2. Add **only** the operator UID to this group. Never the agent UID. Never `root`.
+3. Run the gate as a UID separate from the agent UID. Same UID as the operator is acceptable; same UID as the agent is forbidden (gate refuses to start).
+4. Set `agent_uid`. The gate's startup misconfiguration check requires it and will refuse to start if the agent UID is a member of `operator_socket_group`, equals the gate UID, or if the configured group is missing from `/etc/group`.
+5. **Keep `auto_approve_pam_policies` minimal.** Treat additions with the same review rigor as IAM policy changes — anything in this list is granted by _any_ code that runs as the operator UID, including malicious code planted via the operator's tooling (npm postinstall, agent-suggested shell command, tampered Makefile, etc.). The allowlist caps blast radius; it does not eliminate confused-deputy attacks.
+6. Pipe `~/.gcp-authcalator/audit.log` to your SIEM. Auto-approvals are tagged `auto_approved: true, socket: "operator"`. The gate makes no attempt at log-tamper protection; observability is your job.
+7. Do not run the devcontainer with userns-remapping that rewrites file ownership (it can silently break the group boundary).
+8. Operator socket is **Unix-only**. Remote (TCP+mTLS) operators do not get auto-approve.
+
+**What auto-approve does NOT do:**
+
+- It does **not** issue sessions. `POST /session` and `GET /token?session=…` return 403 on the operator socket. There is no 8-hour bearer-token refresh credential to steal.
+- It does **not** affect the main socket. Agent flows are unchanged: dev tokens are served immediately as before; prod requests still trigger the standard confirmation dialog.
+- It does **not** loosen the existing PAM allowlist. `auto_approve_pam_policies` is required to be a subset of `pam_allowed_policies`. Out-of-allowlist requests on the operator socket return a clean 403 — they do not fall through to a prompt.
+- It does **not** carve out a separate rate-limit budget. The operator socket shares the existing 10/minute prod limiter with the main socket, so a flooding agent surfaces as a real rate-limit signal.
+
+**Audit a window of auto-approvals:**
+
+```bash
+jq 'select(.auto_approved == true and .socket == "operator")' ~/.gcp-authcalator/audit.log
+```
 
 ## Development
 

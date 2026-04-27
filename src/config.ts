@@ -82,6 +82,15 @@ export const ConfigSchema = z.object({
   pam_location: z.string().min(1).optional(),
   token_ttl_seconds: z.coerce.number().int().min(60).max(43200).optional(),
   session_ttl_seconds: z.coerce.number().int().min(300).max(86400).optional(),
+  // ---- Operator socket (auto-approve for human-initiated escalation) ----
+  operator_socket_path: z.string().min(1).transform(expandTilde).optional(),
+  operator_socket_group: z.string().min(1).optional(),
+  auto_approve_pam_policies: z.array(z.string().min(1)).optional(),
+  // Numeric UID or username. Required when operator_socket_path is set, so the
+  // gate can verify at startup that the agent UID is not a member of the
+  // operator group (which would silently defeat the trust boundary).
+  // Accepts a number (TOML), a numeric string (env var/CLI), or a username.
+  agent_uid: z.union([z.number().int().nonnegative(), z.string().min(1)]).optional(),
   env: z.record(z.string(), z.string()).optional(),
 });
 
@@ -92,12 +101,43 @@ export type Config = z.infer<typeof ConfigSchema>;
  * - service_account alone: dev tokens via impersonation, prod tokens via ADC
  * - pam_policy alone: prod tokens only (dev tokens disabled)
  * - both: dev tokens via impersonation, prod tokens with PAM escalation
+ *
+ * If operator_socket_path is set, both operator_socket_group and agent_uid
+ * MUST also be set: the group is the trust boundary and agent_uid lets the
+ * gate verify the agent is not a member of it. Every entry in
+ * auto_approve_pam_policies must also be in pam_allowed_policies (or equal
+ * pam_policy) — prevents a narrowing of the broader allowlist from leaving
+ * a stale auto-approve entry.
  */
 export const GateConfigSchema = ConfigSchema.required({
   project_id: true,
-}).refine((c) => c.service_account || c.pam_policy, {
-  message: "gate requires at least one of service_account or pam_policy",
-});
+})
+  .refine((c) => c.service_account || c.pam_policy, {
+    message: "gate requires at least one of service_account or pam_policy",
+  })
+  .refine((c) => !c.operator_socket_path || c.operator_socket_group, {
+    message: "operator_socket_group is required when operator_socket_path is set",
+    path: ["operator_socket_group"],
+  })
+  .refine((c) => !c.operator_socket_path || c.agent_uid !== undefined, {
+    message: "agent_uid is required when operator_socket_path is set",
+    path: ["agent_uid"],
+  })
+  .refine(
+    (c) => {
+      if (!c.auto_approve_pam_policies?.length) return true;
+      const allowed = new Set<string>([
+        ...(c.pam_policy ? [c.pam_policy] : []),
+        ...(c.pam_allowed_policies ?? []),
+      ]);
+      return c.auto_approve_pam_policies.every((p) => allowed.has(p));
+    },
+    {
+      message:
+        "every auto_approve_pam_policies entry must also be in pam_allowed_policies (or equal pam_policy)",
+      path: ["auto_approve_pam_policies"],
+    },
+  );
 
 export type GateConfig = z.infer<typeof GateConfigSchema>;
 
@@ -135,6 +175,10 @@ const cliToConfigKey: Record<string, keyof Config> = {
   "pam-location": "pam_location",
   "token-ttl-seconds": "token_ttl_seconds",
   "session-ttl-seconds": "session_ttl_seconds",
+  "operator-socket-path": "operator_socket_path",
+  "operator-socket-group": "operator_socket_group",
+  "auto-approve-pam-policies": "auto_approve_pam_policies",
+  "agent-uid": "agent_uid",
 };
 
 /** Convert a CLI-arg values object (kebab-case keys) to config keys (snake_case). */
@@ -148,7 +192,9 @@ export function mapCliArgs(
     if (configKey) {
       // Split comma-separated values into arrays for list fields
       if (
-        (configKey === "scopes" || configKey === "pam_allowed_policies") &&
+        (configKey === "scopes" ||
+          configKey === "pam_allowed_policies" ||
+          configKey === "auto_approve_pam_policies") &&
         typeof value === "string"
       ) {
         mapped[configKey] = value.split(",").map((s) => s.trim());
@@ -179,6 +225,9 @@ const configKeys: readonly (keyof Config)[] = [
   "pam_location",
   "token_ttl_seconds",
   "session_ttl_seconds",
+  "operator_socket_path",
+  "operator_socket_group",
+  "agent_uid",
 ];
 
 /**

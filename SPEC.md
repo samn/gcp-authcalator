@@ -111,6 +111,20 @@ WIF is a natural "Phase 2" enhancement if stronger audit trails or attribute con
 
 `CLOUDSDK_AUTH_ACCESS_TOKEN` works for gcloud CLI, but Python `google-auth` and other libraries don't honor it. They need either a credential file or a metadata server. For `with-prod`, we spin up a **temporary metadata proxy on a random port** that serves the elevated token, and set `GCE_METADATA_HOST` for just that process tree. This makes elevation transparent to all libraries.
 
+### 5. Why an operator socket (instead of per-request peer-credential checks)?
+
+The naive solution to "auto-approve only when the human initiates" is `SO_PEERCRED` on a single shared socket. We chose to attach trust to the _socket itself_ via filesystem group permissions. Reasons:
+
+- **`Bun.serve({ unix })` does not expose connection-level peer credentials.** Implementing per-connection UID extraction would require dropping into raw `Bun.listen()` or `node:http`, doubling the maintenance surface for a feature whose security guarantee is already met by filesystem permissions.
+- **Defense-in-depth is filesystem permissions either way.** Even with `SO_PEERCRED`, you'd still want the agent UID _unable to connect_ to the privileged path — otherwise it can probe the socket, burn rate-limit quota, or trigger confirmation-dialog spam to fatigue the operator. With perms-as-trust-boundary, this is automatic.
+- **A single socket would also need to be `0666` or group-readable** so multiple UIDs can connect, opening the surface. Two separate sockets with `0600`/`0660` keep the agent UID `EACCES`-fenced from the operator path.
+- **Sessions are explicitly disabled on the operator socket** to remove the 8-hour bearer-token attack surface. With auto-approve firing per request, the only stealable artifact is the per-request access token, which already has the same lifetime as any other GCP token. The operator's `with-prod` falls back to per-request token mode automatically — vanilla GCP SDKs in the container never used sessions in the first place.
+- **Out-of-allowlist requests on the operator socket return 403, not a confirmation prompt.** Falling through to a prompt encourages the operator to dismiss prompts reflexively, which is the failure mode this whole feature is trying to avoid. A request for a non-allowlisted policy belongs on the main socket.
+
+The shared rate limiter is intentional: a flooding agent surfaces as a real rate-limit signal to the operator. A separate limiter on the operator socket would double the worst-case denial budget for marginal benefit. The operator can be starved by an agent flood, but the agent already has access to that bucket via the main socket — the attacker UID gains nothing new by spamming.
+
+The single residual threat the operator socket cannot mitigate is **confused deputy via the operator's own UID**: anything that runs as the operator UID _is_ the operator from the gate's view (a malicious npm postinstall, an agent-suggested shell command, a planted shell rc, a tampered Makefile). The `auto_approve_pam_policies` allowlist caps the blast radius to a small set of pre-blessed entitlements — which is why the docs require treating that list with the same review rigor as IAM policy changes.
+
 ## Components
 
 All components are sub-commands of a single `gcp-authcalator` binary, distributed as a compiled Bun executable.
