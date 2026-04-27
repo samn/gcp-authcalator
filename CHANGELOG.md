@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [0.8.0] - 2026-04-27
+
 ### Added
 
 - **Operator socket** for allowlisted auto-approve. A new third Unix socket
@@ -27,20 +29,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - Upgraded Bun from 1.3.11 to 1.3.13.
-
-### Security
-
-- Operator-socket startup misconfiguration check: gate refuses to start when
-  `agent_uid` is in `operator_socket_group`, when `agent_uid` equals the gate
-  UID, or when the configured group is not in `/etc/group`.
-- Sessions are explicitly rejected on the operator socket (`POST /session`
-  and `GET /token?session=…` both return 403). Auto-approve is strictly
-  per-request — no 8-hour bearer-token refresh credential ever exists from
-  the operator-socket path. `with-prod` against the operator socket
-  transparently falls back to per-request token mode.
-- `X-Pending-Id` is rejected with 400 on the operator-socket auto-approve
-  path: auto-approve does not enqueue, so a client-supplied pending ID
-  indicates client confusion or attempted protocol misuse.
 
 ### Fixed
 
