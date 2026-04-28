@@ -10,6 +10,12 @@ export interface ProdSession {
   scopes?: string[];
   /** Resolved PAM policy (if any). */
   pamPolicy?: string;
+  /**
+   * Summarized wrapped command captured at session creation. Used as the
+   * PAM grant justification on subsequent refreshes so renewed grants
+   * carry the same context as the initial grant.
+   */
+  commandSummary?: string;
   /** Per-token TTL in seconds. */
   ttlSeconds: number;
   /** When the session was created. */
@@ -22,6 +28,7 @@ export interface CreateSessionParams {
   email: string;
   scopes?: string[];
   pamPolicy?: string;
+  commandSummary?: string;
   ttlSeconds: number;
   sessionLifetimeSeconds: number;
 }
@@ -56,6 +63,7 @@ export function createSessionManager(options: SessionManagerOptions = {}): Sessi
       email: params.email,
       scopes: params.scopes,
       pamPolicy: params.pamPolicy,
+      commandSummary: params.commandSummary,
       ttlSeconds: params.ttlSeconds,
       createdAt,
       expiresAt,

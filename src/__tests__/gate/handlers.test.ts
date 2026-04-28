@@ -737,6 +737,42 @@ describe("GET /token?level=prod with PAM", () => {
     expect(logs).toHaveLength(1);
     expect(logs[0]!.result).toBe("error");
   });
+
+  test("passes wrapped command summary as PAM grant justification", async () => {
+    let capturedJustification: string | undefined;
+    const deps = makeDeps({
+      pamDefaultPolicy: "my-policy",
+      pamAllowedPolicies: new Set(["my-policy"]),
+      ensurePamGrant: async (_path, justification) => {
+        capturedJustification = justification;
+        return { name: "grants/g1", state: "ACTIVATED", cached: false };
+      },
+    });
+
+    const headers = {
+      "X-Wrapped-Command": JSON.stringify(["gcloud", "compute", "instances", "list"]),
+    };
+    const res = await handleRequest(makeRequest("/token?level=prod", "GET", headers), deps);
+
+    expect(res.status).toBe(200);
+    expect(capturedJustification).toBe("gcloud compute instances list");
+  });
+
+  test("passes undefined justification to ensurePamGrant when no command header", async () => {
+    let capturedJustification: string | undefined = "should-be-replaced";
+    const deps = makeDeps({
+      pamDefaultPolicy: "my-policy",
+      pamAllowedPolicies: new Set(["my-policy"]),
+      ensurePamGrant: async (_path, justification) => {
+        capturedJustification = justification;
+        return { name: "grants/g1", state: "ACTIVATED", cached: false };
+      },
+    });
+
+    await handleRequest(makeRequest("/token?level=prod"), deps);
+
+    expect(capturedJustification).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1116,6 +1152,21 @@ describe("POST /session", () => {
     expect(session!.scopes).toEqual(["scope1"]);
     expect(session!.ttlSeconds).toBe(900);
   });
+
+  test("stores wrapped command summary on the session for later refresh", async () => {
+    const sessionManager = createSessionManager();
+    const deps = makeDeps({ sessionManager });
+
+    const headers = {
+      "X-Wrapped-Command": JSON.stringify(["gcloud", "auth", "list"]),
+    };
+    const res = await handleRequest(makeRequest("/session", "POST", headers), deps);
+    const body = (await res.json()) as Record<string, unknown>;
+    const session = sessionManager.validate(body.session_id as string);
+
+    expect(session).not.toBeNull();
+    expect(session!.commandSummary).toBe("gcloud auth list");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1418,6 +1469,54 @@ describe("GET /token?session=<id>", () => {
     expect(res.status).toBe(500);
     const body = (await res.json()) as Record<string, unknown>;
     expect(body.error).toBe("PAM grant expired and renewal failed");
+  });
+
+  test("forwards stored command summary as PAM justification on refresh", async () => {
+    let capturedJustification: string | undefined;
+    const sessionManager = createSessionManager();
+    const session = sessionManager.create({
+      email: "eng@example.com",
+      ttlSeconds: 3600,
+      sessionLifetimeSeconds: 28800,
+      pamPolicy: "projects/p/locations/global/entitlements/e",
+      commandSummary: "gcloud auth list",
+    });
+
+    const deps = makeDeps({
+      sessionManager,
+      ensurePamGrant: async (_path, justification) => {
+        capturedJustification = justification;
+        return { name: "grants/g1", state: "ACTIVATED", cached: false };
+      },
+    });
+
+    const res = await handleRequest(makeRequest(`/token?session=${session.id}`), deps);
+
+    expect(res.status).toBe(200);
+    expect(capturedJustification).toBe("gcloud auth list");
+  });
+
+  test("passes undefined PAM justification on refresh when session has no command", async () => {
+    let capturedJustification: string | undefined = "should-be-replaced";
+    const sessionManager = createSessionManager();
+    const session = sessionManager.create({
+      email: "eng@example.com",
+      ttlSeconds: 3600,
+      sessionLifetimeSeconds: 28800,
+      pamPolicy: "projects/p/locations/global/entitlements/e",
+    });
+
+    const deps = makeDeps({
+      sessionManager,
+      ensurePamGrant: async (_path, justification) => {
+        capturedJustification = justification;
+        return { name: "grants/g1", state: "ACTIVATED", cached: false };
+      },
+    });
+
+    await handleRequest(makeRequest(`/token?session=${session.id}`), deps);
+
+    expect(capturedJustification).toBeUndefined();
   });
 });
 

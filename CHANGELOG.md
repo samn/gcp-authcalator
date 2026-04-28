@@ -25,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Linux: suppress GTK height-mismatch warnings from zenity confirmation
   dialogs by setting an explicit `--width=500`.
 
+### Changed
+
+- PAM grants minted on session token refresh now carry the wrapped command's
+  summary as their `unstructuredJustification`, matching the behavior of the
+  initial grant. Previously, renewed grants used the generic fallback
+  justification.
+
 ## [0.8.0] - 2026-04-27
 
 ### Added
