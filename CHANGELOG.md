@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Fixed
+
+- Linux: suppress GTK height-mismatch warnings from zenity confirmation
+  dialogs by setting an explicit `--width=500`.
+
 ## [0.8.0] - 2026-04-27
 
 ### Added

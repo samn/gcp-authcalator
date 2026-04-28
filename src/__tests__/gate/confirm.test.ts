@@ -97,6 +97,7 @@ describe("createConfirmModule", () => {
       expect(capturedCmd).toContain("--no-markup");
       expect(capturedCmd).toContain("--title=gcp-gate: Prod Access");
       expect(capturedCmd.some((arg) => arg.includes("user@example.com"))).toBe(true);
+      expect(capturedCmd).toContain("--width=500");
       expect(capturedCmd).toContain("--timeout=60");
     });
   });
