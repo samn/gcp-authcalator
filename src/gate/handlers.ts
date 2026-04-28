@@ -158,10 +158,12 @@ async function handleSessionTokenRefresh(
   try {
     // Renew PAM grant if the session has a PAM policy (grants expire
     // independently of the session and must be kept alive for the token
-    // to carry elevated permissions).
+    // to carry elevated permissions). Pass the command summary captured
+    // at session creation so renewed grants carry the same justification
+    // as the initial grant in the GCP PAM audit log.
     let pamAuditFields: Pick<AuditEntry, "pam_grant" | "pam_cached"> = {};
     if (session.pamPolicy && deps.ensurePamGrant) {
-      const grantResult = await deps.ensurePamGrant(session.pamPolicy);
+      const grantResult = await deps.ensurePamGrant(session.pamPolicy, session.commandSummary);
       pamAuditFields = {
         pam_grant: grantResult.name,
         pam_cached: grantResult.cached,
@@ -249,6 +251,7 @@ async function handleDevToken(
 interface ProdAccessGrant {
   email: string;
   effectivePamPolicy?: string;
+  /** Redacted, length-bounded summary of the wrapped command, if any. */
   commandSummary?: string;
   pamAuditFields: Pick<AuditEntry, "pam_grant" | "pam_cached">;
   auditBase: Pick<
@@ -558,6 +561,7 @@ async function handleCreateSession(
       email: grant.email,
       scopes,
       pamPolicy: grant.effectivePamPolicy,
+      commandSummary: grant.commandSummary,
       ttlSeconds: effectiveTokenTtl,
       sessionLifetimeSeconds: effectiveSessionTtl,
     });
