@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [0.8.1] - 2026-04-28
+
 ### Added
 
 - Audit log now records the wrapped `command` summary on every prod-path
