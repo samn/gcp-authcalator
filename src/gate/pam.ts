@@ -31,6 +31,28 @@ function parseDurationSeconds(duration?: string): number {
   return match ? Number(match[1]) : 0;
 }
 
+/**
+ * True iff a PAM error body indicates an existing open grant for the same
+ * privileged access. PAM has shipped this condition as both 409 Conflict and
+ * 400 FAILED_PRECONDITION; this matcher narrows the 400 case so unrelated
+ * FAILED_PRECONDITION causes (disabled entitlement, ineligible requester)
+ * keep surfacing their original error.
+ */
+function isOpenGrantPrecondition(body: string): boolean {
+  try {
+    const parsed = JSON.parse(body) as {
+      error?: { status?: unknown; message?: unknown };
+    };
+    return (
+      parsed.error?.status === "FAILED_PRECONDITION" &&
+      typeof parsed.error.message === "string" &&
+      parsed.error.message.includes("open Grant")
+    );
+  } catch {
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -199,6 +221,11 @@ export function createPamModule(
 
     if (!res.ok) {
       const text = await res.text();
+
+      if (res.status === 400 && isOpenGrantPrecondition(text)) {
+        return findActiveGrant(entitlementPath);
+      }
+
       throw new Error(`PAM API error (${res.status}): ${text}`);
     }
 
@@ -218,9 +245,7 @@ export function createPamModule(
     const active = data.grants?.[0];
 
     if (!active?.name) {
-      throw new Error(
-        `PAM grant conflict (409) but no active grant found for "${entitlementPath}"`,
-      );
+      throw new Error(`PAM grant conflict but no active grant found for "${entitlementPath}"`);
     }
 
     return active;

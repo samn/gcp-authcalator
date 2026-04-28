@@ -94,7 +94,7 @@ async function handleToken(
   // Session-based token refresh: bypass confirmation and rate limiting
   const sessionId = url.searchParams.get("session");
   if (sessionId) {
-    return handleSessionTokenRefresh(sessionId, deps, ctx);
+    return handleSessionTokenRefresh(req, sessionId, deps, ctx);
   }
 
   const level = url.searchParams.get("level") === "prod" ? "prod" : "dev";
@@ -117,6 +117,7 @@ async function handleToken(
 
 /** Mint a fresh prod token using a pre-approved session (no confirmation). */
 async function handleSessionTokenRefresh(
+  req: Request,
   sessionId: string,
   deps: GateDeps,
   ctx: RequestContext,
@@ -139,14 +140,20 @@ async function handleSessionTokenRefresh(
     return jsonResponse({ error: "Session expired or invalid" }, 401);
   }
 
-  const auditBase: Pick<AuditEntry, "endpoint" | "level" | "session_id" | "pam_policy" | "socket"> =
-    {
-      endpoint: "/token?session=...",
-      level: "prod",
-      session_id: sessionId,
-      pam_policy: session.pamPolicy,
-      socket: ctx.socket,
-    };
+  const commandArr = parseCommandHeader(req.headers.get("X-Wrapped-Command"));
+  const commandSummary = commandArr ? summarizeCommand(commandArr) : undefined;
+
+  const auditBase: Pick<
+    AuditEntry,
+    "endpoint" | "level" | "session_id" | "pam_policy" | "socket" | "command"
+  > = {
+    endpoint: "/token?session=...",
+    level: "prod",
+    session_id: sessionId,
+    pam_policy: session.pamPolicy,
+    socket: ctx.socket,
+    command: commandSummary,
+  };
 
   try {
     // Renew PAM grant if the session has a PAM policy (grants expire
@@ -242,10 +249,17 @@ async function handleDevToken(
 interface ProdAccessGrant {
   email: string;
   effectivePamPolicy?: string;
+  commandSummary?: string;
   pamAuditFields: Pick<AuditEntry, "pam_grant" | "pam_cached">;
   auditBase: Pick<
     AuditEntry,
-    "endpoint" | "level" | "pam_policy" | "token_ttl_seconds" | "socket" | "auto_approved"
+    | "endpoint"
+    | "level"
+    | "pam_policy"
+    | "token_ttl_seconds"
+    | "socket"
+    | "auto_approved"
+    | "command"
   >;
 }
 
@@ -283,15 +297,19 @@ async function acquireProdAccess(
     effectivePamPolicy = deps.pamDefaultPolicy;
   }
 
+  const commandArr = parseCommandHeader(req.headers.get("X-Wrapped-Command"));
+  const commandSummary = commandArr ? summarizeCommand(commandArr) : undefined;
+
   const auditBase: Pick<
     AuditEntry,
-    "endpoint" | "level" | "pam_policy" | "token_ttl_seconds" | "socket"
+    "endpoint" | "level" | "pam_policy" | "token_ttl_seconds" | "socket" | "command"
   > = {
     endpoint: opts.auditEndpoint,
     level: "prod",
     pam_policy: effectivePamPolicy,
     token_ttl_seconds: opts.ttlSeconds,
     socket: ctx.socket,
+    command: commandSummary,
   };
 
   // Allowlist check
@@ -347,8 +365,6 @@ async function acquireProdAccess(
   try {
     const email = await deps.getIdentityEmail();
 
-    const commandArr = parseCommandHeader(req.headers.get("X-Wrapped-Command"));
-    const commandSummary = commandArr ? summarizeCommand(commandArr) : undefined;
     const pendingId = req.headers.get("X-Pending-Id") ?? undefined;
 
     let approved: boolean;
@@ -379,7 +395,13 @@ async function acquireProdAccess(
     }
 
     const grantedAuditBase = autoApprove ? { ...auditBase, auto_approved: true } : auditBase;
-    return { email, effectivePamPolicy, pamAuditFields, auditBase: grantedAuditBase };
+    return {
+      email,
+      effectivePamPolicy,
+      commandSummary,
+      pamAuditFields,
+      auditBase: grantedAuditBase,
+    };
   } catch (err) {
     deps.prodRateLimiter.release("error");
 

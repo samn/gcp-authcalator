@@ -73,6 +73,13 @@ export interface AuditEntry {
   socket?: "main" | "operator" | "tcp" | "admin";
   /** True iff the prod request bypassed the confirmation prompt via the operator-socket allowlist. */
   auto_approved?: boolean;
+  /**
+   * Summary of the wrapped command (from `X-Wrapped-Command`) for prod-path
+   * requests. PAM grants outlive a single command and PAM's grant
+   * justification can't be amended, so this captures per-invocation context
+   * the gate is uniquely positioned to record.
+   */
+  command?: string;
 }
 
 /** Per-request metadata threaded through the handler chain. */

@@ -7,8 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- Audit log now records the wrapped `command` summary on every prod-path
+  request (`/token?level=prod`, `POST /session`, `/token?session=...`). PAM
+  grant justifications are immutable and a single grant can be reused across
+  many `with-prod` invocations, so the gate's local audit log is the only
+  per-invocation record of which command was actually run under elevated
+  access. Dev-path entries are unchanged.
+
 ### Fixed
 
+- Reuse existing PAM grant when GCP returns `400 FAILED_PRECONDITION` ("You
+  have an open Grant ... that gives the same privileged access"), matching
+  prior behavior for `409 Conflict`. Previously `with-prod` failed with
+  `failed to acquire prod token` whenever a prior grant was still active.
 - Linux: suppress GTK height-mismatch warnings from zenity confirmation
   dialogs by setting an explicit `--width=500`.
 

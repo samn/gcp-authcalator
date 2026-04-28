@@ -251,9 +251,7 @@ describe("ensureGrant", () => {
       { status: 200, body: { grants: [] } },
     ]);
 
-    await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow(
-      "409) but no active grant found",
-    );
+    await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow("no active grant found");
   });
 
   test("throws when grant is denied during polling", async () => {
@@ -281,6 +279,105 @@ describe("ensureGrant", () => {
     await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow(
       "PAM API error listing grants (500)",
     );
+  });
+
+  test("handles 400 FAILED_PRECONDITION 'open Grant' by finding active grant", async () => {
+    const grantName = `${entitlementPath}/grants/existing-grant`;
+    const { pam } = makeModule([
+      {
+        status: 400,
+        body: {
+          error: {
+            code: 400,
+            status: "FAILED_PRECONDITION",
+            message: `You have an open Grant "${grantName}" that gives the same privileged access.`,
+          },
+        },
+      },
+      { status: 200, body: { grants: [makeActivatedGrant(grantName)] } },
+    ]);
+
+    const result = await pam.ensureGrant(entitlementPath);
+    expect(result.name).toBe(grantName);
+  });
+
+  test("throws on 400 FAILED_PRECONDITION 'open Grant' when no active grant found", async () => {
+    const grantName = `${entitlementPath}/grants/existing-grant`;
+    const { pam } = makeModule([
+      {
+        status: 400,
+        body: {
+          error: {
+            code: 400,
+            status: "FAILED_PRECONDITION",
+            message: `You have an open Grant "${grantName}" that gives the same privileged access.`,
+          },
+        },
+      },
+      { status: 200, body: { grants: [] } },
+    ]);
+
+    await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow("no active grant found");
+  });
+
+  test("throws on 400 FAILED_PRECONDITION without 'open Grant' phrase", async () => {
+    let listCalls = 0;
+    const pam = createPamModule(async () => "token", {
+      fetchFn: (async (url: string) => {
+        if (url.includes("filter=")) {
+          listCalls++;
+          return new Response(JSON.stringify({ grants: [] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            error: {
+              code: 400,
+              status: "FAILED_PRECONDITION",
+              message: "Entitlement is disabled.",
+            },
+          }),
+          { status: 400, headers: { "Content-Type": "application/json" } },
+        );
+      }) as unknown as typeof globalThis.fetch,
+    });
+
+    await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow(
+      /PAM API error \(400\).*Entitlement is disabled/s,
+    );
+    expect(listCalls).toBe(0);
+  });
+
+  test("throws on 400 with non-FAILED_PRECONDITION status", async () => {
+    let listCalls = 0;
+    const pam = createPamModule(async () => "token", {
+      fetchFn: (async (url: string) => {
+        if (url.includes("filter=")) {
+          listCalls++;
+          return new Response(JSON.stringify({ grants: [] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            error: {
+              code: 400,
+              status: "INVALID_ARGUMENT",
+              message: "Invalid requestedDuration.",
+            },
+          }),
+          { status: 400, headers: { "Content-Type": "application/json" } },
+        );
+      }) as unknown as typeof globalThis.fetch,
+    });
+
+    await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow(
+      /PAM API error \(400\).*INVALID_ARGUMENT/s,
+    );
+    expect(listCalls).toBe(0);
   });
 
   test("throws when polling API returns error", async () => {

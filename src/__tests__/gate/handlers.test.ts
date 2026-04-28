@@ -157,6 +157,17 @@ describe("GET /token (dev)", () => {
     expect(logs[0]!.endpoint).toBe("/token");
   });
 
+  test("does not record command in dev audit entry even when header is present", async () => {
+    const logs: AuditEntry[] = [];
+    const deps = makeDeps({ writeAuditLog: (e) => logs.push(e) });
+    const headers = { "X-Wrapped-Command": JSON.stringify(["gcloud", "compute", "instances"]) };
+
+    await handleRequest(makeRequest("/token", "GET", headers), deps);
+
+    expect(logs).toHaveLength(1);
+    expect(logs[0]!.command).toBeUndefined();
+  });
+
   test("returns 500 and writes error audit on mint failure", async () => {
     const logs: AuditEntry[] = [];
     const deps = makeDeps({
@@ -462,6 +473,38 @@ describe("GET /token?level=prod", () => {
     expect(capturedCommand).toBeDefined();
     expect(capturedCommand!.length).toBeLessThanOrEqual(80);
     expect(capturedCommand!.startsWith("mybinary")).toBe(true);
+  });
+
+  test("records command summary in granted audit entry", async () => {
+    const logs: AuditEntry[] = [];
+    const deps = makeDeps({
+      confirmProdAccess: async () => true,
+      writeAuditLog: (e) => logs.push(e),
+    });
+    const headers = {
+      "X-Wrapped-Command": JSON.stringify(["gcloud", "compute", "instances", "list"]),
+    };
+
+    await handleRequest(makeRequest("/token?level=prod", "GET", headers), deps);
+
+    expect(logs).toHaveLength(1);
+    expect(logs[0]!.result).toBe("granted");
+    expect(logs[0]!.command).toBe("gcloud compute instances list");
+  });
+
+  test("records command summary in denied audit entry", async () => {
+    const logs: AuditEntry[] = [];
+    const deps = makeDeps({
+      confirmProdAccess: async () => false,
+      writeAuditLog: (e) => logs.push(e),
+    });
+    const headers = { "X-Wrapped-Command": JSON.stringify(["bq", "query", "--nouse_legacy_sql"]) };
+
+    await handleRequest(makeRequest("/token?level=prod", "GET", headers), deps);
+
+    expect(logs).toHaveLength(1);
+    expect(logs[0]!.result).toBe("denied");
+    expect(logs[0]!.command).toBe("bq query --nouse_legacy_sql");
   });
 
   test("redacts sensitive-looking values in command", async () => {
@@ -1024,6 +1067,17 @@ describe("POST /session", () => {
     expect(logs[0]!.session_id).toBe(body.session_id as string);
   });
 
+  test("records command summary in session-creation audit entry", async () => {
+    const logs: AuditEntry[] = [];
+    const deps = makeDeps({ writeAuditLog: (e) => logs.push(e) });
+    const headers = { "X-Wrapped-Command": JSON.stringify(["gcloud", "sql", "connect", "prod"]) };
+
+    await handleRequest(makeRequest("/session", "POST", headers), deps);
+
+    expect(logs).toHaveLength(1);
+    expect(logs[0]!.command).toBe("gcloud sql connect prod");
+  });
+
   test("returns 405 for GET method", async () => {
     const res = await handleRequest(makeRequest("/session", "GET"), makeDeps());
     expect(res.status).toBe(405);
@@ -1229,6 +1283,24 @@ describe("GET /token?session=<id>", () => {
     expect(logs[0]!.session_id).toBe(session.id);
     expect(logs[0]!.email).toBe("eng@example.com");
     expect(logs[0]!.level).toBe("prod");
+  });
+
+  test("records per-refresh command summary distinct from session-creation command", async () => {
+    const logs: AuditEntry[] = [];
+    const sessionManager = createSessionManager();
+    const session = sessionManager.create({
+      email: "eng@example.com",
+      ttlSeconds: 3600,
+      sessionLifetimeSeconds: 28800,
+    });
+    const deps = makeDeps({ sessionManager, writeAuditLog: (e) => logs.push(e) });
+    const headers = { "X-Wrapped-Command": JSON.stringify(["kubectl", "get", "pods", "-A"]) };
+
+    await handleRequest(makeRequest(`/token?session=${session.id}`, "GET", headers), deps);
+
+    expect(logs).toHaveLength(1);
+    expect(logs[0]!.session_id).toBe(session.id);
+    expect(logs[0]!.command).toBe("kubectl get pods -A");
   });
 
   test("returns 500 when mintProdToken fails", async () => {
