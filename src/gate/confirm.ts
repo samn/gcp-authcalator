@@ -86,6 +86,7 @@ async function tryZenity(
     "--no-markup",
     "--title=gcp-gate: Prod Access",
     `--text=${text}`,
+    "--width=500",
     "--timeout=60",
   ]);
 
