@@ -323,8 +323,8 @@ describe("ensureGrant", () => {
   test("throws on 400 FAILED_PRECONDITION without 'open Grant' phrase", async () => {
     let listCalls = 0;
     const pam = createPamModule(async () => "token", {
-      fetchFn: (async (url: string) => {
-        if (url.includes("filter=")) {
+      fetchFn: (async (url: string, init?: RequestInit) => {
+        if (init?.method === undefined && /\/grants\?pageSize=\d+/.test(url)) {
           listCalls++;
           return new Response(JSON.stringify({ grants: [] }), {
             status: 200,
@@ -353,8 +353,8 @@ describe("ensureGrant", () => {
   test("throws on 400 with non-FAILED_PRECONDITION status", async () => {
     let listCalls = 0;
     const pam = createPamModule(async () => "token", {
-      fetchFn: (async (url: string) => {
-        if (url.includes("filter=")) {
+      fetchFn: (async (url: string, init?: RequestInit) => {
+        if (init?.method === undefined && /\/grants\?pageSize=\d+/.test(url)) {
           listCalls++;
           return new Response(JSON.stringify({ grants: [] }), {
             status: 200,
@@ -378,6 +378,169 @@ describe("ensureGrant", () => {
       /PAM API error \(400\).*INVALID_ARGUMENT/s,
     );
     expect(listCalls).toBe(0);
+  });
+
+  test("findActiveGrant lists without a server-side filter", async () => {
+    const grantName = `${entitlementPath}/grants/existing-grant`;
+    let listUrl: string | undefined;
+    const pam = createPamModule(async () => "token", {
+      fetchFn: (async (url: string, init?: RequestInit) => {
+        if (init?.method === undefined && url.includes("/grants?")) {
+          listUrl = url;
+          return new Response(JSON.stringify({ grants: [makeActivatedGrant(grantName)] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify({ error: { message: "already exists" } }), {
+          status: 409,
+          headers: { "Content-Type": "application/json" },
+        });
+      }) as unknown as typeof globalThis.fetch,
+    });
+
+    const result = await pam.ensureGrant(entitlementPath);
+    expect(result.name).toBe(grantName);
+    expect(listUrl).toBeDefined();
+    expect(listUrl).not.toContain("filter=");
+  });
+
+  test("findActiveGrant accepts state='ACTIVE'", async () => {
+    const grantName = `${entitlementPath}/grants/existing-grant`;
+    const { pam } = makeModule([
+      { status: 409, body: { error: { message: "Already exists" } } },
+      {
+        status: 200,
+        body: {
+          grants: [
+            {
+              name: grantName,
+              state: "ACTIVE",
+              createTime: new Date().toISOString(),
+              requestedDuration: "3600s",
+            },
+          ],
+        },
+      },
+    ]);
+
+    const result = await pam.ensureGrant(entitlementPath);
+    expect(result.name).toBe(grantName);
+    expect(result.state).toBe("ACTIVE");
+  });
+
+  test("findActiveGrant skips ENDED grants and picks the active one", async () => {
+    const endedName = `${entitlementPath}/grants/old-ended`;
+    const activeName = `${entitlementPath}/grants/current-active`;
+    const { pam } = makeModule([
+      { status: 409, body: { error: { message: "Already exists" } } },
+      {
+        status: 200,
+        body: {
+          grants: [
+            { name: endedName, state: "ENDED", requestedDuration: "3600s" },
+            {
+              name: activeName,
+              state: "ACTIVE",
+              createTime: new Date().toISOString(),
+              requestedDuration: "3600s",
+            },
+          ],
+        },
+      },
+    ]);
+
+    const result = await pam.ensureGrant(entitlementPath);
+    expect(result.name).toBe(activeName);
+  });
+
+  test("findActiveGrant follows nextPageToken when active grant is on a later page", async () => {
+    const activeName = `${entitlementPath}/grants/current-active`;
+    const observedTokens: Array<string | null> = [];
+    let pageIndex = 0;
+    const pam = createPamModule(async () => "token", {
+      fetchFn: (async (url: string, init?: RequestInit) => {
+        if (init?.method === undefined && url.includes("/grants?")) {
+          const tokenMatch = /pageToken=([^&]+)/.exec(url);
+          observedTokens.push(tokenMatch ? decodeURIComponent(tokenMatch[1]!) : null);
+          const body =
+            pageIndex++ === 0
+              ? {
+                  grants: [{ name: `${entitlementPath}/grants/old`, state: "ENDED" }],
+                  nextPageToken: "tok-page-2",
+                }
+              : {
+                  grants: [
+                    {
+                      name: activeName,
+                      state: "ACTIVE",
+                      createTime: new Date().toISOString(),
+                      requestedDuration: "3600s",
+                    },
+                  ],
+                };
+          return new Response(JSON.stringify(body), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify({ error: { message: "already exists" } }), {
+          status: 409,
+          headers: { "Content-Type": "application/json" },
+        });
+      }) as unknown as typeof globalThis.fetch,
+    });
+
+    const result = await pam.ensureGrant(entitlementPath);
+    expect(result.name).toBe(activeName);
+    expect(observedTokens).toEqual([null, "tok-page-2"]);
+  });
+
+  test("findActiveGrant gives up after the page-scan bound", async () => {
+    let pages = 0;
+    const pam = createPamModule(async () => "token", {
+      fetchFn: (async (url: string, init?: RequestInit) => {
+        if (init?.method === undefined && url.includes("/grants?")) {
+          pages++;
+          return new Response(
+            JSON.stringify({
+              grants: [{ name: `${entitlementPath}/grants/g${pages}`, state: "ENDED" }],
+              nextPageToken: `tok-${pages}`,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response(JSON.stringify({ error: { message: "already exists" } }), {
+          status: 409,
+          headers: { "Content-Type": "application/json" },
+        });
+      }) as unknown as typeof globalThis.fetch,
+    });
+
+    await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow(
+      /no active grant found.*scanned \d+ grant\(s\) across 10 page\(s\)/,
+    );
+    expect(pages).toBe(10);
+  });
+
+  test("pollGrant accepts state='ACTIVE' as activated", async () => {
+    const grantName = `${entitlementPath}/grants/grant-1`;
+    const { pam } = makeModule([
+      { status: 200, body: { name: grantName, state: "APPROVAL_AWAITED" } },
+      {
+        status: 200,
+        body: {
+          name: grantName,
+          state: "ACTIVE",
+          createTime: new Date().toISOString(),
+          requestedDuration: "3600s",
+        },
+      },
+    ]);
+
+    const result = await pam.ensureGrant(entitlementPath);
+    expect(result.name).toBe(grantName);
+    expect(result.state).toBe("ACTIVE");
   });
 
   test("throws when polling API returns error", async () => {
