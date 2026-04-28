@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Fixed
+
+- Gate listeners now set `idleTimeout: 255s` (Bun's max) on the main, TLS, and
+  operator sockets. Bun's 10-second default closed long-running prod requests
+  mid-flight — a `POST /session` can legitimately wait up to ~240s (pending
+  approval queue + PAM grant polling), causing `with-prod` to fail with
+  `socket connection was closed unexpectedly` and leaving stale pending entries
+  that produced spurious `429: A prod confirmation dialog is already pending`
+  on retry.
+- Reuse-existing-PAM-grant path (409 Conflict / 400 FAILED_PRECONDITION) now
+  works against the live PAM API. Two latent bugs:
+  - The list-grants call passed `?filter=state="ACTIVATED"`, which PAM rejects
+    as `400 INVALID_ARGUMENT: invalid list filter` for every filter syntax
+    tested (verified empirically). The gate now lists unfiltered with an
+    explicit `pageSize=100` and selects the active grant client-side.
+  - The state-comparison checks expected `"ACTIVATED"`, but PAM's
+    `grants.list` returns `"ACTIVE"`. The gate now treats both spellings as
+    activated (in `findActiveGrant`, `pollGrant`, and the create-response
+    short-circuit) so it stays robust to PAM API drift.
+
 ## [0.8.1] - 2026-04-28
 
 ### Added

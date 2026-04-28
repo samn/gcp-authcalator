@@ -15,6 +15,12 @@ import { createPamModule, resolveEntitlementPath, type PamModule } from "./pam.t
 import { createPendingQueue } from "./pending.ts";
 import { lookupGroup, loadUnixGroupDb, resolveAgentUid, getGroupsForUid } from "./unix-group.ts";
 
+// Bun's max idleTimeout (255s). Prod flows (POST /session, GET /token?level=prod)
+// can wait on the pending-approval queue (120s) and PAM grant polling (120s)
+// before the server writes a response; Bun's 10s default would close the
+// connection mid-request.
+const SOCKET_IDLE_TIMEOUT_SECONDS = 255;
+
 export interface GateServerResult {
   server: ReturnType<typeof Bun.serve>;
   tcpServer?: ReturnType<typeof Bun.serve>;
@@ -183,6 +189,7 @@ export async function startGateServer(
 
   const server = Bun.serve({
     unix: config.socket_path,
+    idleTimeout: SOCKET_IDLE_TIMEOUT_SECONDS,
     fetch(req) {
       return handleRequest(req, deps, { trusted: false, socket: "main" });
     },
@@ -200,6 +207,7 @@ export async function startGateServer(
     tcpServer = Bun.serve({
       hostname: "127.0.0.1",
       port: config.gate_tls_port,
+      idleTimeout: SOCKET_IDLE_TIMEOUT_SECONDS,
       tls: {
         cert: tlsFiles.serverCert,
         key: tlsFiles.serverKey,
@@ -270,6 +278,7 @@ export async function startGateServer(
 
     operatorServer = Bun.serve({
       unix: config.operator_socket_path,
+      idleTimeout: SOCKET_IDLE_TIMEOUT_SECONDS,
       fetch(req) {
         return handleRequest(req, deps, { trusted: true, socket: "operator" });
       },

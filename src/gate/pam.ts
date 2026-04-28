@@ -21,6 +21,21 @@ const POLL_TIMEOUT_MS = 120_000;
 /** Valid GCP resource ID pattern for short-form entitlement IDs. */
 const ENTITLEMENT_ID_PATTERN = /^[a-z][a-z0-9-]*$/;
 
+const LIST_GRANTS_PAGE_SIZE = 100;
+/** Safety bound on pagination when scanning for an active grant. */
+const LIST_GRANTS_MAX_PAGES = 10;
+
+/**
+ * Grant states that represent an active (usable) grant. PAM ships both
+ * spellings across endpoints — `grants.list` returns "ACTIVE" while older
+ * docs and some create responses use "ACTIVATED" — so we accept either.
+ */
+const ACTIVE_GRANT_STATES = new Set<string>(["ACTIVE", "ACTIVATED"]);
+
+function isActiveState(state: string | undefined): boolean {
+  return state !== undefined && ACTIVE_GRANT_STATES.has(state);
+}
+
 /** Expected full resource path pattern. */
 const ENTITLEMENT_PATH_PATTERN = /^projects\/([^/]+)\/locations\/([^/]+)\/entitlements\/([^/]+)$/;
 
@@ -74,7 +89,7 @@ export interface PamModule {
 export interface PamGrantResult {
   /** Full grant resource path. */
   name: string;
-  /** Grant state (should be "ACTIVATED"). */
+  /** Grant state ("ACTIVE" or "ACTIVATED" — PAM ships both spellings). */
   state: string;
   /** Whether this was a cache hit. */
   cached: boolean;
@@ -233,22 +248,45 @@ export function createPamModule(
   }
 
   async function findActiveGrant(entitlementPath: string): Promise<PamGrantResponse> {
-    const url = `${PAM_API_BASE}/${entitlementPath}/grants?filter=state%3D%22ACTIVATED%22`;
-    const res = await pamFetch(url);
+    // PAM's grants.list endpoint rejects every `filter=` we've tried as
+    // "invalid list filter", so we list unfiltered and select client-side.
+    // ENDED grants stick around in the response, so on a busy entitlement
+    // the active grant may not be on the first page — page through up to
+    // LIST_GRANTS_MAX_PAGES before giving up.
+    const baseUrl = `${PAM_API_BASE}/${entitlementPath}/grants?pageSize=${LIST_GRANTS_PAGE_SIZE}`;
+    let scanned = 0;
+    let pageToken: string | undefined;
 
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`PAM API error listing grants (${res.status}): ${text}`);
+    for (let page = 0; page < LIST_GRANTS_MAX_PAGES; page++) {
+      const url = pageToken ? `${baseUrl}&pageToken=${encodeURIComponent(pageToken)}` : baseUrl;
+      const res = await pamFetch(url);
+
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`PAM API error listing grants (${res.status}): ${text}`);
+      }
+
+      const data = (await res.json()) as {
+        grants?: PamGrantResponse[];
+        nextPageToken?: string;
+      };
+      const grants = data.grants ?? [];
+      scanned += grants.length;
+
+      const active = grants.find(
+        (g): g is PamGrantResponse & { name: string } =>
+          isActiveState(g.state) && typeof g.name === "string",
+      );
+      if (active) return active;
+
+      if (!data.nextPageToken) break;
+      pageToken = data.nextPageToken;
     }
 
-    const data = (await res.json()) as { grants?: PamGrantResponse[] };
-    const active = data.grants?.[0];
-
-    if (!active?.name) {
-      throw new Error(`PAM grant conflict but no active grant found for "${entitlementPath}"`);
-    }
-
-    return active;
+    throw new Error(
+      `PAM grant conflict but no active grant found for "${entitlementPath}" ` +
+        `(scanned ${scanned} grant(s) across ${LIST_GRANTS_MAX_PAGES} page(s))`,
+    );
   }
 
   async function pollGrant(grantName: string): Promise<PamGrantResponse> {
@@ -269,7 +307,7 @@ export function createPamModule(
 
       const grant = (await res.json()) as PamGrantResponse;
 
-      if (grant.state === "ACTIVATED") {
+      if (isActiveState(grant.state)) {
         return grant;
       }
 
@@ -328,7 +366,7 @@ export function createPamModule(
 
     let activated: PamGrantResponse;
 
-    if (grant.state === "ACTIVATED") {
+    if (isActiveState(grant.state)) {
       activated = grant;
     } else {
       // Poll until activated
