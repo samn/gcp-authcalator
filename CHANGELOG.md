@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   many `with-prod` invocations, so the gate's local audit log is the only
   per-invocation record of which command was actually run under elevated
   access. Dev-path entries are unchanged.
+- Startup log line that emits the version and short commit SHA to stderr
+  for every subcommand (e.g. `gcp-authcalator v0.8.0 (abc1234) (gate)`).
+  Skipped for `--version`, `--help`, and the `version` subcommand. Helps
+  verify the running build matches what was deployed.
 
 ### Fixed
 

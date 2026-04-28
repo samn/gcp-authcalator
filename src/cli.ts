@@ -175,6 +175,10 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     process.exit(0);
   }
 
+  // Log version+sha to stderr so the running build is visible in any subcommand's
+  // logs (verifies the deployed binary matches what was built).
+  console.error(`gcp-authcalator v${formatVersion()} (${subcommand})`);
+
   // Commands that don't need project config
   if (subcommand === "kube-token") {
     await runKubeToken();
