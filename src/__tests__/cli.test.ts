@@ -58,6 +58,43 @@ describe("version subcommand", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Version-on-startup logging (visible in any subcommand's logs)
+// ---------------------------------------------------------------------------
+
+describe("startup version logging", () => {
+  const VERSION_LINE = /gcp-authcalator v\d+\.\d+\.\d+ \([a-f0-9]+\)/;
+
+  test("logs version+sha to stderr for init-tls", async () => {
+    const { stderr, exitCode } = await runCLI(["init-tls", "--show-path"]);
+    expect(exitCode).toBe(0);
+    expect(stderr).toMatch(VERSION_LINE);
+    expect(stderr).toContain("(init-tls)");
+  });
+
+  test("logs version+sha to stderr for gate (even on config error)", async () => {
+    const { stderr, exitCode } = await runCLI(["gate"]);
+    expect(exitCode).toBe(1);
+    expect(stderr).toMatch(VERSION_LINE);
+    expect(stderr).toContain("(gate)");
+  });
+
+  test("does not log startup version when --version is requested", async () => {
+    const { stderr } = await runCLI(["--version"]);
+    expect(stderr).not.toMatch(VERSION_LINE);
+  });
+
+  test("does not log startup version when --help is requested", async () => {
+    const { stderr } = await runCLI(["--help"]);
+    expect(stderr).not.toMatch(VERSION_LINE);
+  });
+
+  test("does not log startup version for the version subcommand", async () => {
+    const { stderr } = await runCLI(["version"]);
+    expect(stderr).not.toMatch(VERSION_LINE);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // No subcommand / unknown subcommand
 // ---------------------------------------------------------------------------
 
