@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [0.8.2] - 2026-04-28
+
 ### Fixed
 
 - Gate listeners now set `idleTimeout: 255s` (Bun's max) on the main, TLS, and
