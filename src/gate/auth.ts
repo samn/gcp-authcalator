@@ -2,6 +2,7 @@ import { GoogleAuth } from "google-auth-library";
 import { Impersonated } from "google-auth-library";
 import type { AuthClient } from "google-auth-library";
 import { DEFAULT_SCOPES, type GateConfig } from "../config.ts";
+import { CredentialsExpiredError, mapAdcError } from "./credentials-error.ts";
 import type { CachedToken } from "./types.ts";
 
 /** Minimum remaining lifetime before we re-mint a cached token (5 minutes). */
@@ -27,6 +28,12 @@ export interface AuthModule {
   getUniverseDomain: () => Promise<string>;
   /** Expose the ADC source client (needed for PAM API calls). */
   getSourceClient: () => Promise<AuthClient>;
+  /**
+   * Mint a fresh ADC access token for PAM/internal use, with reauth/invalid_grant
+   * errors normalised to `CredentialsExpiredError` and the cached source client
+   * reset on failure. Prefer this over `getSourceClient().getAccessToken()`.
+   */
+  getSourceAccessToken: () => Promise<string>;
 }
 
 /**
@@ -44,6 +51,9 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
 
   // Lazily initialized clients
   let sourceClient: AuthClient | null = options.sourceClient ?? null;
+  // When a source client is injected via options (tests), preserve it across
+  // credentials-expired errors so the test fixture survives the reset path.
+  const sourceClientInjected = options.sourceClient !== undefined;
 
   // Per-scope-and-ttl caches for dev tokens (impersonated)
   const devTokenCaches = new Map<string, CachedToken>();
@@ -56,6 +66,29 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
   let emailCache: string | null = null;
   let projectNumberCache: string | null = null;
   let universeDomainCache: string | null = null;
+
+  /**
+   * Run an ADC-touching operation, normalising reauth/invalid_grant errors
+   * into `CredentialsExpiredError`. On a credentials-expired result we drop
+   * the cached source + impersonated clients so a follow-up call (after the
+   * engineer reruns `gcloud auth application-default login` on the host)
+   * re-reads `application_default_credentials.json` without a daemon
+   * restart. Token caches are cleared too — they were minted with a
+   * refresh token that is now known to be dead.
+   */
+  async function withAdcMapping<T>(fn: () => Promise<T>): Promise<T> {
+    try {
+      return await fn();
+    } catch (err) {
+      const mapped = mapAdcError(err);
+      if (mapped instanceof CredentialsExpiredError) {
+        if (!sourceClientInjected) sourceClient = null;
+        impersonatedClients.clear();
+        devTokenCaches.clear();
+      }
+      throw mapped;
+    }
+  }
 
   /** Build a stable cache key from a scope set and TTL. */
   function cacheKey(scopes: string[], ttl: number): string {
@@ -114,121 +147,129 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
       return cached;
     }
 
-    const client = await getImpersonatedClient(effectiveScopes, effectiveTtl);
-    const { token } = await client.getAccessToken();
+    return withAdcMapping(async () => {
+      const client = await getImpersonatedClient(effectiveScopes, effectiveTtl);
+      const { token } = await client.getAccessToken();
 
-    if (!token) {
-      throw new Error("Failed to mint dev token: no access token returned");
-    }
+      if (!token) {
+        throw new Error("Failed to mint dev token: no access token returned");
+      }
 
-    const result: CachedToken = {
-      access_token: token,
-      expires_at: expiryFromCredentials(client, effectiveTtl),
-    };
-    devTokenCaches.set(key, result);
-    return result;
+      const result: CachedToken = {
+        access_token: token,
+        expires_at: expiryFromCredentials(client, effectiveTtl),
+      };
+      devTokenCaches.set(key, result);
+      return result;
+    });
   }
 
   async function mintProdToken(scopes?: string[], ttlSeconds?: number): Promise<CachedToken> {
     // Prod tokens use the engineer's own ADC credentials (not impersonated).
     // Never cached — always mint a fresh one.
-    let client: AuthClient;
     const effectiveScopes = scopes ?? DEFAULT_SCOPES;
     const effectiveTtl = ttlSeconds ?? configTtl;
 
-    const scopesSorted = [...effectiveScopes].sort().join(",");
-    const defaultSorted = [...DEFAULT_SCOPES].sort().join(",");
+    return withAdcMapping(async () => {
+      let client: AuthClient;
+      const scopesSorted = [...effectiveScopes].sort().join(",");
+      const defaultSorted = [...DEFAULT_SCOPES].sort().join(",");
 
-    if (scopesSorted === defaultSorted) {
-      // Default scopes — reuse the cached source client
-      client = await getSourceClient();
-    } else {
-      // Custom scopes — create a fresh GoogleAuth with those scopes
-      const auth = new GoogleAuth({ scopes: effectiveScopes });
-      client = await auth.getClient();
-    }
+      if (scopesSorted === defaultSorted) {
+        // Default scopes — reuse the cached source client
+        client = await getSourceClient();
+      } else {
+        // Custom scopes — create a fresh GoogleAuth with those scopes
+        const auth = new GoogleAuth({ scopes: effectiveScopes });
+        client = await auth.getClient();
+      }
 
-    const { token } = await client.getAccessToken();
+      const { token } = await client.getAccessToken();
 
-    if (!token) {
-      throw new Error("Failed to mint prod token: no access token returned");
-    }
+      if (!token) {
+        throw new Error("Failed to mint prod token: no access token returned");
+      }
 
-    // Cap expires_at to the effective TTL. The underlying ADC token may remain
-    // valid at Google beyond this time, but gcp-authcalator will treat it as
-    // expired once the cap is reached.
-    const credentialExpiry = expiryFromCredentials(client, effectiveTtl);
-    const ttlCap = new Date(Date.now() + effectiveTtl * 1000);
-    const expires_at = credentialExpiry < ttlCap ? credentialExpiry : ttlCap;
+      // Cap expires_at to the effective TTL. The underlying ADC token may remain
+      // valid at Google beyond this time, but gcp-authcalator will treat it as
+      // expired once the cap is reached.
+      const credentialExpiry = expiryFromCredentials(client, effectiveTtl);
+      const ttlCap = new Date(Date.now() + effectiveTtl * 1000);
+      const expires_at = credentialExpiry < ttlCap ? credentialExpiry : ttlCap;
 
-    return {
-      access_token: token,
-      expires_at,
-    };
+      return {
+        access_token: token,
+        expires_at,
+      };
+    });
   }
 
   async function getIdentityEmail(): Promise<string> {
     if (emailCache) return emailCache;
 
-    const client = await getSourceClient();
-    const { token } = await client.getAccessToken();
+    return withAdcMapping(async () => {
+      const client = await getSourceClient();
+      const { token } = await client.getAccessToken();
 
-    if (!token) {
-      throw new Error("Failed to get identity: no access token available");
-    }
+      if (!token) {
+        throw new Error("Failed to get identity: no access token available");
+      }
 
-    const resp = await fetchFn(
-      `https://oauth2.googleapis.com/tokeninfo?access_token=${encodeURIComponent(token)}`,
-    );
+      const resp = await fetchFn(
+        `https://oauth2.googleapis.com/tokeninfo?access_token=${encodeURIComponent(token)}`,
+      );
 
-    if (!resp.ok) {
-      throw new Error(`Failed to get identity: tokeninfo returned ${resp.status}`);
-    }
+      if (!resp.ok) {
+        throw new Error(`Failed to get identity: tokeninfo returned ${resp.status}`);
+      }
 
-    const data = (await resp.json()) as { email?: string };
+      const data = (await resp.json()) as { email?: string };
 
-    if (!data.email) {
-      throw new Error("Failed to get identity: no email in tokeninfo response");
-    }
+      if (!data.email) {
+        throw new Error("Failed to get identity: no email in tokeninfo response");
+      }
 
-    emailCache = data.email;
-    return emailCache;
+      emailCache = data.email;
+      return emailCache;
+    });
   }
 
   async function getProjectNumber(): Promise<string> {
     if (projectNumberCache) return projectNumberCache;
 
-    const client = await getSourceClient();
-    const { token } = await client.getAccessToken();
+    return withAdcMapping(async () => {
+      const client = await getSourceClient();
+      const { token } = await client.getAccessToken();
 
-    if (!token) {
-      throw new Error("Failed to get project number: no access token available");
-    }
+      if (!token) {
+        throw new Error("Failed to get project number: no access token available");
+      }
 
-    const resp = await fetchFn(
-      `https://cloudresourcemanager.googleapis.com/v3/projects/${encodeURIComponent(config.project_id)}`,
-      { headers: { Authorization: `Bearer ${token}` } },
-    );
+      const resp = await fetchFn(
+        `https://cloudresourcemanager.googleapis.com/v3/projects/${encodeURIComponent(config.project_id)}`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
 
-    if (!resp.ok) {
-      throw new Error(`Failed to get project number: CRM API returned ${resp.status}`);
-    }
+      if (!resp.ok) {
+        throw new Error(`Failed to get project number: CRM API returned ${resp.status}`);
+      }
 
-    const data = (await resp.json()) as { name?: string };
+      const data = (await resp.json()) as { name?: string };
 
-    if (!data.name) {
-      throw new Error("Failed to get project number: no name in CRM API response");
-    }
+      if (!data.name) {
+        throw new Error("Failed to get project number: no name in CRM API response");
+      }
 
-    const parts = data.name.split("/");
-    const number = parts[1];
+      const parts = data.name.split("/");
+      const number = parts[1];
 
-    if (!number) {
-      throw new Error(`Failed to get project number: unexpected name format "${data.name}"`);
-    }
+      if (!number) {
+        throw new Error(`Failed to get project number: unexpected name format "${data.name}"`);
+      }
 
-    projectNumberCache = number;
-    return projectNumberCache;
+      projectNumberCache = number;
+      return projectNumberCache;
+    });
   }
 
   async function getUniverseDomain(): Promise<string> {
@@ -239,6 +280,17 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
     return universeDomainCache;
   }
 
+  async function getSourceAccessToken(): Promise<string> {
+    return withAdcMapping(async () => {
+      const client = await getSourceClient();
+      const { token } = await client.getAccessToken();
+      if (!token) {
+        throw new Error("Failed to get ADC access token: no token returned");
+      }
+      return token;
+    });
+  }
+
   return {
     mintDevToken,
     mintProdToken,
@@ -246,5 +298,6 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
     getProjectNumber,
     getUniverseDomain,
     getSourceClient,
+    getSourceAccessToken,
   };
 }

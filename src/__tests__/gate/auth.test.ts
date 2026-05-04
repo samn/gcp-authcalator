@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createAuthModule } from "../../gate/auth.ts";
+import { CredentialsExpiredError } from "../../gate/credentials-error.ts";
 import type { GateConfig } from "../../config.ts";
 import type { AuthClient } from "google-auth-library";
 
@@ -466,6 +467,138 @@ describe("createAuthModule", () => {
       });
 
       await expect(getProjectNumber()).rejects.toThrow("no access token available");
+    });
+  });
+
+  describe("credentials_expired error mapping", () => {
+    test("mintProdToken converts invalid_grant into CredentialsExpiredError", async () => {
+      const failingClient = {
+        credentials: {},
+        getAccessToken: async () => {
+          throw new Error("invalid_grant: reauth related error (rapt_required)");
+        },
+      } as unknown as AuthClient;
+
+      const { mintProdToken } = createAuthModule(TEST_CONFIG, {
+        sourceClient: failingClient,
+        impersonatedClient: mockClient("dev"),
+      });
+
+      const err = await mintProdToken().catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(CredentialsExpiredError);
+      expect((err as CredentialsExpiredError).code).toBe("credentials_expired");
+      expect((err as Error).message).toContain("rapt_required");
+      expect((err as Error).message).toContain("gcloud auth application-default login");
+    });
+
+    test("mintDevToken converts invalid_grant into CredentialsExpiredError", async () => {
+      const failingImpersonated = {
+        credentials: {},
+        getAccessToken: async () => {
+          throw new Error("invalid_grant: Token has been expired or revoked.");
+        },
+      } as unknown as AuthClient;
+
+      const { mintDevToken } = createAuthModule(TEST_CONFIG, {
+        sourceClient: mockClient("source"),
+        impersonatedClient: failingImpersonated,
+      });
+
+      await expect(mintDevToken()).rejects.toBeInstanceOf(CredentialsExpiredError);
+    });
+
+    test("getIdentityEmail converts invalid_grant into CredentialsExpiredError", async () => {
+      const failingClient = {
+        credentials: {},
+        getAccessToken: async () => {
+          throw new Error("invalid_grant: invalid_rapt");
+        },
+      } as unknown as AuthClient;
+
+      const { getIdentityEmail } = createAuthModule(TEST_CONFIG, {
+        sourceClient: failingClient,
+        impersonatedClient: mockClient("dev"),
+        fetchFn: mockFetch("user@example.com"),
+      });
+
+      await expect(getIdentityEmail()).rejects.toBeInstanceOf(CredentialsExpiredError);
+    });
+
+    test("non-reauth errors are passed through unchanged", async () => {
+      const failingClient = {
+        credentials: {},
+        getAccessToken: async () => {
+          throw new Error("network unreachable");
+        },
+      } as unknown as AuthClient;
+
+      const { mintProdToken } = createAuthModule(TEST_CONFIG, {
+        sourceClient: failingClient,
+        impersonatedClient: mockClient("dev"),
+      });
+
+      const err = await mintProdToken().catch((e: unknown) => e);
+      expect(err).not.toBeInstanceOf(CredentialsExpiredError);
+      expect((err as Error).message).toBe("network unreachable");
+    });
+
+    test("getSourceAccessToken normalises reauth errors and returns the token on success", async () => {
+      // First call fails with reauth, second succeeds — the resilient
+      // self-heal path the PAM module relies on after the engineer
+      // re-runs `gcloud auth application-default login`.
+      let calls = 0;
+      const client = {
+        credentials: {},
+        getAccessToken: async () => {
+          calls++;
+          if (calls === 1) {
+            throw new Error("invalid_grant: rapt_required");
+          }
+          return { token: "fresh-adc", res: null };
+        },
+      } as unknown as AuthClient;
+
+      const { getSourceAccessToken } = createAuthModule(TEST_CONFIG, {
+        sourceClient: client,
+        impersonatedClient: mockClient("dev"),
+      });
+
+      await expect(getSourceAccessToken()).rejects.toBeInstanceOf(CredentialsExpiredError);
+      const token = await getSourceAccessToken();
+      expect(token).toBe("fresh-adc");
+    });
+
+    test("mintDevToken cache is invalidated after a credentials_expired error", async () => {
+      // After a reauth failure, the dev-token cache holds a token minted with
+      // a now-dead refresh token. The next call (after the engineer
+      // re-authenticates) must get a freshly minted token, not the stale one.
+      let succeed = false;
+      const sourceClient = {
+        credentials: { expiry_date: Date.now() + 3600_000 },
+        getAccessToken: async () => ({ token: "source", res: null }),
+      } as unknown as AuthClient;
+
+      const impersonatedClient = {
+        credentials: { expiry_date: Date.now() + 3600_000 },
+        getAccessToken: async () => {
+          if (!succeed) {
+            throw new Error("invalid_grant: rapt_required");
+          }
+          return { token: "fresh-dev-token", res: null };
+        },
+      } as unknown as AuthClient;
+
+      const { mintDevToken } = createAuthModule(TEST_CONFIG, {
+        sourceClient,
+        impersonatedClient,
+      });
+
+      await expect(mintDevToken()).rejects.toBeInstanceOf(CredentialsExpiredError);
+
+      // Simulate the user re-authenticating; subsequent calls succeed.
+      succeed = true;
+      const result = await mintDevToken();
+      expect(result.access_token).toBe("fresh-dev-token");
     });
   });
 });

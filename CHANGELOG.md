@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- New `credentials_expired` error code on JSON error responses from gate
+  endpoints that touch ADC (`/token`, `/token?session=...`, `POST
+/session`, `/identity`, `/project-number`). Clients can detect the
+  condition programmatically; the human-readable `error` field contains
+  the full recovery instruction including the exact `gcloud auth
+application-default login` command to run on the gate host.
+
+### Changed
+
+- gcloud reauth / `invalid_grant` errors raised by `google-auth-library`
+  are now caught in one place and surface to the engineer with a clear,
+  action-oriented message instead of a raw `invalid_grant: ...` string.
+  Affects gate startup, `with-prod` startup, `with-prod` mid-session
+  token refresh, and any other ADC-backed call. The `with-prod` token
+  provider also logs the message to its parent stderr so the
+  instruction is visible even when the wrapped command (gcloud,
+  terraform, …) reports a generic metadata-server error.
+- After an `invalid_grant` failure, the gate clears its cached source
+  and impersonated clients so the next request re-reads
+  `application_default_credentials.json`. Engineers no longer need to
+  restart the gate after running `gcloud auth application-default login`
+  — the next request picks up the refreshed credentials automatically.
+  This makes gcp-authcalator integrate cleanly with shorter org-level
+  reauth windows.
+
 ## [0.8.2] - 2026-04-28
 
 ### Fixed

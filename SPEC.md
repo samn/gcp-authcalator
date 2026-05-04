@@ -174,6 +174,13 @@ Both token endpoints accept an optional `scopes` query parameter (comma-separate
 
 **Rate limiting:** Single-flight lock (one dialog at a time), 1-second cooldown after denial, maximum 10 attempts per minute. This prevents automated brute-forcing of the confirmation flow.
 
+**Error responses** are JSON `{ "error": "...", "code"?: "..." }`. The optional `code` field is reserved for conditions clients want to handle programmatically. Currently defined codes:
+
+| Code                                       | HTTP | Meaning                                                                                                                                                                                                                                                                                                                                                  |
+| ------------------------------------------ | ---- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `credentials_expired`                      | 500  | The gate's gcloud Application Default Credentials need re-authentication. The `error` field contains the action-oriented recovery instruction (run `gcloud auth application-default login` on the gate host). The gate clears its cached source client on this error so the next request after re-authentication succeeds without restarting the daemon. |
+| `session_not_permitted_on_operator_socket` | 403  | Sessions are disabled on the operator socket. `with-prod` falls back to per-request token mode automatically.                                                                                                                                                                                                                                            |
+
 **Socket security:** The Unix socket is created with `0600` permissions in a `0700` directory (`$XDG_RUNTIME_DIR` or `~/.gcp-authcalator/`). Stale sockets are cleaned up only after verifying ownership, refusing to follow symlinks, and checking that no other instance is running.
 
 **Lifecycle:** Started by the devcontainer initialize script (runs on host before container build). Stopped when container is destroyed. Could later be a systemd/launchd user service for persistence.

@@ -1,4 +1,5 @@
 import { type GateConnection, connectionFetchOpts } from "../gate/connection.ts";
+import { CREDENTIALS_EXPIRED_CODE, CredentialsExpiredError } from "../gate/credentials-error.ts";
 
 /** Raised when the gate signals that sessions are disabled on this socket. */
 export class SessionNotPermittedError extends Error {
@@ -6,6 +7,25 @@ export class SessionNotPermittedError extends Error {
     super(message);
     this.name = "SessionNotPermittedError";
   }
+}
+
+/**
+ * Inspect an error response body and, if the gate flagged it as
+ * `credentials_expired`, throw the typed client-side error so callers
+ * can give the engineer the gate's already-formatted recovery
+ * instructions. Returns the parsed body otherwise.
+ */
+export function maybeThrowCredentialsExpired(text: string): { code?: string; error?: string } {
+  let body: { code?: string; error?: string } | undefined;
+  try {
+    body = JSON.parse(text) as { code?: string; error?: string };
+  } catch {
+    return {};
+  }
+  if (body && body.code === CREDENTIALS_EXPIRED_CODE) {
+    throw new CredentialsExpiredError(body.error ?? "gate reported expired gcloud credentials");
+  }
+  return body ?? {};
 }
 
 export interface FetchProdTokenOptions {
@@ -66,6 +86,9 @@ export async function fetchProdAccessToken(
 
   if (!tokenRes.ok) {
     const text = await tokenRes.text();
+    // Throws if the gate signalled credentials_expired so the caller
+    // surfaces the gcloud reauth instruction instead of a generic 5xx.
+    maybeThrowCredentialsExpired(text);
     throw new Error(`gcp-gate returned ${tokenRes.status}: ${text}`);
   }
 
@@ -98,6 +121,7 @@ export async function fetchProdToken(
   const identityRes = await fetchFn(`${baseUrl}/identity`, extraOpts);
   if (!identityRes.ok) {
     const text = await identityRes.text();
+    maybeThrowCredentialsExpired(text);
     throw new Error(`gcp-gate /identity returned ${identityRes.status}: ${text}`);
   }
   const identityBody = (await identityRes.json()) as { email?: string };
@@ -178,6 +202,9 @@ export async function createProdSession(
         // body wasn't JSON — fall through to generic error
       }
     }
+    // Surface the gate's reauth instruction to the user verbatim when
+    // the gate flagged the failure as credentials_expired.
+    maybeThrowCredentialsExpired(text);
     throw new Error(`gcp-gate returned ${res.status}: ${text}`);
   }
 

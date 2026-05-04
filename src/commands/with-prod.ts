@@ -10,6 +10,7 @@ import {
   SessionNotPermittedError,
   type FetchProdTokenOptions,
 } from "../with-prod/fetch-prod-token.ts";
+import { CredentialsExpiredError } from "../gate/credentials-error.ts";
 import { createSessionTokenProvider } from "../with-prod/session-token-provider.ts";
 import { createPerRequestTokenProvider } from "../with-prod/per-request-token-provider.ts";
 import type { TokenProvider } from "../metadata-proxy/types.ts";
@@ -218,9 +219,15 @@ export async function runWithProd(
       }
     }
   } catch (err) {
-    console.error(
-      `with-prod: failed to acquire prod token: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    // CredentialsExpiredError already carries the full reauth instruction;
+    // forwarding the message verbatim keeps the actionable text intact.
+    if (err instanceof CredentialsExpiredError) {
+      console.error(`with-prod: ${err.message}`);
+    } else {
+      console.error(
+        `with-prod: failed to acquire prod token: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     process.exit(1);
   }
   console.log(`with-prod: prod access acquired for ${initialEmail}`);
