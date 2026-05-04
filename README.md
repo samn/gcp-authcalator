@@ -102,6 +102,46 @@ Before using gcp-authcalator, set up GCP IAM:
 
 The host-side `gate` daemon uses ADC to impersonate the service account via [`generateAccessToken`](https://cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/generateAccessToken), producing short-lived tokens (1-hour TTL).
 
+### gcloud reauthentication
+
+gcp-authcalator integrates with org-level [Google session length
+controls](https://support.google.com/a/answer/9368756) and gcloud's
+`gcloud auth application-default login` flow. When the engineer's ADC
+refresh token expires (the org's session length elapses, the refresh
+token is revoked, or RAPT/2SV reauth is required), the gate detects the
+`invalid_grant` / reauth response from `google-auth-library` and surfaces
+a single clear instruction to the engineer:
+
+> gcloud Application Default Credentials need re-authentication on host
+> "\<gate-hostname\>" (where the gcp-authcalator gate daemon is running):
+> \<detail\>. Run `gcloud auth application-default login` on that host —
+> typically your local laptop, NOT the devcontainer or remote SSH host
+> where this command is running. The gate picks up refreshed credentials
+> automatically; no restart needed.
+
+The gate's hostname (from `os.hostname()` on the gate process) is named
+explicitly so engineers in remote dev environments — devcontainers, SSH
+sessions, Codespaces, Coder — know which physical machine to switch to.
+The hostname matches the laptop where you originally ran `gcloud auth
+application-default login` to set up ADC.
+
+This message appears:
+
+- On `with-prod` startup (the CLI prints it to stderr and exits 1).
+- On mid-session token refresh (the with-prod parent process logs it to
+  stderr; the wrapped command may also see the gate's response forwarded
+  through the metadata proxy).
+- In the gate's JSON error responses with `code: "credentials_expired"`,
+  for any client that wants to handle the condition programmatically.
+
+After running `gcloud auth application-default login`, the next request
+to the gate succeeds — the cached source client is reset on the failed
+request so the daemon re-reads
+`~/.config/gcloud/application_default_credentials.json` automatically.
+This means tightening your org's reauth window does not require any
+operational changes to gcp-authcalator: shorter sessions just produce
+more frequent reauth prompts, each with the same one-step recovery.
+
 ## Installation
 
 ### From releases

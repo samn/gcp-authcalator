@@ -119,14 +119,9 @@ export async function startGateServer(
   if (config.pam_policy) {
     const pamLocation = config.pam_location ?? "global";
 
-    pam = createPamModule(
-      async () => {
-        const { token } = await (await auth.getSourceClient()).getAccessToken();
-        if (!token) throw new Error("Failed to get ADC token for PAM API");
-        return token;
-      },
-      { grantDurationSeconds: defaultTokenTtlSeconds },
-    );
+    pam = createPamModule(auth.getSourceAccessToken, {
+      grantDurationSeconds: defaultTokenTtlSeconds,
+    });
 
     pamDefaultPolicy = resolveEntitlementPath(config.pam_policy, config.project_id, pamLocation);
 

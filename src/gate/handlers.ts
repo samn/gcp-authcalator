@@ -1,12 +1,15 @@
-import type {
-  GateDeps,
-  TokenResponse,
-  SessionResponse,
-  ProjectNumberResponse,
-  UniverseDomainResponse,
-  AuditEntry,
-  RequestContext,
+import {
+  SESSION_NOT_PERMITTED_CODE,
+  type GateDeps,
+  type TokenResponse,
+  type SessionResponse,
+  type ProjectNumberResponse,
+  type UniverseDomainResponse,
+  type AuditEntry,
+  type ErrorResponse,
+  type RequestContext,
 } from "./types.ts";
+import { CredentialsExpiredError } from "./credentials-error.ts";
 import { parseCommandHeader, summarizeCommand } from "./summarize-command.ts";
 
 const JSON_HEADERS = { "Content-Type": "application/json" };
@@ -16,6 +19,20 @@ const DEFAULT_CTX: RequestContext = { trusted: false, socket: "main" };
 
 export function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
+}
+
+/**
+ * Build the JSON error body for an exception thrown by an ADC-backed
+ * operation. `CredentialsExpiredError` carries an actionable message and
+ * a `code` field so clients can recognise the condition and surface a
+ * tailored error to the engineer; other errors fall through unchanged.
+ */
+function errorBodyFromException(err: unknown): ErrorResponse {
+  if (err instanceof CredentialsExpiredError) {
+    return { error: err.message, code: err.code };
+  }
+  const message = err instanceof Error ? err.message : "Unknown error";
+  return { error: message };
 }
 
 /**
@@ -129,7 +146,7 @@ async function handleSessionTokenRefresh(
     return jsonResponse(
       {
         error: "Session refresh not permitted on operator socket",
-        code: "session_not_permitted_on_operator_socket",
+        code: SESSION_NOT_PERMITTED_CODE,
       },
       403,
     );
@@ -189,17 +206,17 @@ async function handleSessionTokenRefresh(
 
     return jsonResponse(body);
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
+    const errorBody = errorBodyFromException(err);
 
     deps.writeAuditLog({
       ...auditBase,
       timestamp: new Date().toISOString(),
       result: "error",
       email: session.email,
-      error: message,
+      error: errorBody.error,
     });
 
-    return jsonResponse({ error: message }, 500);
+    return jsonResponse(errorBody, 500);
   }
 }
 
@@ -234,16 +251,16 @@ async function handleDevToken(
 
     return jsonResponse(body);
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
+    const errorBody = errorBodyFromException(err);
 
     deps.writeAuditLog({
       ...auditBase,
       timestamp: new Date().toISOString(),
       result: "error",
-      error: message,
+      error: errorBody.error,
     });
 
-    return jsonResponse({ error: message }, 500);
+    return jsonResponse(errorBody, 500);
   }
 }
 
@@ -408,16 +425,16 @@ async function acquireProdAccess(
   } catch (err) {
     deps.prodRateLimiter.release("error");
 
-    const message = err instanceof Error ? err.message : "Unknown error";
+    const errorBody = errorBodyFromException(err);
 
     deps.writeAuditLog({
       ...auditBase,
       timestamp: new Date().toISOString(),
       result: "error",
-      error: message,
+      error: errorBody.error,
     });
 
-    return jsonResponse({ error: message }, 500);
+    return jsonResponse(errorBody, 500);
   }
 }
 
@@ -460,17 +477,17 @@ async function handleProdToken(
   } catch (err) {
     deps.prodRateLimiter.release("error");
 
-    const message = err instanceof Error ? err.message : "Unknown error";
+    const errorBody = errorBodyFromException(err);
 
     deps.writeAuditLog({
       ...grant.auditBase,
       timestamp: new Date().toISOString(),
       result: "error",
       email: grant.email,
-      error: message,
+      error: errorBody.error,
     });
 
-    return jsonResponse({ error: message }, 500);
+    return jsonResponse(errorBody, 500);
   }
 }
 
@@ -520,7 +537,7 @@ async function handleCreateSession(
     return jsonResponse(
       {
         error: "Session creation not permitted on operator socket",
-        code: "session_not_permitted_on_operator_socket",
+        code: SESSION_NOT_PERMITTED_CODE,
       },
       403,
     );
@@ -589,17 +606,17 @@ async function handleCreateSession(
   } catch (err) {
     deps.prodRateLimiter.release("error");
 
-    const message = err instanceof Error ? err.message : "Unknown error";
+    const errorBody = errorBodyFromException(err);
 
     deps.writeAuditLog({
       ...grant.auditBase,
       timestamp: new Date().toISOString(),
       result: "error",
       email: grant.email,
-      error: message,
+      error: errorBody.error,
     });
 
-    return jsonResponse({ error: message }, 500);
+    return jsonResponse(errorBody, 500);
   }
 }
 
@@ -660,8 +677,7 @@ async function handleProjectNumber(deps: GateDeps): Promise<Response> {
     const body: ProjectNumberResponse = { project_number: projectNumber };
     return jsonResponse(body);
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    return jsonResponse({ error: message }, 500);
+    return jsonResponse(errorBodyFromException(err), 500);
   }
 }
 
@@ -671,8 +687,7 @@ async function handleUniverseDomain(deps: GateDeps): Promise<Response> {
     const body: UniverseDomainResponse = { universe_domain: universeDomain };
     return jsonResponse(body);
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    return jsonResponse({ error: message }, 500);
+    return jsonResponse(errorBodyFromException(err), 500);
   }
 }
 
@@ -681,8 +696,7 @@ async function handleIdentity(deps: GateDeps): Promise<Response> {
     const email = await deps.getIdentityEmail();
     return jsonResponse({ email });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    return jsonResponse({ error: message }, 500);
+    return jsonResponse(errorBodyFromException(err), 500);
   }
 }
 

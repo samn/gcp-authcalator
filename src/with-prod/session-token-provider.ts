@@ -1,6 +1,8 @@
 import { type GateConnection, connectionFetchOpts } from "../gate/connection.ts";
+import { CredentialsExpiredError } from "../gate/credentials-error.ts";
 import type { CachedToken, TokenProvider } from "../metadata-proxy/types.ts";
 import { createCachingTokenProvider } from "./caching-token-provider.ts";
+import { throwTypedGateError } from "./fetch-prod-token.ts";
 
 export interface SessionTokenProviderOptions {
   /** Override fetch for testing. */
@@ -40,6 +42,17 @@ export function createSessionTokenProvider(
     }
     if (!res.ok) {
       const text = await res.text();
+      try {
+        throwTypedGateError(text);
+      } catch (err) {
+        // Echo the gate's reauth instruction to with-prod's stderr so the
+        // user sees it even when the wrapped command swallows the
+        // metadata-proxy 5xx.
+        if (err instanceof CredentialsExpiredError) {
+          console.error(`with-prod: ${err.message}`);
+        }
+        throw err;
+      }
       throw new Error(`gcp-gate returned ${res.status}: ${text}`);
     }
 

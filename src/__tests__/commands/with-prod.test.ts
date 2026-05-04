@@ -576,6 +576,51 @@ describe("runWithProd", () => {
     expect(errorOutput).toContain("failed to acquire prod token");
   });
 
+  test("startup: prints actionable reauth message when gate returns credentials_expired", async () => {
+    // gate has lost its ADC (e.g. operator hasn't run `gcloud auth
+    // application-default login` since the org's reauth window
+    // elapsed). The CLI must surface the full recovery instruction
+    // verbatim — no `failed to acquire prod token:` prefix that would
+    // bury the actionable text.
+    const formattedMessage =
+      'gcloud Application Default Credentials need re-authentication on host "laptop.local" ' +
+      "(where the gcp-authcalator gate daemon is running): invalid_grant: rapt_required. " +
+      "Run `gcloud auth application-default login` on that host — typically your local " +
+      "laptop, NOT the devcontainer or remote SSH host where this command is running. " +
+      "The gate picks up refreshed credentials automatically; no restart needed.";
+
+    const mockFetchFn = (async () =>
+      new Response(JSON.stringify({ error: formattedMessage, code: "credentials_expired" }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      })) as unknown as typeof globalThis.fetch;
+
+    await expect(
+      runWithProd(
+        {
+          project_id: "my-proj",
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
+        },
+        ["echo", "hello"],
+        {
+          fetchOptions: { fetchFn: mockFetchFn },
+        },
+      ),
+    ).rejects.toThrow("process.exit called");
+
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
+    expect(errorOutput).toContain("gcloud auth application-default login");
+    // The full formatted instruction is emitted verbatim, prefixed with
+    // `with-prod:`. We deliberately do NOT include the generic
+    // `failed to acquire prod token` wording on this path — it would
+    // bury the actionable instruction.
+    expect(errorOutput).toContain("with-prod:");
+    expect(errorOutput).not.toContain("failed to acquire prod token");
+  });
+
   test("propagates non-zero exit code from child process", async () => {
     const mockFetchFn = mockGateFetch();
 

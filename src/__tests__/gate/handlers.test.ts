@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { handleRequest } from "../../gate/handlers.ts";
+import { CredentialsExpiredError } from "../../gate/credentials-error.ts";
 import type { AuditEntry, CachedToken } from "../../gate/types.ts";
 import type { ProdRateLimiter } from "../../gate/rate-limit.ts";
 import { createSessionManager } from "../../gate/session.ts";
@@ -1594,5 +1595,99 @@ describe("X-Pending-Id header", () => {
     await handleRequest(makeRequest("/session", "POST", headers), deps);
 
     expect(capturedPendingId).toBe("b".repeat(32));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// credentials_expired propagation
+// ---------------------------------------------------------------------------
+
+describe("credentials_expired error code", () => {
+  test("/token (dev) emits code on CredentialsExpiredError", async () => {
+    const deps = makeDeps({
+      mintDevToken: async () => {
+        throw new CredentialsExpiredError("formatted-credentials-expired-message");
+      },
+    });
+
+    const res = await handleRequest(makeRequest("/token"), deps);
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.code).toBe("credentials_expired");
+    expect(body.error).toBe("formatted-credentials-expired-message");
+  });
+
+  test("/token (prod) emits code on CredentialsExpiredError", async () => {
+    const deps = makeDeps({
+      mintProdToken: async () => {
+        throw new CredentialsExpiredError("formatted-credentials-expired-message");
+      },
+    });
+
+    const res = await handleRequest(makeRequest("/token?level=prod"), deps);
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.code).toBe("credentials_expired");
+  });
+
+  test("session refresh emits code on CredentialsExpiredError", async () => {
+    const sessionManager = createSessionManager();
+    const session = sessionManager.create({
+      email: "eng@example.com",
+      ttlSeconds: 3600,
+      sessionLifetimeSeconds: 28800,
+    });
+
+    const deps = makeDeps({
+      sessionManager,
+      mintProdToken: async () => {
+        throw new CredentialsExpiredError("formatted-credentials-expired-message");
+      },
+    });
+
+    const res = await handleRequest(makeRequest(`/token?session=${session.id}`), deps);
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.code).toBe("credentials_expired");
+  });
+
+  test("POST /session emits code on CredentialsExpiredError", async () => {
+    const deps = makeDeps({
+      mintProdToken: async () => {
+        throw new CredentialsExpiredError("formatted-credentials-expired-message");
+      },
+    });
+
+    const res = await handleRequest(makeRequest("/session", "POST"), deps);
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.code).toBe("credentials_expired");
+  });
+
+  test("/identity emits code on CredentialsExpiredError", async () => {
+    const deps = makeDeps({
+      getIdentityEmail: async () => {
+        throw new CredentialsExpiredError("formatted-credentials-expired-message");
+      },
+    });
+
+    const res = await handleRequest(makeRequest("/identity"), deps);
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.code).toBe("credentials_expired");
+  });
+
+  test("non-credentials errors omit the code field", async () => {
+    const deps = makeDeps({
+      mintDevToken: async () => {
+        throw new Error("network unreachable");
+      },
+    });
+
+    const res = await handleRequest(makeRequest("/token"), deps);
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.code).toBeUndefined();
+    expect(body.error).toBe("network unreachable");
   });
 });

@@ -1,5 +1,6 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, spyOn } from "bun:test";
 import { createSessionTokenProvider } from "../../with-prod/session-token-provider.ts";
+import { CredentialsExpiredError } from "../../gate/credentials-error.ts";
 import type { GateConnection } from "../../gate/connection.ts";
 import type { CachedToken } from "../../gate/types.ts";
 
@@ -278,5 +279,46 @@ describe("createSessionTokenProvider", () => {
     const token = await provider.getToken();
     expect(token.access_token).toBe("refreshed");
     expect(callCount()).toBe(1);
+  });
+
+  test("throws CredentialsExpiredError when gate returns code: credentials_expired", async () => {
+    const expired: CachedToken = {
+      access_token: "old",
+      expires_at: new Date(Date.now() - 1000),
+    };
+
+    // The gate's already-formatted recovery message comes back in the body —
+    // the client must forward it verbatim (no re-prefixing) so the engineer
+    // sees a single, complete instruction.
+    const formattedMessage =
+      'gcloud Application Default Credentials need re-authentication on host "laptop.local" ' +
+      "(where the gcp-authcalator gate daemon is running): invalid_grant. " +
+      "Run `gcloud auth application-default login` on that host — typically your local " +
+      "laptop, NOT the devcontainer or remote SSH host where this command is running.";
+
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { fetchFn } = mockFetch([
+        {
+          status: 500,
+          body: { error: formattedMessage, code: "credentials_expired" },
+        },
+      ]);
+      const provider = createSessionTokenProvider(unixConn, "session-id", expired, { fetchFn });
+
+      const err = await provider.getToken().catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(CredentialsExpiredError);
+      expect((err as CredentialsExpiredError).code).toBe("credentials_expired");
+      expect((err as Error).message).toBe(formattedMessage);
+
+      // The provider also logs the message to with-prod's stderr so the user
+      // sees it directly even when the wrapped command (gcloud, terraform...)
+      // swallows the metadata-server 5xx.
+      const stderrJoined = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
+      expect(stderrJoined).toContain("with-prod:");
+      expect(stderrJoined).toContain("gcloud auth application-default login");
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 });

@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- New `credentials_expired` error code on JSON error responses from gate
+  endpoints that touch ADC (`/token`, `/token?session=...`, `POST
+/session`, `/identity`, `/project-number`). Clients can detect the
+  condition programmatically; the human-readable `error` field contains
+  the full recovery instruction including the exact `gcloud auth
+application-default login` command to run on the gate host.
+
+### Changed
+
+- gcloud reauth / `invalid_grant` errors raised by `google-auth-library`
+  are now caught in one place and surface to the engineer with a clear,
+  action-oriented message instead of a raw `invalid_grant: ...` string.
+  Affects gate startup, `with-prod` startup, `with-prod` mid-session
+  token refresh, and any other ADC-backed call. The `with-prod` token
+  provider also logs the message to its parent stderr so the
+  instruction is visible even when the wrapped command (gcloud,
+  terraform, …) reports a generic metadata-server error. The message
+  names the gate machine by hostname (from `os.hostname()`) and
+  explicitly contrasts it with the devcontainer or remote SSH host
+  where the command is running, so engineers in remote dev environments
+  know exactly which physical machine to run `gcloud auth
+application-default login` on.
+- After an `invalid_grant` failure, the gate clears its cached source
+  and impersonated clients so the next request re-reads
+  `application_default_credentials.json`. Engineers no longer need to
+  restart the gate after running `gcloud auth application-default login`
+  — the next request picks up the refreshed credentials automatically.
+  This makes gcp-authcalator integrate cleanly with shorter org-level
+  reauth windows.
+
+### Fixed
+
+- `gcloud auth application-default revoke` is now recognised as a
+  credentials-expired condition. The gate's cached ADC client can still
+  hand out a locally-cached access token after a revoke, so the failure
+  surfaces only when Google rejects the token at `tokeninfo` with
+  `400 invalid_token`. The gate now forwards the OAuth `error` field
+  in the thrown message and matches `invalid_token` as a reauth signal,
+  so `with-prod` shows the clear `gcloud auth application-default login`
+  instruction instead of a cryptic `tokeninfo returned 400`.
+- google-auth-library's `Could not load the default credentials` error
+  (raised when `application_default_credentials.json` is missing — the
+  state `gcloud auth application-default revoke` and `... logout` leave
+  the host in) is now also matched as a reauth signal. After cache
+  invalidation triggered by an earlier reauth failure, the next request
+  reaches `GoogleAuth.getClient()` and surfaces this message; without
+  the matcher it leaked through as a cryptic 500.
+
 ## [0.8.2] - 2026-04-28
 
 ### Fixed
