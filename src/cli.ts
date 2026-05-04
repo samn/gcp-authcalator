@@ -72,9 +72,9 @@ Options:
   --token-ttl-seconds <secs>  Token lifetime in seconds (default: 3600)
   --session-ttl-seconds <secs>  Prod session lifetime in seconds (default: 28800 / 8h)
   --operator-socket-path <path>      Operator socket path (auto-approve eligible — see docs)
-  --operator-socket-group <name>     Unix group whose members can connect to the operator socket
+  --operator-socket-group <name>     Optional: multi-operator mode. Sets mode 0660 with this group; without it, mode 0600 owned by gate UID
   --auto-approve-pam-policies <ids>  PAM entitlements that auto-approve on the operator socket (comma-separated; subset of --pam-allowed-policies)
-  --agent-uid <uid|name>             Agent UID (or username) — required with --operator-socket-path; gate refuses to start if this UID is in the operator group
+  --agent-uid <uid|name>             Agent UID (or username) — required with --operator-socket-path; gate refuses to start if this UID equals the gate UID (or, in group mode, is in the operator group)
   -e, --env <KEY=VALUE>    Extra env var for with-prod subprocess (repeatable, supports \${VAR} substitution)
   -c, --config <path>      Path to TOML config file
   -h, --help               Show this help message
@@ -82,10 +82,16 @@ Options:
 
 Operator socket (gate only):
   Reduces confirmation fatigue by auto-approving allowlisted prod requests
-  on a separate Unix socket only the operator UID can reach. Requires the
-  operator and the agent to run as different UIDs in the same environment;
-  the agent UID MUST NOT be a member of the operator group, or the gate
-  refuses to start.
+  on a separate Unix socket only the operator can reach. Requires the
+  operator and the agent to run as different UIDs in the same environment.
+
+  Single-operator (paved path): omit --operator-socket-group. The socket is
+  mode 0600 owned by the gate UID; only that UID can connect. Use when the
+  operator and gate share a UID (typical local-devcontainer setup).
+
+  Multi-operator: set --operator-socket-group. The socket is mode 0660
+  group-owned; group members can connect. The agent UID MUST NOT be a member
+  of the operator group, or the gate refuses to start.
 
 Examples:
   gcp-authcalator gate --project-id my-project --service-account sa@my-project.iam.gserviceaccount.com

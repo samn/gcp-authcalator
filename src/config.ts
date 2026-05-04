@@ -84,12 +84,16 @@ export const ConfigSchema = z.object({
   session_ttl_seconds: z.coerce.number().int().min(300).max(86400).optional(),
   // ---- Operator socket (auto-approve for human-initiated escalation) ----
   operator_socket_path: z.string().min(1).transform(expandTilde).optional(),
+  // When set, the operator socket is created mode 0660 group-owned by this
+  // group (multi-operator deployments). When unset, the operator socket is
+  // mode 0600 owned by the gate UID (the paved single-operator path —
+  // operator and gate share a UID, agent has a different UID).
   operator_socket_group: z.string().min(1).optional(),
   auto_approve_pam_policies: z.array(z.string().min(1)).optional(),
   // Numeric UID or username. Required when operator_socket_path is set, so the
-  // gate can verify at startup that the agent UID is not a member of the
-  // operator group (which would silently defeat the trust boundary).
-  // Accepts a number (TOML), a numeric string (env var/CLI), or a username.
+  // gate can verify at startup that the agent UID is not the gate UID (and,
+  // in group mode, not a member of the operator group). Accepts a number
+  // (TOML), a numeric string (env var/CLI), or a username.
   agent_uid: z.union([z.number().int().nonnegative(), z.string().min(1)]).optional(),
   env: z.record(z.string(), z.string()).optional(),
 });
@@ -102,9 +106,12 @@ export type Config = z.infer<typeof ConfigSchema>;
  * - pam_policy alone: prod tokens only (dev tokens disabled)
  * - both: dev tokens via impersonation, prod tokens with PAM escalation
  *
- * If operator_socket_path is set, both operator_socket_group and agent_uid
- * MUST also be set: the group is the trust boundary and agent_uid lets the
- * gate verify the agent is not a member of it. Every entry in
+ * If operator_socket_path is set, agent_uid MUST also be set so the gate can
+ * verify at startup that the agent UID is not the gate UID (and, in group
+ * mode, not a member of the operator group). operator_socket_group is
+ * optional: when set, the operator socket is created mode 0660 group-owned
+ * by it (multi-operator setup); when unset, the socket is mode 0600 owned by
+ * the gate UID (single-operator paved path). Every entry in
  * auto_approve_pam_policies must also be in pam_allowed_policies (or equal
  * pam_policy) — prevents a narrowing of the broader allowlist from leaving
  * a stale auto-approve entry.
@@ -114,10 +121,6 @@ export const GateConfigSchema = ConfigSchema.required({
 })
   .refine((c) => c.service_account || c.pam_policy, {
     message: "gate requires at least one of service_account or pam_policy",
-  })
-  .refine((c) => !c.operator_socket_path || c.operator_socket_group, {
-    message: "operator_socket_group is required when operator_socket_path is set",
-    path: ["operator_socket_group"],
   })
   .refine((c) => !c.operator_socket_path || c.agent_uid !== undefined, {
     message: "agent_uid is required when operator_socket_path is set",

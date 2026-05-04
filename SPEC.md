@@ -113,13 +113,24 @@ WIF is a natural "Phase 2" enhancement if stronger audit trails or attribute con
 
 ### 5. Why an operator socket (instead of per-request peer-credential checks)?
 
-The naive solution to "auto-approve only when the human initiates" is `SO_PEERCRED` on a single shared socket. We chose to attach trust to the _socket itself_ via filesystem group permissions. Reasons:
+The naive solution to "auto-approve only when the human initiates" is `SO_PEERCRED` on a single shared socket. We chose to attach trust to the _socket itself_ via filesystem permissions. Reasons:
 
 - **`Bun.serve({ unix })` does not expose connection-level peer credentials.** Implementing per-connection UID extraction would require dropping into raw `Bun.listen()` or `node:http`, doubling the maintenance surface for a feature whose security guarantee is already met by filesystem permissions.
 - **Defense-in-depth is filesystem permissions either way.** Even with `SO_PEERCRED`, you'd still want the agent UID _unable to connect_ to the privileged path — otherwise it can probe the socket, burn rate-limit quota, or trigger confirmation-dialog spam to fatigue the operator. With perms-as-trust-boundary, this is automatic.
-- **A single socket would also need to be `0666` or group-readable** so multiple UIDs can connect, opening the surface. Two separate sockets with `0600`/`0660` keep the agent UID `EACCES`-fenced from the operator path.
+- **A single socket would also need to be `0666` or group-readable** so multiple UIDs can connect, opening the surface. A separate operator socket keeps the agent UID `EACCES`-fenced from the operator path.
 - **Sessions are explicitly disabled on the operator socket** to remove the 8-hour bearer-token attack surface. With auto-approve firing per request, the only stealable artifact is the per-request access token, which already has the same lifetime as any other GCP token. The operator's `with-prod` falls back to per-request token mode automatically — vanilla GCP SDKs in the container never used sessions in the first place.
 - **Out-of-allowlist requests on the operator socket return 403, not a confirmation prompt.** Falling through to a prompt encourages the operator to dismiss prompts reflexively, which is the failure mode this whole feature is trying to avoid. A request for a non-allowlisted policy belongs on the main socket.
+
+**Two access modes** for the operator socket, selected by config:
+
+| Mode                                    | Socket mode | Owner            | Trust boundary                                 | When to use                                                         |
+| --------------------------------------- | ----------- | ---------------- | ---------------------------------------------- | ------------------------------------------------------------------- |
+| **UID** (paved path; group unset)       | `0600`      | `gate_uid`       | Only `gate_uid` can connect (kernel-enforced)  | Single-operator deployments where the operator and gate share a UID |
+| **Group** (`operator_socket_group` set) | `0660`      | `gate_uid:opgid` | Members of `operator_socket_group` can connect | Multi-operator deployments (shared workstation)                     |
+
+UID mode is the paved default. It aligns with how local devcontainers are typically set up — UIDs match across host and container so bind-mounted source files have correct ownership — and it removes the need to create and manage a dedicated Unix group.
+
+Group mode is retained for deployments where multiple humans share one gate. In group mode, the gate additionally refuses to start if the agent UID is a member of the operator group (a guardrail beyond what the kernel enforces).
 
 The shared rate limiter is intentional: a flooding agent surfaces as a real rate-limit signal to the operator. A separate limiter on the operator socket would double the worst-case denial budget for marginal benefit. The operator can be starved by an agent flood, but the agent already has access to that bucket via the main socket — the attacker UID gains nothing new by spamming.
 

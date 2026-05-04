@@ -53,15 +53,24 @@ service_account = "dev-runner@my-gcp-project.iam.gserviceaccount.com"
 # Adds a third Unix socket alongside the main + admin sockets. Prod requests
 # arriving on this socket auto-approve (no confirmation dialog) when their
 # resolved PAM policy is in auto_approve_pam_policies. Trust is a property of
-# the socket: filesystem group permissions decide who can connect.
+# the socket: filesystem permissions decide who can connect.
 #
 # DEPLOYMENT MODEL: human operator and coding agent run as different UIDs in
-# the same environment. The operator UID is in operator_socket_group; the
-# agent UID is NOT.
+# the same environment.
+#
+# Two access modes:
+#   * UID mode (paved path, operator_socket_group unset): socket is mode 0600
+#     owned by the gate UID. Use when the operator and gate share a UID
+#     (typical local-devcontainer setup with matched UIDs for bind mounts).
+#   * Group mode (operator_socket_group set): socket is mode 0660 group-
+#     owned by that group. Use when multiple humans share one gate.
 #
 # SECURITY:
-#   - The agent UID MUST NOT be a member of operator_socket_group, or the
-#     gate refuses to start (verified at startup against /etc/group).
+#   - The agent UID must run as a different UID than the gate. The gate
+#     refuses to start if agent_uid equals the gate UID.
+#   - In group mode, the agent UID MUST NOT be a member of
+#     operator_socket_group, or the gate refuses to start (verified at
+#     startup against /etc/group).
 #   - Sessions (POST /session, GET /token?session=…) return 403 on this
 #     socket — there is no 8-hour bearer credential to steal.
 #   - auto_approve_pam_policies must be a subset of pam_allowed_policies
@@ -72,12 +81,16 @@ service_account = "dev-runner@my-gcp-project.iam.gserviceaccount.com"
 #   - This is Unix-socket-only. Remote (TCP+mTLS) operators do not get
 #     auto-approve; they take the standard prompt path.
 #
+# Single-operator (paved path):
 # operator_socket_path = "/run/user/1000/gcp-authcalator-operator.sock"
-# operator_socket_group = "gcp-operators"
 # auto_approve_pam_policies = ["prod-readonly"]
 #
+# Multi-operator (advanced — uncomment to switch to group mode):
+# operator_socket_group = "gcp-operators"
+#
 # agent_uid: numeric UID or username. Required when operator_socket_path is
-# set so the gate can verify the agent's group memberships at startup.
+# set so the gate can verify the agent UID is not the gate UID (and, in
+# group mode, not a member of the operator group).
 # agent_uid = 1001
 # agent_uid = "claude"
 
