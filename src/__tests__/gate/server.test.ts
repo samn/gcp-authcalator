@@ -563,3 +563,69 @@ describe("operator socket", () => {
     expect(existsSync(target)).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Operator socket — UID mode (operator_socket_group unset)
+// ---------------------------------------------------------------------------
+//
+// UID mode shares all per-request behavior (session rejection, auto-approve,
+// audit fields) and lifecycle code (cleanStaleSocket, stop()/unlinkIfOurs)
+// with group mode — those paths are covered by the group-mode tests above.
+// The tests here cover what's specific to UID mode: socket/dir permissions
+// and the agent_uid guardrail running independently of group lookup.
+
+const UID_MODE_AUTH_OPTIONS = {
+  sourceClient: mockClient("source-tok"),
+  impersonatedClient: mockClient("dev-tok"),
+  fetchFn: mockFetch("test@example.com"),
+};
+
+function uidModeConfig(tempDir: string, overrides: Partial<GateConfig> = {}): GateConfig {
+  return {
+    ...makeConfig(join(tempDir, "gate.sock"), join(tempDir, "admin.sock")),
+    operator_socket_path: join(tempDir, "operator.sock"),
+    agent_uid: 0,
+    ...overrides,
+  };
+}
+
+describe("operator socket — UID mode (no group)", () => {
+  let result: GateServerResult | null = null;
+
+  afterEach(() => {
+    if (result) {
+      result.stop();
+      result = null;
+    }
+  });
+
+  test("creates 0600 socket owned by gate UID in a 0700 directory", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "gate-op-uid-"));
+    const operatorSocketDir = join(tempDir, "op-dir");
+    const config = uidModeConfig(tempDir, {
+      operator_socket_path: join(operatorSocketDir, "operator.sock"),
+    });
+
+    result = await startGateServer(config, {
+      authOptions: UID_MODE_AUTH_OPTIONS,
+      auditLogDir: join(tempDir, "audit"),
+    });
+
+    const sockStats = statSync(config.operator_socket_path!);
+    expect(sockStats.mode & 0o777).toBe(0o600);
+    expect(sockStats.uid).toBe(process.getuid!());
+    expect(statSync(operatorSocketDir).mode & 0o777).toBe(0o700);
+  });
+
+  test("refuses to start when agent_uid equals gate uid", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "gate-op-uid-"));
+    const config = uidModeConfig(tempDir, { agent_uid: process.getuid!() });
+
+    await expect(
+      startGateServer(config, {
+        authOptions: UID_MODE_AUTH_OPTIONS,
+        auditLogDir: join(tempDir, "audit"),
+      }),
+    ).rejects.toThrow(/equals gate uid/);
+  });
+});

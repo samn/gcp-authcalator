@@ -246,15 +246,16 @@ describe("GateConfigSchema", () => {
     expect(config.socket_path).toBe(getDefaultSocketPath());
   });
 
-  test("rejects operator_socket_path without operator_socket_group", () => {
-    expect(() =>
-      GateConfigSchema.parse({
-        project_id: "my-proj",
-        service_account: "sa@proj.iam.gserviceaccount.com",
-        operator_socket_path: "/tmp/op.sock",
-        agent_uid: 1001,
-      }),
-    ).toThrow(z.ZodError);
+  test("accepts operator_socket_path without operator_socket_group (UID mode)", () => {
+    const config = GateConfigSchema.parse({
+      project_id: "my-proj",
+      service_account: "sa@proj.iam.gserviceaccount.com",
+      operator_socket_path: "/tmp/op.sock",
+      agent_uid: 1001,
+    });
+    expect(config.operator_socket_path).toBe("/tmp/op.sock");
+    expect(config.operator_socket_group).toBeUndefined();
+    expect(config.agent_uid).toBe(1001);
   });
 
   test("rejects operator_socket_path without agent_uid", () => {
@@ -268,7 +269,7 @@ describe("GateConfigSchema", () => {
     ).toThrow(z.ZodError);
   });
 
-  test("accepts complete operator-socket config", () => {
+  test("accepts complete operator-socket config in group mode", () => {
     const config = GateConfigSchema.parse({
       project_id: "my-proj",
       service_account: "sa@proj.iam.gserviceaccount.com",

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Changed
+
+- Operator socket setup simplified for single-operator deployments.
+  `operator_socket_group` is now optional; when omitted, the operator socket
+  is created with mode `0600` owned by the gate UID, removing the need for a
+  dedicated Unix group when the operator and gate share a UID (the typical
+  local-devcontainer setup). Multi-operator deployments continue to use
+  group-based access by setting `operator_socket_group` (mode `0660`). The
+  `agent_uid` config remains required when `operator_socket_path` is set; the
+  startup guardrail still refuses to start when `agent_uid == gate_uid` (and,
+  in group mode, when the agent UID is a member of the operator group).
+
 ### Added
 
 - New `credentials_expired` error code on JSON error responses from gate

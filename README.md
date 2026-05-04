@@ -643,19 +643,21 @@ gcp-authcalator is designed for environments where a coding agent (or other untr
 
 The operator socket is an **opt-in** third Unix socket that auto-approves prod requests whose resolved PAM policy is in an explicit allowlist. It is designed for setups where the operator and the coding agent run as **different Unix UIDs in the same devcontainer**:
 
-- The operator UID is in a dedicated `operator_socket_group`. The agent UID is **not**.
-- Only the operator's view of the filesystem includes a path mounted at `operator_socket_path` (or, equivalently inside a single-userns container, the agent simply lacks group membership). Filesystem mode `0660` gates connect access.
+- Only the operator can connect to the operator socket; the agent runs as a different UID and is excluded by filesystem permissions.
 - The agent continues to use the existing main socket and goes through the standard confirmation flow.
 
 **Why it exists.** Confirmation dialogs every few minutes train operators to dismiss prompts without reading them — a worse failure mode than no prompt at all. Auto-approving an _allowlisted_ set of policies for the human path lets the prompt remain meaningful for everything else.
 
+#### Single-operator (paved path)
+
+The simple setup: the operator and the gate share a UID (typical when the gate runs on the host as your user, and the operator's devcontainer UID matches the host UID for bind-mount compatibility). The operator socket is created mode `0600` owned by that UID — the kernel excludes the agent UID directly, no group setup required.
+
 **Enable it (gate config):**
 
 ```toml
-operator_socket_path  = "/run/user/1000/gcp-authcalator-operator.sock"
-operator_socket_group = "gcp-operators"
+operator_socket_path = "/run/user/1000/gcp-authcalator-operator.sock"
+agent_uid            = "claude"                 # numeric UID or username
 auto_approve_pam_policies = ["prod-readonly"]   # subset of pam_allowed_policies
-agent_uid             = "claude"                # numeric UID or username
 ```
 
 Or via CLI flags / `GCP_AUTHCALATOR_*` env vars of the same names.
@@ -671,14 +673,31 @@ with-prod gcloud projects list   # no prompt; audit log shows auto_approved=true
 
 **Setup requirements (you are responsible for these):**
 
+1. Run the gate as the same UID as the operator (the typical case for a host-side gate). Run the agent (e.g. Claude Code) as a different UID — for example, a separate user account inside the devcontainer.
+2. Set `agent_uid`. The gate's startup misconfiguration check requires it and will refuse to start if the agent UID equals the gate UID.
+3. **Keep `auto_approve_pam_policies` minimal.** Treat additions with the same review rigor as IAM policy changes — anything in this list is granted by _any_ code that runs as the operator UID, including malicious code planted via the operator's tooling (npm postinstall, agent-suggested shell command, tampered Makefile, etc.). The allowlist caps blast radius; it does not eliminate confused-deputy attacks.
+4. Pipe `~/.gcp-authcalator/audit.log` to your SIEM. Auto-approvals are tagged `auto_approved: true, socket: "operator"`. The gate makes no attempt at log-tamper protection; observability is your job.
+5. Do not run the devcontainer with userns-remapping that rewrites file ownership (it can silently break the trust boundary).
+6. Operator socket is **Unix-only**. Remote (TCP+mTLS) operators do not get auto-approve.
+
+#### Multi-operator (advanced)
+
+If multiple humans share one gate (e.g. a shared workstation), set `operator_socket_group` to a dedicated Unix group whose members are the operators. The socket is then created mode `0660` group-owned, and any group member can connect.
+
+```toml
+operator_socket_path  = "/run/user/1000/gcp-authcalator-operator.sock"
+operator_socket_group = "gcp-operators"          # dedicated group; do NOT reuse wheel/staff
+agent_uid             = "claude"
+auto_approve_pam_policies = ["prod-readonly"]
+```
+
+Additional setup requirements for group mode:
+
 1. Create a dedicated Unix group (e.g. `gcp-operators`). Do **not** reuse `wheel`, `staff`, or anyone's primary group.
-2. Add **only** the operator UID to this group. Never the agent UID. Never `root`.
-3. Run the gate as a UID separate from the agent UID. Same UID as the operator is acceptable; same UID as the agent is forbidden (gate refuses to start).
-4. Set `agent_uid`. The gate's startup misconfiguration check requires it and will refuse to start if the agent UID is a member of `operator_socket_group`, equals the gate UID, or if the configured group is missing from `/etc/group`.
-5. **Keep `auto_approve_pam_policies` minimal.** Treat additions with the same review rigor as IAM policy changes — anything in this list is granted by _any_ code that runs as the operator UID, including malicious code planted via the operator's tooling (npm postinstall, agent-suggested shell command, tampered Makefile, etc.). The allowlist caps blast radius; it does not eliminate confused-deputy attacks.
-6. Pipe `~/.gcp-authcalator/audit.log` to your SIEM. Auto-approvals are tagged `auto_approved: true, socket: "operator"`. The gate makes no attempt at log-tamper protection; observability is your job.
-7. Do not run the devcontainer with userns-remapping that rewrites file ownership (it can silently break the group boundary).
-8. Operator socket is **Unix-only**. Remote (TCP+mTLS) operators do not get auto-approve.
+2. Add **only** the operator UIDs to this group. Never the agent UID. Never `root`.
+3. The gate refuses to start if the agent UID is a member of `operator_socket_group` or if the configured group is missing from `/etc/group`.
+
+All other setup requirements from the single-operator section still apply.
 
 **What auto-approve does NOT do:**
 

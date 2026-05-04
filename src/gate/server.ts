@@ -94,6 +94,45 @@ async function cleanStaleSocket(
   unlinkSync(socketPath);
 }
 
+interface OperatorSocketAccess {
+  /** Socket file mode (0o600 in UID mode, 0o660 in group mode). */
+  sockMode: number;
+  /** Containing-directory mode (0o700 in UID mode, 0o750 in group mode). */
+  dirMode: number;
+  /** Group GID for chown; undefined in UID mode (no group ownership). */
+  gid: number | undefined;
+}
+
+/**
+ * Resolve how the operator socket should be created.
+ *
+ * Group mode (operator_socket_group set) additionally enforces that the agent
+ * UID is not a member of the operator group — a guardrail beyond what the
+ * kernel enforces, which the UID-mode path doesn't need.
+ */
+function resolveOperatorSocketAccess(
+  groupName: string | undefined,
+  agentUid: number,
+  unixDb: ReturnType<typeof loadUnixGroupDb>,
+): OperatorSocketAccess {
+  if (!groupName) {
+    return { sockMode: 0o600, dirMode: 0o700, gid: undefined };
+  }
+  const grp = lookupGroup(groupName, unixDb);
+  if (!grp) {
+    throw new Error(
+      `gate: operator socket group '${groupName}' not found in /etc/group — refusing to start`,
+    );
+  }
+  if (getGroupsForUid(agentUid, unixDb).includes(grp.gid)) {
+    throw new Error(
+      `gate: agent uid ${agentUid} is a member of operator group '${grp.name}' (gid ${grp.gid}) — refusing to start. ` +
+        `Remove the agent uid from the group, or unset operator_socket_path.`,
+    );
+  }
+  return { sockMode: 0o660, dirMode: 0o750, gid: grp.gid };
+}
+
 export async function startGateServer(
   config: GateConfig,
   options: StartGateServerOptions = {},
@@ -231,43 +270,28 @@ export async function startGateServer(
 
   chmodSync(config.admin_socket_path, 0o600);
 
-  // --- Operator socket (auto-approve eligible — mounted into operator UID's
-  // view of the container, NOT into the agent UID's view, enforced by
-  // filesystem group permissions) ---
+  // --- Operator socket (auto-approve eligible) ---
   let operatorServer: ReturnType<typeof Bun.serve> | undefined;
   let operatorSocketIno: number | undefined;
   if (config.operator_socket_path) {
-    // Schema refinement guarantees these are set when operator_socket_path is.
-    const groupName = config.operator_socket_group!;
-    const agentUidValue = config.agent_uid!;
+    // Schema refinement guarantees agent_uid is set when operator_socket_path is.
     const gateUid = process.getuid!();
-
-    // Read /etc/group + /etc/passwd once and reuse for all three lookups.
     const unixDb = loadUnixGroupDb();
+    const agentUid = resolveAgentUid(config.agent_uid!, unixDb);
 
-    const grp = lookupGroup(groupName, unixDb);
-    if (!grp) {
-      throw new Error(
-        `gate: operator socket group '${groupName}' not found in /etc/group — refusing to start`,
-      );
-    }
-
-    const agentUid = resolveAgentUid(agentUidValue, unixDb);
     if (agentUid === gateUid) {
       throw new Error(
         `gate: agent_uid (${agentUid}) equals gate uid — operator-socket trust boundary cannot exist`,
       );
     }
-    if (getGroupsForUid(agentUid, unixDb).includes(grp.gid)) {
-      throw new Error(
-        `gate: agent uid ${agentUid} is a member of operator group '${grp.name}' (gid ${grp.gid}) — refusing to start. ` +
-          `Remove the agent uid from the group, or unset operator_socket_path.`,
-      );
-    }
+
+    const access = resolveOperatorSocketAccess(config.operator_socket_group, agentUid, unixDb);
 
     const operatorSocketDir = dirname(config.operator_socket_path);
-    mkdirSync(operatorSocketDir, { recursive: true, mode: 0o750 });
-    chownSync(operatorSocketDir, gateUid, grp.gid);
+    mkdirSync(operatorSocketDir, { recursive: true, mode: access.dirMode });
+    if (access.gid !== undefined) {
+      chownSync(operatorSocketDir, gateUid, access.gid);
+    }
 
     await cleanStaleSocket(config.operator_socket_path, "operator socket");
 
@@ -279,10 +303,11 @@ export async function startGateServer(
       },
     });
 
-    // chown then chmod, in that order: chown clears setgid/setuid bits on
-    // some kernels, so apply mode afterwards.
-    chownSync(config.operator_socket_path, gateUid, grp.gid);
-    chmodSync(config.operator_socket_path, 0o660);
+    // chown before chmod: chown clears setgid/setuid bits on some kernels.
+    if (access.gid !== undefined) {
+      chownSync(config.operator_socket_path, gateUid, access.gid);
+    }
+    chmodSync(config.operator_socket_path, access.sockMode);
     operatorSocketIno = lstatSync(config.operator_socket_path).ino;
   }
 
@@ -362,9 +387,13 @@ export async function startGateServer(
   }
   if (operatorServer) {
     console.log(`  operator socket: ${config.operator_socket_path}`);
-    console.log(
-      `  operator group:  ${config.operator_socket_group} (mode 0660; sessions disabled)`,
-    );
+    if (config.operator_socket_group) {
+      console.log(
+        `  operator group:  ${config.operator_socket_group} (mode 0660; sessions disabled)`,
+      );
+    } else {
+      console.log(`  operator mode:   0600 (gate UID owner; sessions disabled)`);
+    }
     console.log(
       `  auto-approve:    ${autoApprovePamPolicies?.size ?? 0} PAM entitlement(s) (operator socket only)`,
     );
