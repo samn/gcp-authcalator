@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
-### Changed
+## [0.9.0] - 2026-05-04
+
+### Added
 
 - Operator socket setup simplified for single-operator deployments.
   `operator_socket_group` is now optional; when omitted, the operator socket
@@ -18,9 +20,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `agent_uid` config remains required when `operator_socket_path` is set; the
   startup guardrail still refuses to start when `agent_uid == gate_uid` (and,
   in group mode, when the agent UID is a member of the operator group).
-
-### Added
-
 - New `credentials_expired` error code on JSON error responses from gate
   endpoints that touch ADC (`/token`, `/token?session=...`, `POST
 /session`, `/identity`, `/project-number`). Clients can detect the
