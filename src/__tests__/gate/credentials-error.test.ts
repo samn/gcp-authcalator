@@ -24,6 +24,15 @@ describe("isCredentialsExpiredMessage", () => {
     "Token has been expired or revoked.",
     "refresh token has been expired or revoked",
     "refresh token is invalid",
+    // Real OAuth response body from tokeninfo when the access token was
+    // revoked at Google (e.g. via `gcloud auth application-default revoke`).
+    // The gate forwards the body's `error` field in the thrown message so
+    // this matcher converts it into a CredentialsExpiredError.
+    "Failed to get identity: tokeninfo returned 400: invalid_token",
+    "invalid_token",
+    // google-auth-library when ADC discovery fails (credentials file
+    // missing — typically because the user revoked or logged out).
+    "Could not load the default credentials. Browse to https://cloud.google.com/docs/authentication/getting-started for more information.",
   ];
 
   test.each(reauthMessages)("matches %p", (message) => {

@@ -39,6 +39,24 @@ application-default login` on.
   This makes gcp-authcalator integrate cleanly with shorter org-level
   reauth windows.
 
+### Fixed
+
+- `gcloud auth application-default revoke` is now recognised as a
+  credentials-expired condition. The gate's cached ADC client can still
+  hand out a locally-cached access token after a revoke, so the failure
+  surfaces only when Google rejects the token at `tokeninfo` with
+  `400 invalid_token`. The gate now forwards the OAuth `error` field
+  in the thrown message and matches `invalid_token` as a reauth signal,
+  so `with-prod` shows the clear `gcloud auth application-default login`
+  instruction instead of a cryptic `tokeninfo returned 400`.
+- google-auth-library's `Could not load the default credentials` error
+  (raised when `application_default_credentials.json` is missing — the
+  state `gcloud auth application-default revoke` and `... logout` leave
+  the host in) is now also matched as a reauth signal. After cache
+  invalidation triggered by an earlier reauth failure, the next request
+  reaches `GoogleAuth.getClient()` and surfaces this message; without
+  the matcher it leaked through as a cryptic 500.
+
 ## [0.8.2] - 2026-04-28
 
 ### Fixed

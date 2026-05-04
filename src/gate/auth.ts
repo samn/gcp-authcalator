@@ -11,6 +11,34 @@ const CACHE_MARGIN_MS = 5 * 60 * 1000;
 /** Fallback token lifetime when not configured (1 hour). */
 const FALLBACK_LIFETIME = 3600;
 
+/**
+ * Extract the OAuth-style `error` field from a non-OK response and format
+ * it as a suffix to append to the thrown error message. Returns `""` if
+ * the body is missing, malformed, or omits the field, so the caller's
+ * status-code message remains the fallback. Cap at 200 chars to bound the
+ * audit-log / stderr cost when the upstream returns an unexpectedly large
+ * payload.
+ */
+async function readOAuthErrorDetail(resp: Response): Promise<string> {
+  let text: string;
+  try {
+    text = await resp.text();
+  } catch {
+    return "";
+  }
+  if (!text) return "";
+  try {
+    const body = JSON.parse(text) as { error?: unknown };
+    if (typeof body.error === "string" && body.error.length > 0) {
+      const error = body.error.slice(0, 200);
+      return `: ${error}`;
+    }
+  } catch {
+    // Non-JSON body — fall through to the truncated raw text.
+  }
+  return `: ${text.slice(0, 200)}`;
+}
+
 export interface AuthModuleOptions {
   /** Pre-built source client (ADC) — for testing. */
   sourceClient?: AuthClient;
@@ -220,7 +248,13 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
       );
 
       if (!resp.ok) {
-        throw new Error(`Failed to get identity: tokeninfo returned ${resp.status}`);
+        // Surface the OAuth structured error (e.g. `invalid_token`) so
+        // `mapAdcError` can recognise a revoked access token and convert
+        // the failure into `CredentialsExpiredError`. The cached access
+        // token can still look locally valid after `gcloud auth
+        // application-default revoke` — only tokeninfo notices.
+        const detail = await readOAuthErrorDetail(resp);
+        throw new Error(`Failed to get identity: tokeninfo returned ${resp.status}${detail}`);
       }
 
       const data = (await resp.json()) as { email?: string };
@@ -251,7 +285,8 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
       );
 
       if (!resp.ok) {
-        throw new Error(`Failed to get project number: CRM API returned ${resp.status}`);
+        const detail = await readOAuthErrorDetail(resp);
+        throw new Error(`Failed to get project number: CRM API returned ${resp.status}${detail}`);
       }
 
       const data = (await resp.json()) as { name?: string };

@@ -111,6 +111,17 @@ const REAUTH_PATTERNS: readonly RegExp[] = [
   /reauthentication[ _]?(?:is[ _]?)?required/i,
   /token has been expired or revoked/i,
   /refresh token .*(?:revoked|expired|invalid)/i,
+  // tokeninfo (and other OAuth endpoints) emit `{"error": "invalid_token"}`
+  // when the access token has been revoked at Google — this is what the
+  // gate sees after `gcloud auth application-default revoke` invalidates a
+  // still-locally-cached access token.
+  /invalid_token/i,
+  // google-auth-library raises this message when ADC discovery turns up
+  // nothing — typically because `gcloud auth application-default revoke`
+  // (or `... logout`) deleted `application_default_credentials.json`. The
+  // recovery is the same `gcloud auth application-default login` so we
+  // surface it the same way as a reauth signal.
+  /Could not load the default credentials/i,
 ];
 
 /** True iff `message` looks like a reauth/invalid_grant signal. */

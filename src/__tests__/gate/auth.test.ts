@@ -524,6 +524,29 @@ describe("createAuthModule", () => {
       await expect(getIdentityEmail()).rejects.toBeInstanceOf(CredentialsExpiredError);
     });
 
+    test("getIdentityEmail converts tokeninfo invalid_token into CredentialsExpiredError", async () => {
+      // The scenario the user actually hits: `gcloud auth application-default
+      // revoke` cascade-revokes the access token at Google. The gate's cached
+      // ADC client still hands out the locally-cached access token (it has
+      // no way to know it was revoked server-side), so the failure surfaces
+      // when tokeninfo rejects it with `400 invalid_token`.
+      const fetchFn = (async () =>
+        new Response(
+          JSON.stringify({ error: "invalid_token", error_description: "Invalid Value" }),
+          { status: 400, headers: { "Content-Type": "application/json" } },
+        )) as unknown as typeof globalThis.fetch;
+
+      const { getIdentityEmail } = createAuthModule(TEST_CONFIG, {
+        sourceClient: mockClient("revoked-but-locally-cached"),
+        impersonatedClient: mockClient("dev"),
+        fetchFn,
+      });
+
+      const err = await getIdentityEmail().catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(CredentialsExpiredError);
+      expect((err as Error).message).toContain("gcloud auth application-default login");
+    });
+
     test("non-reauth errors are passed through unchanged", async () => {
       const failingClient = {
         credentials: {},
