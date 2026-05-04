@@ -51,9 +51,6 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
 
   // Lazily initialized clients
   let sourceClient: AuthClient | null = options.sourceClient ?? null;
-  // When a source client is injected via options (tests), preserve it across
-  // credentials-expired errors so the test fixture survives the reset path.
-  const sourceClientInjected = options.sourceClient !== undefined;
 
   // Per-scope-and-ttl caches for dev tokens (impersonated)
   const devTokenCaches = new Map<string, CachedToken>();
@@ -75,6 +72,9 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
    * re-reads `application_default_credentials.json` without a daemon
    * restart. Token caches are cleared too — they were minted with a
    * refresh token that is now known to be dead.
+   *
+   * An injected source client (test fixture) is preserved so the reset
+   * path doesn't blow away the mock the test depends on.
    */
   async function withAdcMapping<T>(fn: () => Promise<T>): Promise<T> {
     try {
@@ -82,7 +82,7 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
     } catch (err) {
       const mapped = mapAdcError(err);
       if (mapped instanceof CredentialsExpiredError) {
-        if (!sourceClientInjected) sourceClient = null;
+        if (!options.sourceClient) sourceClient = null;
         impersonatedClients.clear();
         devTokenCaches.clear();
       }

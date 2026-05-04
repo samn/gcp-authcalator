@@ -1,5 +1,6 @@
 import { type GateConnection, connectionFetchOpts } from "../gate/connection.ts";
 import { CREDENTIALS_EXPIRED_CODE, CredentialsExpiredError } from "../gate/credentials-error.ts";
+import { SESSION_NOT_PERMITTED_CODE } from "../gate/types.ts";
 
 /** Raised when the gate signals that sessions are disabled on this socket. */
 export class SessionNotPermittedError extends Error {
@@ -10,22 +11,33 @@ export class SessionNotPermittedError extends Error {
 }
 
 /**
- * Inspect an error response body and, if the gate flagged it as
- * `credentials_expired`, throw the typed client-side error so callers
- * can give the engineer the gate's already-formatted recovery
- * instructions. Returns the parsed body otherwise.
+ * Parse a gate JSON error body, returning `{}` on malformed payloads. The
+ * gate always emits `{error: string, code?: string}`; non-conforming
+ * responses fall back to the verbatim text further up the stack.
  */
-export function maybeThrowCredentialsExpired(text: string): { code?: string; error?: string } {
-  let body: { code?: string; error?: string } | undefined;
+function parseGateErrorBody(text: string): { code?: string; error?: string } {
   try {
-    body = JSON.parse(text) as { code?: string; error?: string };
+    return JSON.parse(text) as { code?: string; error?: string };
   } catch {
     return {};
   }
-  if (body && body.code === CREDENTIALS_EXPIRED_CODE) {
+}
+
+/**
+ * Inspect a gate error response and throw the typed client-side error
+ * matching its `code`, if any. Each path in this client surfaces these
+ * the same way: a credentials-expired response carries the gate's
+ * already-formatted recovery instruction, and a session-not-permitted
+ * response triggers the per-request fallback in `with-prod`.
+ */
+export function throwTypedGateError(text: string): void {
+  const body = parseGateErrorBody(text);
+  if (body.code === CREDENTIALS_EXPIRED_CODE) {
     throw new CredentialsExpiredError(body.error ?? "gate reported expired gcloud credentials");
   }
-  return body ?? {};
+  if (body.code === SESSION_NOT_PERMITTED_CODE) {
+    throw new SessionNotPermittedError(body.error ?? "Session creation not permitted");
+  }
 }
 
 export interface FetchProdTokenOptions {
@@ -86,9 +98,7 @@ export async function fetchProdAccessToken(
 
   if (!tokenRes.ok) {
     const text = await tokenRes.text();
-    // Throws if the gate signalled credentials_expired so the caller
-    // surfaces the gcloud reauth instruction instead of a generic 5xx.
-    maybeThrowCredentialsExpired(text);
+    throwTypedGateError(text);
     throw new Error(`gcp-gate returned ${tokenRes.status}: ${text}`);
   }
 
@@ -121,7 +131,7 @@ export async function fetchProdToken(
   const identityRes = await fetchFn(`${baseUrl}/identity`, extraOpts);
   if (!identityRes.ok) {
     const text = await identityRes.text();
-    maybeThrowCredentialsExpired(text);
+    throwTypedGateError(text);
     throw new Error(`gcp-gate /identity returned ${identityRes.status}: ${text}`);
   }
   const identityBody = (await identityRes.json()) as { email?: string };
@@ -191,20 +201,7 @@ export async function createProdSession(
 
   if (!res.ok) {
     const text = await res.text();
-    if (res.status === 403) {
-      try {
-        const body = JSON.parse(text) as { code?: string; error?: string };
-        if (body.code === "session_not_permitted_on_operator_socket") {
-          throw new SessionNotPermittedError(body.error ?? "Session creation not permitted");
-        }
-      } catch (err) {
-        if (err instanceof SessionNotPermittedError) throw err;
-        // body wasn't JSON — fall through to generic error
-      }
-    }
-    // Surface the gate's reauth instruction to the user verbatim when
-    // the gate flagged the failure as credentials_expired.
-    maybeThrowCredentialsExpired(text);
+    throwTypedGateError(text);
     throw new Error(`gcp-gate returned ${res.status}: ${text}`);
   }
 

@@ -47,6 +47,9 @@ export interface ErrorResponse {
   code?: string;
 }
 
+/** Code emitted when sessions are disabled on the operator socket. */
+export const SESSION_NOT_PERMITTED_CODE = "session_not_permitted_on_operator_socket";
+
 /** JSON response for session creation. */
 export interface SessionResponse {
   session_id: string;

@@ -2,7 +2,7 @@ import { type GateConnection, connectionFetchOpts } from "../gate/connection.ts"
 import { CredentialsExpiredError } from "../gate/credentials-error.ts";
 import type { CachedToken, TokenProvider } from "../metadata-proxy/types.ts";
 import { createCachingTokenProvider } from "./caching-token-provider.ts";
-import { maybeThrowCredentialsExpired } from "./fetch-prod-token.ts";
+import { throwTypedGateError } from "./fetch-prod-token.ts";
 
 export interface SessionTokenProviderOptions {
   /** Override fetch for testing. */
@@ -42,16 +42,14 @@ export function createSessionTokenProvider(
     }
     if (!res.ok) {
       const text = await res.text();
-      // Throws CredentialsExpiredError if the gate flagged the failure as
-      // credentials_expired so the engineer sees the gcloud reauth
-      // instruction on with-prod's stderr (the metadata proxy's
-      // 5xx response would otherwise be swallowed by gcloud).
       try {
-        maybeThrowCredentialsExpired(text);
+        throwTypedGateError(text);
       } catch (err) {
+        // Echo the gate's reauth instruction to with-prod's stderr so the
+        // user sees it even when the wrapped command swallows the
+        // metadata-proxy 5xx.
         if (err instanceof CredentialsExpiredError) {
           console.error(`with-prod: ${err.message}`);
-          throw err;
         }
         throw err;
       }

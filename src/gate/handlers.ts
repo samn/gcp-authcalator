@@ -1,12 +1,13 @@
-import type {
-  GateDeps,
-  TokenResponse,
-  SessionResponse,
-  ProjectNumberResponse,
-  UniverseDomainResponse,
-  AuditEntry,
-  ErrorResponse,
-  RequestContext,
+import {
+  SESSION_NOT_PERMITTED_CODE,
+  type GateDeps,
+  type TokenResponse,
+  type SessionResponse,
+  type ProjectNumberResponse,
+  type UniverseDomainResponse,
+  type AuditEntry,
+  type ErrorResponse,
+  type RequestContext,
 } from "./types.ts";
 import { CredentialsExpiredError } from "./credentials-error.ts";
 import { parseCommandHeader, summarizeCommand } from "./summarize-command.ts";
@@ -145,7 +146,7 @@ async function handleSessionTokenRefresh(
     return jsonResponse(
       {
         error: "Session refresh not permitted on operator socket",
-        code: "session_not_permitted_on_operator_socket",
+        code: SESSION_NOT_PERMITTED_CODE,
       },
       403,
     );
@@ -536,7 +537,7 @@ async function handleCreateSession(
     return jsonResponse(
       {
         error: "Session creation not permitted on operator socket",
-        code: "session_not_permitted_on_operator_socket",
+        code: SESSION_NOT_PERMITTED_CODE,
       },
       403,
     );
