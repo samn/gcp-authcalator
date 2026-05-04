@@ -10,13 +10,10 @@
  * detect it consistently from one place.
  */
 
+import { hostname as osHostname } from "node:os";
+
 /** Discriminator value emitted in JSON error responses (`{code}`). */
 export const CREDENTIALS_EXPIRED_CODE = "credentials_expired";
-
-/** Single source of truth for the user-facing recovery instruction. */
-export const REAUTH_INSTRUCTION =
-  "Run `gcloud auth application-default login` on the host running gcp-authcalator gate, then retry. " +
-  "The gate picks up refreshed credentials automatically — no restart needed.";
 
 /**
  * Cap on the rendered error message. The gate's own formatted message
@@ -45,9 +42,31 @@ function sanitizeMessage(s: string): string {
  * Build the standard, action-oriented error message from the underlying
  * google-auth detail line. Centralised so gate-side and client-side
  * messages match exactly.
+ *
+ * The gate's hostname is embedded so the engineer can identify exactly
+ * which machine to re-authenticate on. gcp-authcalator is most often
+ * deployed against remote dev environments (devcontainers, SSH sessions,
+ * Codespaces, Coder) — there the term "host" is overloaded between the
+ * developer's laptop (where the gate and ADC live) and the
+ * devcontainer / remote SSH box (where this command is running). Naming
+ * the machine and explicitly contrasting it with the user's current
+ * environment removes that ambiguity.
+ *
+ * `host` is parameterised purely so tests can pin a deterministic value;
+ * production callers should use the default (`os.hostname()`).
  */
-export function formatCredentialsExpiredMessage(detail: string): string {
-  return `gcloud credentials on the gate host need re-authentication: ${detail}. ${REAUTH_INSTRUCTION}`;
+export function formatCredentialsExpiredMessage(
+  detail: string,
+  host: string = osHostname(),
+): string {
+  return (
+    `gcloud Application Default Credentials need re-authentication on ` +
+    `host "${host}" (where the gcp-authcalator gate daemon is running): ` +
+    `${detail}. Run \`gcloud auth application-default login\` on that ` +
+    `host — typically your local laptop, NOT the devcontainer or remote ` +
+    `SSH host where this command is running. The gate picks up refreshed ` +
+    `credentials automatically; no restart needed.`
+  );
 }
 
 /**

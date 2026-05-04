@@ -112,10 +112,18 @@ token is revoked, or RAPT/2SV reauth is required), the gate detects the
 `invalid_grant` / reauth response from `google-auth-library` and surfaces
 a single clear instruction to the engineer:
 
-> gcloud credentials on the gate host need re-authentication: \<detail\>.
-> Run `gcloud auth application-default login` on the host running
-> gcp-authcalator gate, then retry. The gate picks up refreshed
-> credentials automatically — no restart needed.
+> gcloud Application Default Credentials need re-authentication on host
+> "\<gate-hostname\>" (where the gcp-authcalator gate daemon is running):
+> \<detail\>. Run `gcloud auth application-default login` on that host —
+> typically your local laptop, NOT the devcontainer or remote SSH host
+> where this command is running. The gate picks up refreshed credentials
+> automatically; no restart needed.
+
+The gate's hostname (from `os.hostname()` on the gate process) is named
+explicitly so engineers in remote dev environments — devcontainers, SSH
+sessions, Codespaces, Coder — know which physical machine to switch to.
+The hostname matches the laptop where you originally ran `gcloud auth
+application-default login` to set up ADC.
 
 This message appears:
 

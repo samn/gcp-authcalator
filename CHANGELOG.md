@@ -25,7 +25,12 @@ application-default login` command to run on the gate host.
   token refresh, and any other ADC-backed call. The `with-prod` token
   provider also logs the message to its parent stderr so the
   instruction is visible even when the wrapped command (gcloud,
-  terraform, …) reports a generic metadata-server error.
+  terraform, …) reports a generic metadata-server error. The message
+  names the gate machine by hostname (from `os.hostname()`) and
+  explicitly contrasts it with the devcontainer or remote SSH host
+  where the command is running, so engineers in remote dev environments
+  know exactly which physical machine to run `gcloud auth
+application-default login` on.
 - After an `invalid_grant` failure, the gate clears its cached source
   and impersonated clients so the next request re-reads
   `application_default_credentials.json`. Engineers no longer need to

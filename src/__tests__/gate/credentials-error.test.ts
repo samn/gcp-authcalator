@@ -5,7 +5,6 @@ import {
   formatCredentialsExpiredMessage,
   isCredentialsExpiredMessage,
   mapAdcError,
-  REAUTH_INSTRUCTION,
 } from "../../gate/credentials-error.ts";
 
 describe("isCredentialsExpiredMessage", () => {
@@ -42,11 +41,22 @@ describe("isCredentialsExpiredMessage", () => {
 });
 
 describe("formatCredentialsExpiredMessage", () => {
-  test("includes the detail and the recovery instruction", () => {
-    const message = formatCredentialsExpiredMessage("invalid_grant: Bad Request");
+  test("includes the detail, the gate's hostname, and the recovery instruction", () => {
+    const message = formatCredentialsExpiredMessage("invalid_grant: Bad Request", "test-host");
     expect(message).toContain("invalid_grant: Bad Request");
+    expect(message).toContain('host "test-host"');
     expect(message).toContain("gcloud auth application-default login");
-    expect(message).toContain(REAUTH_INSTRUCTION);
+    // The remote-vs-local clarifier is the whole point of naming the
+    // hostname — assert it's present so a reword can't drop it silently.
+    expect(message).toContain("NOT the devcontainer or remote SSH host");
+    expect(message).toContain("no restart needed");
+  });
+
+  test("defaults to os.hostname() when no host is supplied", () => {
+    const message = formatCredentialsExpiredMessage("invalid_grant: Bad Request");
+    // Don't pin to the literal hostname (test machines vary), just
+    // verify the shape: `host "<something non-empty>"`.
+    expect(message).toMatch(/host "[^"]+"/);
   });
 });
 

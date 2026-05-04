@@ -583,9 +583,11 @@ describe("runWithProd", () => {
     // verbatim — no `failed to acquire prod token:` prefix that would
     // bury the actionable text.
     const formattedMessage =
-      "gcloud credentials on the gate host need re-authentication: invalid_grant: rapt_required. " +
-      "Run `gcloud auth application-default login` on the host running gcp-authcalator gate, then retry. " +
-      "The gate picks up refreshed credentials automatically — no restart needed.";
+      'gcloud Application Default Credentials need re-authentication on host "laptop.local" ' +
+      "(where the gcp-authcalator gate daemon is running): invalid_grant: rapt_required. " +
+      "Run `gcloud auth application-default login` on that host — typically your local " +
+      "laptop, NOT the devcontainer or remote SSH host where this command is running. " +
+      "The gate picks up refreshed credentials automatically; no restart needed.";
 
     const mockFetchFn = (async () =>
       new Response(JSON.stringify({ error: formattedMessage, code: "credentials_expired" }), {

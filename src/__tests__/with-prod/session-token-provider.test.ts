@@ -291,8 +291,10 @@ describe("createSessionTokenProvider", () => {
     // the client must forward it verbatim (no re-prefixing) so the engineer
     // sees a single, complete instruction.
     const formattedMessage =
-      "gcloud credentials on the gate host need re-authentication: invalid_grant. " +
-      "Run `gcloud auth application-default login` on the host running gcp-authcalator gate, then retry.";
+      'gcloud Application Default Credentials need re-authentication on host "laptop.local" ' +
+      "(where the gcp-authcalator gate daemon is running): invalid_grant. " +
+      "Run `gcloud auth application-default login` on that host — typically your local " +
+      "laptop, NOT the devcontainer or remote SSH host where this command is running.";
 
     const errorSpy = spyOn(console, "error").mockImplementation(() => {});
     try {
