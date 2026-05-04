@@ -19,6 +19,29 @@ export const REAUTH_INSTRUCTION =
   "The gate picks up refreshed credentials automatically — no restart needed.";
 
 /**
+ * Cap on the rendered error message. The gate's own formatted message
+ * is ~250 chars; anything longer is either an unusual google-auth
+ * payload or an attacker-controlled wire response. 1 KiB is generous
+ * but bounds the cost of printing the message to stderr or writing
+ * it to the audit log.
+ */
+const MAX_MESSAGE_LENGTH = 1024;
+
+/**
+ * Strip control characters (terminal escapes, NULs, etc.) and cap the
+ * length. The error message is printed to a TTY via `console.error`
+ * in `with-prod`, where escape sequences could redraw the screen, set
+ * the window title, or otherwise mislead the engineer. Mirrors the
+ * sanitisation in `summarize-command.ts`.
+ */
+function sanitizeMessage(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  const stripped = s.replace(/[\u0000-\u001f\u007f]/g, " ");
+  if (stripped.length <= MAX_MESSAGE_LENGTH) return stripped;
+  return `${stripped.slice(0, MAX_MESSAGE_LENGTH - 1)}…`;
+}
+
+/**
  * Build the standard, action-oriented error message from the underlying
  * google-auth detail line. Centralised so gate-side and client-side
  * messages match exactly.
@@ -31,16 +54,19 @@ export function formatCredentialsExpiredMessage(detail: string): string {
  * Raised when the gate cannot mint tokens because the engineer's ADC
  * refresh token has expired, been revoked, or requires reauth (RAPT).
  *
- * The message passed to the constructor is preserved verbatim — callers
- * are expected to format it via `formatCredentialsExpiredMessage` (gate
- * side) or to forward the gate's already-formatted message unchanged
- * (client side). This avoids double-prefixing across the wire.
+ * The message passed to the constructor is preserved verbatim (modulo
+ * control-character stripping and length cap) — callers format it via
+ * `formatCredentialsExpiredMessage` (gate side) or forward the gate's
+ * already-formatted message unchanged (client side). This avoids
+ * double-prefixing across the wire while still defending the engineer's
+ * terminal from any escape characters that might leak in via the
+ * underlying OAuth response or a malicious response body.
  */
 export class CredentialsExpiredError extends Error {
   readonly code = CREDENTIALS_EXPIRED_CODE;
 
   constructor(message: string, options?: { cause?: unknown }) {
-    super(message);
+    super(sanitizeMessage(message));
     this.name = "CredentialsExpiredError";
     if (options?.cause !== undefined) {
       // Standard Error.cause is supported in modern runtimes, but assigning

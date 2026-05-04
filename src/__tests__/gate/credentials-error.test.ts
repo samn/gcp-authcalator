@@ -107,4 +107,31 @@ describe("CredentialsExpiredError", () => {
     expect(err.code).toBe(CREDENTIALS_EXPIRED_CODE);
     expect(err.code).toBe("credentials_expired");
   });
+
+  test("strips control characters from the message", () => {
+    // Control characters in the wire payload could otherwise hit the
+    // engineer's terminal via `console.error` and inject ANSI escape
+    // sequences (e.g. set window title, redraw screen, clipboard write).
+    const escaped = "invalid_grant\u001b[31mRED\u001b[0m\u0000\u0007\u001b]0;evil\u0007 trailing";
+    const err = new CredentialsExpiredError(escaped);
+    // eslint-disable-next-line no-control-regex
+    expect(err.message).not.toMatch(/[\u0000-\u001f\u007f]/);
+    expect(err.message).toContain("invalid_grant");
+    expect(err.message).toContain("RED");
+    expect(err.message).toContain("trailing");
+  });
+
+  test("caps the message length to bound stderr / audit-log cost", () => {
+    const huge = "x".repeat(5000);
+    const err = new CredentialsExpiredError(huge);
+    expect(err.message.length).toBeLessThanOrEqual(1024);
+    expect(err.message.endsWith("…")).toBe(true);
+  });
+
+  test("a short message is not truncated", () => {
+    const formatted = formatCredentialsExpiredMessage("invalid_grant: Bad Request");
+    const err = new CredentialsExpiredError(formatted);
+    expect(err.message.endsWith("…")).toBe(false);
+    expect(err.message).toBe(formatted);
+  });
 });
