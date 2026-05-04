@@ -22,7 +22,7 @@
     "prepare": "prek install"
   },
   "dependencies": {
-    "@peculiar/x509": "^1.14.3",
+    "@peculiar/x509": "^2.0.0",
     "google-auth-library": "^10.6.2",
     "smol-toml": "^1.6.1",
     "zod": "^4.3.6"
