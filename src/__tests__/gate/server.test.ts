@@ -389,12 +389,19 @@ setInterval(() => {}, 1000);`;
 // Operator socket
 // ---------------------------------------------------------------------------
 
+// Pick a UID that is not equal to the gate UID (so the trust-boundary check
+// in startGateServer doesn't fire) and is not a member of the gate's primary
+// group:
+//   - non-root gate: `root` (UID 0) has its own primary group and is not in
+//     other users' groups.
+//   - root gate: `nobody` (UID 65534) has its own primary group and is
+//     universally not in `root`.
+const TEST_AGENT_UID = process.getuid!() === 0 ? 65534 : 0;
+
 /** Resolve a usable operator-group name + matching agent UID for tests. */
 function operatorGroupForCurrentUser(): { groupName: string; agentUid: number } {
   const groupName = execSync("id -gn", { encoding: "utf-8" }).trim();
-  // Pick a UID that definitely is not in the current user's primary group.
-  // UID 0 (root) usually has its own primary group and isn't in users' groups.
-  return { groupName, agentUid: 0 };
+  return { groupName, agentUid: TEST_AGENT_UID };
 }
 
 describe("operator socket", () => {
@@ -498,7 +505,7 @@ describe("operator socket", () => {
       ...makeConfig(join(tempDir, "gate.sock"), join(tempDir, "admin.sock")),
       operator_socket_path: join(tempDir, "operator.sock"),
       operator_socket_group: "nonexistent-group-zzzzzzz",
-      agent_uid: 0,
+      agent_uid: TEST_AGENT_UID,
     };
 
     await expect(
@@ -584,7 +591,7 @@ function uidModeConfig(tempDir: string, overrides: Partial<GateConfig> = {}): Ga
   return {
     ...makeConfig(join(tempDir, "gate.sock"), join(tempDir, "admin.sock")),
     operator_socket_path: join(tempDir, "operator.sock"),
-    agent_uid: 0,
+    agent_uid: TEST_AGENT_UID,
     ...overrides,
   };
 }
