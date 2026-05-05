@@ -279,7 +279,7 @@ When the gate's confirmation module cannot show a GUI dialog or terminal prompt 
 
 The `with-prod` command generates and prints the pending ID before requesting a session, so you can approve it immediately. Pending requests auto-deny after 120 seconds (2x the GUI dialog timeout, to allow time for terminal switching). The gate logs request IDs and approval instructions to stderr when a request is queued.
 
-Both commands connect to the gate's **admin socket** (separate from the main socket, not mounted into devcontainers). They do not require `--project-id` — only `--admin-socket-path` is needed (defaults to `/tmp/gcp-authcalator-admin-<uid>/admin.sock`).
+Both commands connect to the gate's **admin socket** (separate from the main socket, not mounted into devcontainers). They do not require `--project-id` — only `--admin-socket-path` is needed (defaults to `$XDG_RUNTIME_DIR/gcp-authcalator-admin/admin.sock`).
 
 ### 6. `init-tls` -- TLS Certificate Management
 
@@ -303,7 +303,7 @@ New config options and env vars for remote devcontainer support:
 | `tls_bundle`    | `--tls-bundle`    | `GCP_AUTHCALATOR_TLS_BUNDLE`     | Path to TLS client bundle file           |
 | —               | —                 | `GCP_AUTHCALATOR_TLS_BUNDLE_B64` | Base64-encoded client bundle (preferred) |
 
-Config precedence: env vars > CLI args > TOML file > schema defaults.
+Config precedence: CLI args > env vars > TOML file > schema defaults. (Until v0.10 this was `env > CLI > TOML`, which inverted universal CLI convention; the swap matches expectations and removes the silent override of explicit `--flag` invocations by inherited env vars.)
 
 `gate_url` is validated to require `https://` — `http://` URLs are rejected at config parse time, preventing accidental plaintext connections to gate.
 

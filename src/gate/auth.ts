@@ -310,9 +310,11 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
   async function getUniverseDomain(): Promise<string> {
     if (universeDomainCache) return universeDomainCache;
 
-    const client = await getSourceClient();
-    universeDomainCache = client.universeDomain;
-    return universeDomainCache;
+    return withAdcMapping(async () => {
+      const client = await getSourceClient();
+      universeDomainCache = client.universeDomain;
+      return universeDomainCache;
+    });
   }
 
   async function getSourceAccessToken(): Promise<string> {

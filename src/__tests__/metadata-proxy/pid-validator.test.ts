@@ -9,20 +9,24 @@ import { getOwnerPid, isDescendantOf, type ProcFS } from "../../metadata-proxy/p
 const TCP_HEADER =
   "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode";
 
-/** Build a /proc/net/tcp line. port and inode are decimal, IP is always 127.0.0.1. */
-function tcpLine(slot: number, port: number, inode: number): string {
+/**
+ * Build a /proc/net/tcp line. port and inode are decimal, IP is always
+ * 127.0.0.1. State defaults to "01" (TCP_ESTABLISHED) since the PID
+ * validator now filters out non-ESTABLISHED rows (F7).
+ */
+function tcpLine(slot: number, port: number, inode: number, state: string = "01"): string {
   const portHex = port.toString(16).toUpperCase().padStart(4, "0");
   // 127.0.0.1 in little-endian hex = 0100007F
-  return `   ${slot}: 0100007F:${portHex} 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 ${inode} 1 0000000000000000 100 0 0 10 0`;
+  return `   ${slot}: 0100007F:${portHex} 00000000:0000 ${state} 00000000:00000000 00:00000000 00000000     0        0 ${inode} 1 0000000000000000 100 0 0 10 0`;
 }
 
 const TCP6_HEADER =
   "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode";
 
 /** Build a /proc/net/tcp6 line for IPv4-mapped 127.0.0.1. */
-function tcp6Line(slot: number, port: number, inode: number): string {
+function tcp6Line(slot: number, port: number, inode: number, state: string = "01"): string {
   const portHex = port.toString(16).toUpperCase().padStart(4, "0");
-  return `   ${slot}: 0000000000000000FFFF00000100007F:${portHex} 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 ${inode} 1 0000000000000000 100 0 0 10 0`;
+  return `   ${slot}: 0000000000000000FFFF00000100007F:${portHex} 00000000000000000000000000000000:0000 ${state} 00000000:00000000 00:00000000 00000000     0        0 ${inode} 1 0000000000000000 100 0 0 10 0`;
 }
 
 /** Build a /proc/<pid>/status string with given PPid. */
@@ -37,7 +41,7 @@ function statusFile(ppid: number): string {
  * `pids` maps pid → { ppid, fds: Map<fdNum, symlinkTarget> }
  */
 function fakeProcFS(opts: {
-  sockets?: { file: "tcp" | "tcp6"; port: number; inode: number }[];
+  sockets?: { file: "tcp" | "tcp6"; port: number; inode: number; state?: string }[];
   pids?: Map<number, { ppid: number; fds?: Map<string, string> }>;
 }): ProcFS {
   const sockets = opts.sockets ?? [];
@@ -48,9 +52,15 @@ function fakeProcFS(opts: {
   const tcp6Lines = sockets.filter((s) => s.file === "tcp6");
 
   const tcpContent =
-    TCP_HEADER + "\n" + tcpLines.map((s, i) => tcpLine(i, s.port, s.inode)).join("\n") + "\n";
+    TCP_HEADER +
+    "\n" +
+    tcpLines.map((s, i) => tcpLine(i, s.port, s.inode, s.state)).join("\n") +
+    "\n";
   const tcp6Content =
-    TCP6_HEADER + "\n" + tcp6Lines.map((s, i) => tcp6Line(i, s.port, s.inode)).join("\n") + "\n";
+    TCP6_HEADER +
+    "\n" +
+    tcp6Lines.map((s, i) => tcp6Line(i, s.port, s.inode, s.state)).join("\n") +
+    "\n";
 
   return {
     readFileSync(path: string): string {
@@ -175,6 +185,47 @@ describe("getOwnerPid", () => {
       ]),
     });
     expect(getOwnerPid(7070, fs)).toBe(20);
+  });
+
+  // F7: only ESTABLISHED rows are considered. LISTEN / CLOSE_WAIT etc.
+  // share local-address/port with concurrent connections briefly and
+  // would otherwise be matched first, returning the wrong inode.
+  test("ignores TCP_LISTEN rows (state 0A)", () => {
+    const fs = fakeProcFS({
+      sockets: [
+        // First row: a LISTEN socket on the same port → must be skipped.
+        { file: "tcp", port: 8080, inode: 100, state: "0A" },
+        // Second row: an ESTABLISHED connection → this is the one we want.
+        { file: "tcp", port: 8080, inode: 200, state: "01" },
+      ],
+      pids: new Map([
+        [10, { ppid: 1, fds: new Map([["3", "socket:[100]"]]) }],
+        [42, { ppid: 1, fds: new Map([["3", "socket:[200]"]]) }],
+      ]),
+    });
+    expect(getOwnerPid(8080, fs)).toBe(42);
+  });
+
+  test("ignores TCP_TIME_WAIT rows (state 06)", () => {
+    const fs = fakeProcFS({
+      sockets: [
+        { file: "tcp", port: 9000, inode: 100, state: "06" },
+        { file: "tcp", port: 9000, inode: 200, state: "01" },
+      ],
+      pids: new Map([
+        [10, { ppid: 1, fds: new Map([["3", "socket:[100]"]]) }],
+        [42, { ppid: 1, fds: new Map([["3", "socket:[200]"]]) }],
+      ]),
+    });
+    expect(getOwnerPid(9000, fs)).toBe(42);
+  });
+
+  test("returns null when only LISTEN rows match the port", () => {
+    const fs = fakeProcFS({
+      sockets: [{ file: "tcp", port: 8080, inode: 100, state: "0A" }],
+      pids: new Map([[10, { ppid: 1, fds: new Map([["3", "socket:[100]"]]) }]]),
+    });
+    expect(getOwnerPid(8080, fs)).toBeNull();
   });
 
   test("returns null when /proc/net/tcp is unreadable", () => {

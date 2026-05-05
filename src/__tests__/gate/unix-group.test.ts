@@ -9,6 +9,7 @@ import {
   loadUnixGroupDb,
   resolveAgentUid,
   getGroupsForUid,
+  isUidInPasswd,
 } from "../../gate/unix-group.ts";
 
 describe("parseGroupFile", () => {
@@ -136,5 +137,26 @@ describe("getGroupsForUid", () => {
       group: "alice:x:1000:alice\nops:x:2000:alice\n",
     });
     expect(getGroupsForUid(1000, db).sort()).toEqual([1000, 2000]);
+  });
+});
+
+describe("isUidInPasswd", () => {
+  test("returns true when uid is present in /etc/passwd", () => {
+    const { db } = makeDb({
+      passwd: "alice:x:1000:1000::/home/alice:/bin/sh\n",
+    });
+    expect(isUidInPasswd(1000, db)).toBe(true);
+  });
+
+  test("returns false when uid is not in /etc/passwd (e.g. NSS-managed)", () => {
+    const { db } = makeDb({
+      passwd: "alice:x:1000:1000::/home/alice:/bin/sh\n",
+    });
+    expect(isUidInPasswd(9999, db)).toBe(false);
+  });
+
+  test("returns false when /etc/passwd is empty", () => {
+    const { db } = makeDb({});
+    expect(isUidInPasswd(1000, db)).toBe(false);
   });
 });

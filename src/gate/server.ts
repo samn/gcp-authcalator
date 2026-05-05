@@ -1,4 +1,4 @@
-import { unlinkSync, existsSync, chmodSync, chownSync, lstatSync, mkdirSync } from "node:fs";
+import { unlinkSync, existsSync, chmodSync, chownSync, lstatSync } from "node:fs";
 import { dirname } from "node:path";
 import type { GateConfig } from "../config.ts";
 import type { GateDeps } from "./types.ts";
@@ -13,7 +13,14 @@ import { loadAndValidateTlsFiles } from "../tls/store.ts";
 import type { BunRequestInit } from "./connection.ts";
 import { createPamModule, resolveEntitlementPath, type PamModule } from "./pam.ts";
 import { createPendingQueue } from "./pending.ts";
-import { lookupGroup, loadUnixGroupDb, resolveAgentUid, getGroupsForUid } from "./unix-group.ts";
+import {
+  lookupGroup,
+  loadUnixGroupDb,
+  resolveAgentUid,
+  getGroupsForUid,
+  isUidInPasswd,
+} from "./unix-group.ts";
+import { ensurePrivateDir } from "./dir-utils.ts";
 
 // Bun's max idleTimeout (255s). Prod flows (POST /session, GET /token?level=prod)
 // can wait on the pending-approval queue (120s) and PAM grant polling (120s)
@@ -212,12 +219,29 @@ export async function startGateServer(
     pendingQueue,
   };
 
-  // Ensure the socket directory exists with owner-only permissions (0o700).
-  // For $XDG_RUNTIME_DIR the directory already exists; for the ~/.gcp-authcalator
-  // fallback this creates it.  mode only applies to newly created dirs so
-  // we never alter permissions on a pre-existing $XDG_RUNTIME_DIR.
+  // Tight default umask while creating sockets: Bun.serve picks up the
+  // umask when binding the AF_UNIX socket file. With the default 0o022
+  // the bind() lands at ~0o755, which is then chmod'd to 0o600 a moment
+  // later — that's a brief window during which the socket file mode is
+  // looser than intended. 0o077 makes the bound mode 0o700, closing
+  // the gap. We don't restore the umask: the gate process is dedicated
+  // to gate work, never makes files visible to other users.
+  process.umask(0o077);
+
+  // Ensure the socket directory exists with owner-only permissions
+  // (0o700). For $XDG_RUNTIME_DIR the directory already exists; for the
+  // ~/.gcp-authcalator fallback this creates it. ensurePrivateDir
+  // refuses to use a directory that is a symlink, owned by another
+  // uid, or has loose permissions — closing the
+  // mkdirSync({recursive:true}) silently-succeeds-on-existing-dir
+  // footgun.
   const socketDir = dirname(config.socket_path);
-  mkdirSync(socketDir, { recursive: true, mode: 0o700 });
+  // $XDG_RUNTIME_DIR is itself the socket dir for the default config
+  // and is already 0o700 owned by the user — but our verification
+  // refuses if any group/other bits are set, which is the usual
+  // invariant for that directory. If the user has a non-default
+  // socket_path we still apply the same rule.
+  ensurePrivateDir(socketDir, 0o700);
 
   await cleanStaleSocket(config.socket_path, "socket", { probeForRunning: true });
 
@@ -256,8 +280,11 @@ export async function startGateServer(
   }
 
   // --- Admin socket (for approve/deny — NOT mounted into containers) ---
+  // The default admin socket lives under $XDG_RUNTIME_DIR (already 0o700
+  // owned by the user). For non-default paths the same invariant is
+  // enforced by ensurePrivateDir.
   const adminSocketDir = dirname(config.admin_socket_path);
-  mkdirSync(adminSocketDir, { recursive: true, mode: 0o700 });
+  ensurePrivateDir(adminSocketDir, 0o700);
 
   await cleanStaleSocket(config.admin_socket_path, "admin socket");
 
@@ -285,10 +312,28 @@ export async function startGateServer(
       );
     }
 
+    // F3: when the operator socket is enabled the agent UID guardrails
+    // depend on /etc/group / /etc/passwd lookups. NSS-managed (LDAP/SSSD)
+    // users are not visible to those parsers, which would silently turn
+    // the "agent UID is not in operator group" check into a no-op. Refuse
+    // to start unless the agent UID is present in /etc/passwd so an
+    // operator who relies on NSS gets a clear error instead of a silent
+    // bypass of the guardrail.
+    if (!isUidInPasswd(agentUid, unixDb)) {
+      throw new Error(
+        `gate: agent_uid (${agentUid}) is not present in /etc/passwd. ` +
+          `gcp-authcalator's operator-socket guardrails (agent UID is not the gate UID, ` +
+          `agent UID is not a member of the operator group in group mode) consult ` +
+          `/etc/passwd and /etc/group directly — NSS/LDAP/SSSD-managed users are not ` +
+          `visible to them. Pass a numeric UID that exists in /etc/passwd, or do not ` +
+          `enable the operator socket for NSS-managed agent users.`,
+      );
+    }
+
     const access = resolveOperatorSocketAccess(config.operator_socket_group, agentUid, unixDb);
 
     const operatorSocketDir = dirname(config.operator_socket_path);
-    mkdirSync(operatorSocketDir, { recursive: true, mode: access.dirMode });
+    ensurePrivateDir(operatorSocketDir, access.dirMode);
     if (access.gid !== undefined) {
       chownSync(operatorSocketDir, gateUid, access.gid);
     }

@@ -9,7 +9,15 @@ import { runKubeToken } from "./commands/kube-token.ts";
 import { runKubeSetup } from "./commands/kube-setup.ts";
 import { runInitTls } from "./commands/init-tls.ts";
 import { runApprove } from "./commands/approve.ts";
+import { captureAndDeleteTlsBundleEnv } from "./tls/bundle.ts";
 import packageJson from "../package.json";
+
+// Capture the TLS client bundle env var into a module-private slot and
+// delete it from process.env BEFORE any subprocess can inherit it. This
+// runs at module load — earlier than main() — so that even the
+// `getCommitSha` call below (which spawns `git`) does not leak the bundle
+// via /proc/<pid>/environ.
+captureAndDeleteTlsBundleEnv();
 
 const VERSION = packageJson.version;
 
@@ -57,7 +65,7 @@ Options:
   --project-id <id>        GCP project ID
   --service-account <email> Service account email to impersonate
   --socket-path <path>     Unix socket path (default: $XDG_RUNTIME_DIR/gcp-authcalator.sock)
-  --admin-socket-path <path>  Admin socket path for approve/deny (default: /tmp/gcp-authcalator-admin-<uid>/admin.sock)
+  --admin-socket-path <path>  Admin socket path for approve/deny (default: $XDG_RUNTIME_DIR/gcp-authcalator-admin/admin.sock)
   -p, --port <port>        Metadata proxy port (default: 8173)
   --gate-tls-port <port>        Gate TCP+mTLS listener port (enables remote devcontainer support)
   --tls-dir <path>         TLS certificate directory (default: ~/.gcp-authcalator/tls/)

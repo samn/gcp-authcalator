@@ -169,7 +169,7 @@ This produces a single compiled `gcp-authcalator` binary.
 ## Configuration
 
 Settings can be provided via CLI flags, a TOML config file, environment variables, or a combination.
-Precedence: environment variables > CLI flags > TOML file > defaults.
+Precedence: CLI flags > environment variables > TOML file > defaults.
 
 ### CLI flags
 
@@ -177,7 +177,7 @@ Precedence: environment variables > CLI flags > TOML file > defaults.
 --project-id <id>          GCP project ID
 --service-account <email>  Service account email to impersonate
 --socket-path <path>       Unix socket path (default: $XDG_RUNTIME_DIR/gcp-authcalator.sock)
---admin-socket-path <path> Admin socket path for approve/deny (default: /tmp/gcp-authcalator-admin-<uid>/admin.sock)
+--admin-socket-path <path> Admin socket path for approve/deny (default: $XDG_RUNTIME_DIR/gcp-authcalator-admin/admin.sock)
 -p, --port <port>          Metadata proxy port (default: 8173)
 --gate-tls-port <port>          Gate TCP+mTLS listener port (enables remote devcontainer support)
 --tls-dir <path>           TLS certificate directory (default: ~/.gcp-authcalator/tls/)
@@ -224,7 +224,7 @@ project_id = "my-gcp-project"
 service_account = "dev-runner@my-gcp-project.iam.gserviceaccount.com"
 # socket_path defaults to $XDG_RUNTIME_DIR/gcp-authcalator.sock
 # (or ~/.gcp-authcalator/gcp-authcalator.sock if XDG_RUNTIME_DIR is unset)
-# admin_socket_path defaults to /tmp/gcp-authcalator-admin-<uid>/admin.sock
+# admin_socket_path defaults to $XDG_RUNTIME_DIR/gcp-authcalator-admin/admin.sock
 # (used by approve/deny commands — not mounted into containers)
 port = 8173
 
@@ -404,7 +404,7 @@ gcp-authcalator deny <id>
 
 When the gate's confirmation module cannot show a GUI dialog or terminal prompt, it queues the request and prints the request ID to stderr with instructions. The `with-prod` command also prints the pending ID before requesting a session, so you can approve it immediately. Requests auto-deny after 120 seconds if not resolved.
 
-Both commands connect to the gate's **admin socket** (separate from the main socket, not mounted into devcontainers). They do not require `--project-id` — only `--admin-socket-path` is needed (defaults to `/tmp/gcp-authcalator-admin-<uid>/admin.sock`).
+Both commands connect to the gate's **admin socket** (separate from the main socket, not mounted into devcontainers). They do not require `--project-id` — only `--admin-socket-path` is needed (defaults to `$XDG_RUNTIME_DIR/gcp-authcalator-admin/admin.sock`).
 
 ### `init-tls` — TLS certificate management
 

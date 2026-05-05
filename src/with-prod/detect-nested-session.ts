@@ -13,6 +13,35 @@ export interface NestedSessionInfo {
 }
 
 /**
+ * Verify a `host:port` value points to a loopback address.
+ *
+ * The metadataHost from `GCP_AUTHCALATOR_PROD_SESSION` is set by a
+ * trusted parent `with-prod`, but env vars are inherited by anything in
+ * the process tree — a same-UID attacker could plant a sentinel
+ * pointing at an attacker-controlled remote server, then wait for the
+ * legitimate user to run `with-prod` again. Letting that through would
+ * silently redirect the wrapped command's metadata traffic off-host.
+ *
+ * Accept only literal loopback hosts. Hostnames are not resolved here
+ * — DNS could be attacker-controlled too.
+ */
+function isLoopbackHost(metadataHost: string): boolean {
+  // Strip port. URL parsing is overkill since this isn't a full URL.
+  // Bracketed IPv6: [::1]:8080
+  let host = metadataHost;
+  if (host.startsWith("[")) {
+    const close = host.indexOf("]");
+    if (close === -1) return false;
+    host = host.slice(1, close);
+  } else {
+    const colon = host.lastIndexOf(":");
+    if (colon !== -1) host = host.slice(0, colon);
+  }
+  host = host.toLowerCase();
+  return host === "127.0.0.1" || host === "::1" || host === "localhost";
+}
+
+/**
  * Check if we are already inside a with-prod session with a live proxy.
  *
  * Returns session info if the parent proxy is alive and serving valid tokens,
@@ -24,6 +53,14 @@ export async function detectNestedSession(
 ): Promise<NestedSessionInfo | null> {
   const metadataHost = env[PROD_SESSION_ENV_VAR];
   if (!metadataHost) return null;
+
+  if (!isLoopbackHost(metadataHost)) {
+    console.error(
+      `with-prod: ignoring ${PROD_SESSION_ENV_VAR}=${metadataHost} — not a loopback address. ` +
+        `Nested-session reuse only follows 127.0.0.1, ::1, or localhost.`,
+    );
+    return null;
+  }
 
   try {
     // Health check: root ping — verify it's a metadata proxy

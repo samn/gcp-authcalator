@@ -1,7 +1,8 @@
-import { mkdirSync, appendFileSync } from "node:fs";
+import { appendFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AuditEntry } from "./types.ts";
 import { getDefaultRuntimeDir } from "../config.ts";
+import { ensurePrivateDir } from "./dir-utils.ts";
 
 const LOG_FILENAME = "audit.log";
 
@@ -18,10 +19,12 @@ export function createAuditModule(logDir: string = getDefaultRuntimeDir()): {
   // Ensure directory exists with owner-only permissions (0o700).
   // The audit log contains timestamps, access decisions, and email addresses
   // — restrict directory access so other local users cannot read it.
+  // ensurePrivateDir refuses (rather than silently using) a pre-existing
+  // directory with looser permissions or another owner.
   try {
-    mkdirSync(logDir, { recursive: true, mode: 0o700 });
+    ensurePrivateDir(logDir, 0o700);
   } catch (err) {
-    console.error(`audit: failed to create log directory ${logDir}:`, err);
+    console.error(`audit: failed to ensure log directory ${logDir}:`, err);
   }
 
   function writeAuditLog(entry: AuditEntry): void {

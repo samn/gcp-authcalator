@@ -114,3 +114,17 @@ export function getGroupsForUid(uid: number, db: UnixGroupDb): number[] {
   }
   return [...gids];
 }
+
+/**
+ * Return true iff `uid` is present in /etc/passwd.
+ *
+ * Used by the operator-socket startup checks: NSS-managed (LDAP/SSSD)
+ * users are not visible to our /etc/passwd parser, which would silently
+ * turn the "agent UID is not a member of the operator group" guardrail
+ * into a no-op. Refusing to start when the agent UID is not in
+ * /etc/passwd surfaces that misconfiguration instead of letting it slip
+ * through.
+ */
+export function isUidInPasswd(uid: number, db: UnixGroupDb): boolean {
+  return db.passwd.some((p) => p.uid === uid);
+}

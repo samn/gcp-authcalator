@@ -597,10 +597,10 @@ describe("loadConfig", () => {
     );
   });
 
-  test("env vars override CLI args", () => {
+  test("CLI args override env vars (precedence change since v0.10)", () => {
     withEnv({ GCP_AUTHCALATOR_GATE_URL: "https://env.example.com" }, () => {
       const config = loadConfig({ gate_url: "https://cli.example.com" });
-      expect(config.gate_url).toBe("https://env.example.com");
+      expect(config.gate_url).toBe("https://cli.example.com");
     });
   });
 
@@ -624,7 +624,7 @@ describe("loadConfig", () => {
     expect(config.project_id).toBe("cli-project");
   });
 
-  test("full precedence: env > CLI > TOML > defaults", () => {
+  test("full precedence: CLI > env > TOML > defaults", () => {
     const dir = mkdtempSync(join(tmpdir(), "config-test-"));
     const filePath = join(dir, "config.toml");
     writeFileSync(
@@ -632,14 +632,21 @@ describe("loadConfig", () => {
       `project_id = "toml-project"\nport = 4000\nsocket_path = "/toml.sock"\n`,
     );
 
-    withEnv({ GCP_AUTHCALATOR_PROJECT_ID: "env-project" }, () => {
-      const config = loadConfig({ port: "5555", socket_path: "/cli.sock" }, filePath);
-      // env wins over TOML and CLI
-      expect(config.project_id).toBe("env-project");
-      // CLI wins over TOML (no env var set for these)
-      expect(config.port).toBe(5555);
-      expect(config.socket_path).toBe("/cli.sock");
-    });
+    withEnv(
+      {
+        GCP_AUTHCALATOR_PROJECT_ID: "env-project",
+        GCP_AUTHCALATOR_PORT: "6666",
+      },
+      () => {
+        const config = loadConfig({ port: "5555", socket_path: "/cli.sock" }, filePath);
+        // CLI wins over env and TOML
+        expect(config.port).toBe(5555);
+        // CLI wins over TOML (no env override for socket_path)
+        expect(config.socket_path).toBe("/cli.sock");
+        // env wins over TOML when no CLI override
+        expect(config.project_id).toBe("env-project");
+      },
+    );
   });
 
   test("loads scopes from TOML", () => {

@@ -1,10 +1,11 @@
 import "reflect-metadata";
-import { mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import * as x509 from "@peculiar/x509";
 import { generateCA } from "./ca.ts";
 import { generateServerCert, generateClientCert } from "./certs.ts";
+import { ensurePrivateDir } from "../gate/dir-utils.ts";
 
 export interface TlsFiles {
   caCert: string;
@@ -31,7 +32,10 @@ const DEFAULT_TLS_DIR = join(homedir(), ".gcp-authcalator", "tls");
  */
 export async function ensureTlsFiles(tlsDir?: string, force?: boolean): Promise<TlsFiles> {
   const dir = tlsDir ?? DEFAULT_TLS_DIR;
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // ensurePrivateDir refuses pre-existing dirs with loose perms or
+  // foreign ownership (an attacker could otherwise plant a writable
+  // tls dir before init-tls runs and snapshot keys as they're written).
+  ensurePrivateDir(dir, 0o700);
 
   const paths = tlsPaths(dir);
 

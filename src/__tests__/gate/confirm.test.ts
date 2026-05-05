@@ -599,4 +599,68 @@ describe("createConfirmModule", () => {
       expect(await promise).toBe(true);
     });
   });
+
+  // F8: every operator-visible string passes through stripControlChars
+  // before reaching the dialog or pending queue.
+  describe("control-character sanitisation (F8)", () => {
+    test("strips control characters from email in zenity --text", async () => {
+      let capturedCmd: string[] = [];
+      const spawnFn = (cmd: string[]) => {
+        capturedCmd = cmd;
+        return {
+          exited: Promise.resolve(0),
+          kill: () => {},
+        } as unknown as ReturnType<typeof Bun.spawn>;
+      };
+
+      const { confirmProdAccess } = createConfirmModule({ spawn: spawnFn, platform: "linux" });
+      // Email with embedded ANSI escape and newline.
+      await confirmProdAccess("user\u001b[31m@example.com\nspoofed");
+
+      const text = capturedCmd.find((a) => a.startsWith("--text=")) ?? "";
+      expect(text).not.toContain("\u001b");
+      expect(text).not.toContain("\n@");
+      expect(text).not.toMatch(/\nspoofed/);
+    });
+
+    test("strips control characters from pamPolicy in zenity --text", async () => {
+      let capturedCmd: string[] = [];
+      const spawnFn = (cmd: string[]) => {
+        capturedCmd = cmd;
+        return {
+          exited: Promise.resolve(0),
+          kill: () => {},
+        } as unknown as ReturnType<typeof Bun.spawn>;
+      };
+
+      const { confirmProdAccess } = createConfirmModule({ spawn: spawnFn, platform: "linux" });
+      await confirmProdAccess("user@example.com", undefined, "policy\u0007with-bell");
+
+      const text = capturedCmd.find((a) => a.startsWith("--text=")) ?? "";
+      expect(text).not.toContain("\u0007");
+    });
+
+    test("strips control characters before forwarding to pending queue", async () => {
+      const pendingQueue = createPendingQueue({ timeoutMs: 5000, now: () => 1_000_000 });
+      const { confirmProdAccess } = createConfirmModule({
+        spawn: mockSpawn(127),
+        platform: "linux",
+        isTTY: false,
+        pendingQueue,
+      });
+
+      const promise = confirmProdAccess("user\u001b[31m@example.com", "cmdarg", "policy\nspoof");
+      await new Promise((r) => setTimeout(r, 10));
+
+      const pending = pendingQueue.list();
+      expect(pending).toHaveLength(1);
+      const req = pending[0]!;
+      expect(req.email).not.toContain("\u001b");
+      expect(req.command).not.toContain("");
+      expect(req.pamPolicy).not.toContain("\n");
+
+      pendingQueue.deny(req.id);
+      await promise;
+    });
+  });
 });

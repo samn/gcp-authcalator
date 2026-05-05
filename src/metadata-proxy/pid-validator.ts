@@ -89,6 +89,9 @@ function findSocketInode(localPort: number, fs: ProcFS): number | null {
   return null;
 }
 
+/** TCP_ESTABLISHED state in /proc/net/tcp (hex). */
+const TCP_ESTABLISHED = "01";
+
 function findInodeInFile(path: string, localAddrTarget: string, fs: ProcFS): number | null {
   let data: string;
   try {
@@ -106,10 +109,18 @@ function findInodeInFile(path: string, localAddrTarget: string, fs: ProcFS): num
     if (fields.length < 10) continue;
 
     const localAddr = fields[1]!.toUpperCase();
-    if (localAddr === localAddrTarget) {
-      const inode = parseInt(fields[9]!, 10);
-      return isNaN(inode) ? null : inode;
-    }
+    if (localAddr !== localAddrTarget) continue;
+
+    // F7: only ESTABLISHED rows reflect a live connection from a process
+    // the validator can attribute. LISTEN, TIME_WAIT and CLOSE_WAIT rows
+    // can share the same local 5-tuple shape transiently and would
+    // otherwise be picked up first, returning the inode of an
+    // unrelated socket.
+    const state = fields[3]!.toUpperCase();
+    if (state !== TCP_ESTABLISHED) continue;
+
+    const inode = parseInt(fields[9]!, 10);
+    return isNaN(inode) ? null : inode;
   }
 
   return null;

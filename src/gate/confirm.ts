@@ -15,6 +15,24 @@ export interface ConfirmOptions {
 }
 
 /**
+ * Strip control characters (NUL through 0x1f, plus DEL) from any string
+ * displayed in the confirmation dialog. Mirrors the sanitisation in
+ * `summarize-command.ts` and `credentials-error.ts`. Defense-in-depth
+ * against ANSI escape sequences, embedded newlines, and other terminal
+ * / dialog manipulation tricks reaching the operator's eye via email
+ * or PAM-policy strings.
+ *
+ * These inputs are validated upstream today (email comes from Google's
+ * tokeninfo, pamPolicy is regex-validated by `resolveEntitlementPath`),
+ * so this is purely a hardening layer in case a future change relaxes
+ * one of those validators.
+ */
+function stripControlChars(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/[\u0000-\u001f\u007f]/g, " ");
+}
+
+/**
  * Create a confirmation module for prod token access.
  *
  * Primary: platform-specific GUI dialog (osascript on macOS, zenity on Linux).
@@ -40,10 +58,19 @@ export function createConfirmModule(options: ConfirmOptions = {}): {
     pamPolicy?: string,
     pendingId?: string,
   ): Promise<boolean> {
+    // F8: sanitise every string the operator will see. summarizeCommand
+    // already strips command summaries, but email and pamPolicy used to
+    // pass through unchanged. Apply the same rule uniformly here so the
+    // GUI / terminal / pending-queue paths can never receive an embedded
+    // ANSI sequence or newline.
+    const safeEmail = stripControlChars(email);
+    const safeCommand = command !== undefined ? stripControlChars(command) : undefined;
+    const safePamPolicy = pamPolicy !== undefined ? stripControlChars(pamPolicy) : undefined;
+
     const tryGui = platform === "darwin" ? tryOsascript : tryZenity;
 
     try {
-      const result = await tryGui(email, spawnFn, command, pamPolicy);
+      const result = await tryGui(safeEmail, spawnFn, safeCommand, safePamPolicy);
       if (result !== null) return result;
     } catch {
       // GUI not available, fall through to terminal
@@ -51,13 +78,13 @@ export function createConfirmModule(options: ConfirmOptions = {}): {
 
     // Fallback to terminal prompt if TTY is available
     if (isTTY) {
-      return tryTerminalPrompt(email, command, pamPolicy);
+      return tryTerminalPrompt(safeEmail, safeCommand, safePamPolicy);
     }
 
     // Fallback to pending queue for CLI-based approval
     if (pendingQueue) {
       console.error("confirm: no interactive method available, queuing for CLI approval");
-      return pendingQueue.enqueue(email, command, pamPolicy, pendingId);
+      return pendingQueue.enqueue(safeEmail, safeCommand, safePamPolicy, pendingId);
     }
 
     console.error("confirm: no interactive method available, denying prod access");

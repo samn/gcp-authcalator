@@ -29,15 +29,25 @@ export function getDefaultSocketPath(): string {
 }
 
 /**
- * Default admin socket path in /tmp.
+ * Default admin socket path inside the user-private runtime directory.
  *
- * Uses /tmp because host /tmp is almost never mounted into containers
- * (containers get their own tmpfs), keeping the admin socket unreachable
- * from devcontainer processes.
+ * Uses `$XDG_RUNTIME_DIR/gcp-authcalator-admin/admin.sock` (typically
+ * `/run/user/<uid>/gcp-authcalator-admin/admin.sock`) so the parent
+ * directory is `0o700` and owned by the user — kernel-enforced
+ * isolation from other local users on shared hosts.
+ *
+ * Falls back to `~/.gcp-authcalator/admin/admin.sock` when
+ * `$XDG_RUNTIME_DIR` is not set. The previous default
+ * (`/tmp/gcp-authcalator-admin-<uid>/admin.sock`) was vulnerable on
+ * multi-user hosts: another local user could pre-create that
+ * directory mode `0o777` before the gate started and intercept the
+ * socket. Like the main socket, the admin socket is not bind-mounted
+ * into containers in any sensible setup, so this change does not
+ * affect the "admin socket unreachable from devcontainer processes"
+ * property.
  */
 export function getDefaultAdminSocketPath(): string {
-  const uid = process.getuid?.() ?? 0;
-  return join(`/tmp/gcp-authcalator-admin-${uid}`, "admin.sock");
+  return join(getDefaultRuntimeDir(), "gcp-authcalator-admin", "admin.sock");
 }
 
 // ---------------------------------------------------------------------------
@@ -256,15 +266,22 @@ export function loadTOML(configPath: string): Record<string, unknown> {
 }
 
 /**
- * Load configuration by merging TOML file values, CLI arg overrides, and
- * environment variables, then validating through the base ConfigSchema.
+ * Load configuration by merging TOML file values, env-var overrides, and
+ * CLI arg overrides, then validating through the base ConfigSchema.
  *
- * Precedence: env vars > CLI args > TOML file > schema defaults.
+ * Precedence: CLI args > env vars > TOML file > schema defaults.
+ *
+ * Until v0.10 this was env > CLI > TOML, which inverted universal
+ * convention and let an inherited env var silently override an explicit
+ * `--flag` invocation — a footgun for operators (and a defense-in-depth
+ * concern for hardened deployments). The new precedence matches every
+ * other CLI in this space: the most specific source the operator typed
+ * wins.
  */
 export function loadConfig(cliValues: Record<string, unknown>, configPath?: string): Config {
   const envValues = loadEnvVars();
   const fileValues = configPath ? loadTOML(configPath) : {};
-  const merged = { ...fileValues, ...cliValues, ...envValues };
+  const merged = { ...fileValues, ...envValues, ...cliValues };
 
   // Deep-merge the env record so CLI --env values add to TOML [env] values
   const fileEnv = fileValues.env as Record<string, string> | undefined;
