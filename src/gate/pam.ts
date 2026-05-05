@@ -180,9 +180,13 @@ export function createPamModule(
 
   const grantCache = new Map<string, CachedGrant>();
 
+  function hasUsableLifetime(expiresAt: Date): boolean {
+    return expiresAt.getTime() - now() > CACHE_MARGIN_MS;
+  }
+
   function isCacheValid(cached: CachedGrant | undefined): cached is CachedGrant {
     if (!cached) return false;
-    return cached.expiresAt.getTime() - now() > CACHE_MARGIN_MS;
+    return hasUsableLifetime(cached.expiresAt);
   }
 
   async function pamFetch(url: string, init?: RequestInit): Promise<Response> {
@@ -252,7 +256,9 @@ export function createPamModule(
     // "invalid list filter", so we list unfiltered and select client-side.
     // ENDED grants stick around in the response, so on a busy entitlement
     // the active grant may not be on the first page — page through up to
-    // LIST_GRANTS_MAX_PAGES before giving up.
+    // LIST_GRANTS_MAX_PAGES before giving up. We also re-check
+    // createTime+duration: PAM's `state` field can lag actual expiry, and
+    // the 409/400 "open Grant" path lands us here precisely in that window.
     const baseUrl = `${PAM_API_BASE}/${entitlementPath}/grants?pageSize=${LIST_GRANTS_PAGE_SIZE}`;
     let scanned = 0;
     let pageToken: string | undefined;
@@ -275,7 +281,9 @@ export function createPamModule(
 
       const active = grants.find(
         (g): g is PamGrantResponse & { name: string } =>
-          isActiveState(g.state) && typeof g.name === "string",
+          isActiveState(g.state) &&
+          typeof g.name === "string" &&
+          hasUsableLifetime(computeGrantExpiry(g)),
       );
       if (active) return active;
 
@@ -351,11 +359,12 @@ export function createPamModule(
     entitlementPath: string,
     justification?: string,
   ): Promise<PamGrantResult> {
-    // Check cache first
     const cached = grantCache.get(entitlementPath);
     if (isCacheValid(cached)) {
       return { name: cached.name, state: cached.state, cached: true };
     }
+    // Drop dead entries so revokeAll on shutdown doesn't try to revoke them.
+    grantCache.delete(entitlementPath);
 
     // Request a new grant
     const grant = await createGrant(entitlementPath, justification);

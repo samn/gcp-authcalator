@@ -16,6 +16,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the reflect polyfill required (it is no longer bundled), so `reflect-metadata`
   is now imported at the top of every TLS module that loads `@peculiar/x509`.
 
+### Fixed
+
+- `with-prod` now reliably acquires a fresh PAM grant after the previous
+  one has expired. The PAM module's grant-conflict fallback
+  (`findActiveGrant`) previously returned any grant whose `state` was
+  reported as `ACTIVE`/`ACTIVATED`, even when its
+  `createTime + requestedDuration` had already passed. Because PAM's
+  state field can briefly lag actual expiry, this could hand the caller
+  a dead entitlement that no longer carried elevated permissions.
+  `findActiveGrant` now also requires the computed expiry to exceed the
+  cache margin, and `ensureGrant` purges expired cache entries on miss
+  so dead grants do not linger in the cache (e.g. for `revokeAll` to
+  attempt to revoke after shutdown).
+
 ## [0.9.0] - 2026-05-04
 
 ### Added

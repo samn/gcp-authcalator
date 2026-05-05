@@ -681,6 +681,121 @@ describe("ensureGrant", () => {
     expect(second.name).toBe(grantName2);
     expect(second.cached).toBe(false);
   });
+
+  test("findActiveGrant skips ACTIVE grants whose actual expiry has passed", async () => {
+    // PAM's `state` field can lag actual expiry: a grant whose
+    // createTime + requestedDuration is already in the past may briefly
+    // continue to be reported as ACTIVE/ACTIVATED. Reusing such a grant
+    // would hand the caller a dead entitlement, so we must skip past it
+    // and (when no usable grant exists) fall through to the "no active
+    // grant found" error so the next attempt re-creates a fresh grant.
+    const currentTime = 10_000_000;
+    const expiredButStillActiveName = `${entitlementPath}/grants/stale-active`;
+    const expiredGrant = {
+      name: expiredButStillActiveName,
+      state: "ACTIVE",
+      // Created 2 hours ago with a 1-hour duration — clearly expired.
+      createTime: new Date(currentTime - 2 * 60 * 60 * 1000).toISOString(),
+      requestedDuration: "3600s",
+    };
+
+    const { pam } = makeModule(
+      [
+        { status: 409, body: { error: { message: "Already exists" } } },
+        { status: 200, body: { grants: [expiredGrant] } },
+      ],
+      () => currentTime,
+    );
+
+    await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow("no active grant found");
+  });
+
+  test("findActiveGrant returns a still-fresh active grant on a later page", async () => {
+    // Sanity check that the expiry filter does not drop grants with
+    // genuine remaining lifetime.
+    const currentTime = 10_000_000;
+    const freshName = `${entitlementPath}/grants/fresh-active`;
+    const expiredName = `${entitlementPath}/grants/stale-active`;
+
+    const { pam } = makeModule(
+      [
+        { status: 409, body: { error: { message: "Already exists" } } },
+        {
+          status: 200,
+          body: {
+            grants: [
+              {
+                name: expiredName,
+                state: "ACTIVE",
+                createTime: new Date(currentTime - 2 * 60 * 60 * 1000).toISOString(),
+                requestedDuration: "3600s",
+              },
+              {
+                name: freshName,
+                state: "ACTIVE",
+                createTime: new Date(currentTime - 5 * 60 * 1000).toISOString(),
+                requestedDuration: "3600s",
+              },
+            ],
+          },
+        },
+      ],
+      () => currentTime,
+    );
+
+    const result = await pam.ensureGrant(entitlementPath);
+    expect(result.name).toBe(freshName);
+  });
+
+  test("expired cache entry is not retained after invalidation", async () => {
+    // After a cached grant expires, ensureGrant must re-request and the
+    // dead entry must not stay in the map (revokeAll would otherwise try
+    // to revoke an entitlement that has already ended at PAM).
+    const grantName1 = `${entitlementPath}/grants/grant-1`;
+    let currentTime = 1_000_000;
+    const createTime1 = new Date(currentTime).toISOString();
+
+    const revokedNames: string[] = [];
+    let createCalls = 0;
+    const fetchFn = (async (url: string, init?: RequestInit) => {
+      // Revoke calls
+      if (init?.method === "POST" && (url as string).includes(":revoke")) {
+        revokedNames.push(url as string);
+        return new Response("{}", { status: 200 });
+      }
+      // First create — returns grant-1
+      if (createCalls === 0 && init?.method === "POST") {
+        createCalls++;
+        return new Response(
+          JSON.stringify({
+            name: grantName1,
+            state: "ACTIVATED",
+            createTime: createTime1,
+            requestedDuration: "3600s",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    }) as unknown as typeof globalThis.fetch;
+
+    const pam = createPamModule(async () => "token", {
+      fetchFn,
+      now: () => currentTime,
+    });
+
+    await pam.ensureGrant(entitlementPath);
+
+    // Advance past expiry
+    currentTime += 3600 * 1000 + 1000;
+
+    // Calling ensureGrant again should fail (no further mock responses),
+    // but the expired entry should already be purged. The subsequent
+    // revokeAll must therefore not try to revoke grant-1.
+    await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow();
+    await pam.revokeAll();
+    expect(revokedNames).toHaveLength(0);
+  });
 });
 
 // ---------------------------------------------------------------------------
