@@ -7,14 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
-### Changed
-
-- Upgraded dependencies to latest versions: `@peculiar/x509` 1.14.3 → 2.0.0,
-  `zod` 4.3.6 → 4.4.3, `oxfmt` 0.41.0 → 0.48.0, `oxlint` 1.62.0 → 1.63.0,
-  `typescript` 5.9.3 → 6.0.3, and `prek` 0.3.6 → 0.3.13.
-- Added `reflect-metadata` as a direct dependency. `@peculiar/x509` v2.0.0 made
-  the reflect polyfill required (it is no longer bundled), so `reflect-metadata`
-  is now imported at the top of every TLS module that loads `@peculiar/x509`.
+## [0.9.1] - 2026-05-05
 
 ### Fixed
 
@@ -29,6 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   cache margin, and `ensureGrant` purges expired cache entries on miss
   so dead grants do not linger in the cache (e.g. for `revokeAll` to
   attempt to revoke after shutdown).
+
+### Changed
+
+- Upgraded dependencies to latest versions: `@peculiar/x509` 1.14.3 → 2.0.0,
+  `zod` 4.3.6 → 4.4.3, `oxfmt` 0.41.0 → 0.48.0, `oxlint` 1.62.0 → 1.63.0,
+  `typescript` 5.9.3 → 6.0.3, and `prek` 0.3.6 → 0.3.13.
+- Added `reflect-metadata` as a direct dependency. `@peculiar/x509` v2.0.0 made
+  the reflect polyfill required (it is no longer bundled), so `reflect-metadata`
+  is now imported at the top of every TLS module that loads `@peculiar/x509`.
 
 ## [0.9.0] - 2026-05-04
 
