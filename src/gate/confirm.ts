@@ -1,5 +1,6 @@
 import type { Subprocess } from "bun";
 import type { PendingQueue } from "./pending.ts";
+import { stripControlChars } from "./sanitize.ts";
 
 type SpawnFn = (cmd: string[], opts?: { stdin?: "pipe" | "inherit" }) => Subprocess;
 
@@ -12,24 +13,6 @@ export interface ConfirmOptions {
   isTTY?: boolean;
   /** Optional pending queue for CLI-based approval when no GUI/TTY is available. */
   pendingQueue?: PendingQueue;
-}
-
-/**
- * Strip control characters (NUL through 0x1f, plus DEL) from any string
- * displayed in the confirmation dialog. Mirrors the sanitisation in
- * `summarize-command.ts` and `credentials-error.ts`. Defense-in-depth
- * against ANSI escape sequences, embedded newlines, and other terminal
- * / dialog manipulation tricks reaching the operator's eye via email
- * or PAM-policy strings.
- *
- * These inputs are validated upstream today (email comes from Google's
- * tokeninfo, pamPolicy is regex-validated by `resolveEntitlementPath`),
- * so this is purely a hardening layer in case a future change relaxes
- * one of those validators.
- */
-function stripControlChars(s: string): string {
-  // eslint-disable-next-line no-control-regex
-  return s.replace(/[\u0000-\u001f\u007f]/g, " ");
 }
 
 /**
@@ -58,11 +41,7 @@ export function createConfirmModule(options: ConfirmOptions = {}): {
     pamPolicy?: string,
     pendingId?: string,
   ): Promise<boolean> {
-    // F8: sanitise every string the operator will see. summarizeCommand
-    // already strips command summaries, but email and pamPolicy used to
-    // pass through unchanged. Apply the same rule uniformly here so the
-    // GUI / terminal / pending-queue paths can never receive an embedded
-    // ANSI sequence or newline.
+    // Sanitise every operator-visible string before it reaches a dialog.
     const safeEmail = stripControlChars(email);
     const safeCommand = command !== undefined ? stripControlChars(command) : undefined;
     const safePamPolicy = pamPolicy !== undefined ? stripControlChars(pamPolicy) : undefined;

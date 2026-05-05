@@ -99,13 +99,17 @@ export function resolveAgentUid(value: number | string, db: UnixGroupDb): number
   return entry.uid;
 }
 
+function findPasswdByUid(uid: number, db: UnixGroupDb): PasswdEntry | undefined {
+  return db.passwd.find((p) => p.uid === uid);
+}
+
 /**
  * Return all gids the given UID is a member of: primary gid from /etc/passwd
  * plus every supplementary gid where the username appears in /etc/group's
  * member list. Returns an empty array if the UID is not in /etc/passwd.
  */
 export function getGroupsForUid(uid: number, db: UnixGroupDb): number[] {
-  const user = db.passwd.find((p) => p.uid === uid);
+  const user = findPasswdByUid(uid, db);
   if (!user) return [];
 
   const gids = new Set<number>([user.gid]);
@@ -116,15 +120,10 @@ export function getGroupsForUid(uid: number, db: UnixGroupDb): number[] {
 }
 
 /**
- * Return true iff `uid` is present in /etc/passwd.
- *
- * Used by the operator-socket startup checks: NSS-managed (LDAP/SSSD)
- * users are not visible to our /etc/passwd parser, which would silently
- * turn the "agent UID is not a member of the operator group" guardrail
- * into a no-op. Refusing to start when the agent UID is not in
- * /etc/passwd surfaces that misconfiguration instead of letting it slip
- * through.
+ * True iff `uid` is in /etc/passwd. NSS-managed (LDAP/SSSD) users are
+ * invisible to this parser, which the operator-socket startup check
+ * uses to refuse such configurations.
  */
 export function isUidInPasswd(uid: number, db: UnixGroupDb): boolean {
-  return db.passwd.some((p) => p.uid === uid);
+  return findPasswdByUid(uid, db) !== undefined;
 }

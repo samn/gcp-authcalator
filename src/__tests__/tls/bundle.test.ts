@@ -124,10 +124,6 @@ describe("resolveClientBundle", () => {
   });
 });
 
-// F4: capture-and-delete-at-startup. The CLI calls
-// captureAndDeleteTlsBundleEnv() at module init so the bundle is no longer
-// in process.env by the time anything spawns a subprocess
-// (e.g. `git rev-parse` inside formatVersion()).
 describe("captureAndDeleteTlsBundleEnv", () => {
   const tempDirs: string[] = [];
 

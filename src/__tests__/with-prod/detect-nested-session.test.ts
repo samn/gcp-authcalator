@@ -187,10 +187,7 @@ describe("detectNestedSession", () => {
     });
   });
 
-  // F10: env-var injection of a non-loopback metadata host could redirect
-  // the wrapped command's metadata traffic to a remote attacker-controlled
-  // server. Refuse anything that isn't 127.0.0.1, ::1, or localhost.
-  describe("loopback host enforcement (F10)", () => {
+  describe("loopback host enforcement", () => {
     test("accepts 127.0.0.1 with port", async () => {
       const result = await detectNestedSession(
         { [PROD_SESSION_ENV_VAR]: "127.0.0.1:54321" },

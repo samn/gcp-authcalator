@@ -219,28 +219,11 @@ export async function startGateServer(
     pendingQueue,
   };
 
-  // Tight default umask while creating sockets: Bun.serve picks up the
-  // umask when binding the AF_UNIX socket file. With the default 0o022
-  // the bind() lands at ~0o755, which is then chmod'd to 0o600 a moment
-  // later — that's a brief window during which the socket file mode is
-  // looser than intended. 0o077 makes the bound mode 0o700, closing
-  // the gap. We don't restore the umask: the gate process is dedicated
-  // to gate work, never makes files visible to other users.
+  // Bun.serve binds the AF_UNIX socket using the inherited umask, so a
+  // tight one closes the window between bind and the explicit chmod.
   process.umask(0o077);
 
-  // Ensure the socket directory exists with owner-only permissions
-  // (0o700). For $XDG_RUNTIME_DIR the directory already exists; for the
-  // ~/.gcp-authcalator fallback this creates it. ensurePrivateDir
-  // refuses to use a directory that is a symlink, owned by another
-  // uid, or has loose permissions — closing the
-  // mkdirSync({recursive:true}) silently-succeeds-on-existing-dir
-  // footgun.
   const socketDir = dirname(config.socket_path);
-  // $XDG_RUNTIME_DIR is itself the socket dir for the default config
-  // and is already 0o700 owned by the user — but our verification
-  // refuses if any group/other bits are set, which is the usual
-  // invariant for that directory. If the user has a non-default
-  // socket_path we still apply the same rule.
   ensurePrivateDir(socketDir, 0o700);
 
   await cleanStaleSocket(config.socket_path, "socket", { probeForRunning: true });
@@ -280,9 +263,6 @@ export async function startGateServer(
   }
 
   // --- Admin socket (for approve/deny — NOT mounted into containers) ---
-  // The default admin socket lives under $XDG_RUNTIME_DIR (already 0o700
-  // owned by the user). For non-default paths the same invariant is
-  // enforced by ensurePrivateDir.
   const adminSocketDir = dirname(config.admin_socket_path);
   ensurePrivateDir(adminSocketDir, 0o700);
 
@@ -312,13 +292,9 @@ export async function startGateServer(
       );
     }
 
-    // F3: when the operator socket is enabled the agent UID guardrails
-    // depend on /etc/group / /etc/passwd lookups. NSS-managed (LDAP/SSSD)
-    // users are not visible to those parsers, which would silently turn
-    // the "agent UID is not in operator group" check into a no-op. Refuse
-    // to start unless the agent UID is present in /etc/passwd so an
-    // operator who relies on NSS gets a clear error instead of a silent
-    // bypass of the guardrail.
+    // The operator-group guardrail (next call) consults /etc/passwd +
+    // /etc/group directly; NSS/LDAP/SSSD users are invisible to it and
+    // would silently bypass the check. Refuse to start in that case.
     if (!isUidInPasswd(agentUid, unixDb)) {
       throw new Error(
         `gate: agent_uid (${agentUid}) is not present in /etc/passwd. ` +

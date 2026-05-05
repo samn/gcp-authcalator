@@ -13,32 +13,24 @@ export interface NestedSessionInfo {
 }
 
 /**
- * Verify a `host:port` value points to a loopback address.
- *
- * The metadataHost from `GCP_AUTHCALATOR_PROD_SESSION` is set by a
- * trusted parent `with-prod`, but env vars are inherited by anything in
- * the process tree — a same-UID attacker could plant a sentinel
- * pointing at an attacker-controlled remote server, then wait for the
- * legitimate user to run `with-prod` again. Letting that through would
- * silently redirect the wrapped command's metadata traffic off-host.
- *
- * Accept only literal loopback hosts. Hostnames are not resolved here
- * — DNS could be attacker-controlled too.
+ * Accept only literal loopback hosts (127.0.0.1, ::1, localhost). DNS
+ * is intentionally NOT resolved — a same-UID attacker who plants a
+ * non-loopback value in the env could otherwise redirect the wrapped
+ * command's metadata traffic off-host.
  */
 function isLoopbackHost(metadataHost: string): boolean {
-  // Strip port. URL parsing is overkill since this isn't a full URL.
-  // Bracketed IPv6: [::1]:8080
-  let host = metadataHost;
-  if (host.startsWith("[")) {
-    const close = host.indexOf("]");
-    if (close === -1) return false;
-    host = host.slice(1, close);
-  } else {
-    const colon = host.lastIndexOf(":");
-    if (colon !== -1) host = host.slice(0, colon);
+  let hostname: string;
+  try {
+    hostname = new URL(`http://${metadataHost}`).hostname.toLowerCase();
+  } catch {
+    return false;
   }
-  host = host.toLowerCase();
-  return host === "127.0.0.1" || host === "::1" || host === "localhost";
+  return (
+    hostname === "127.0.0.1" ||
+    hostname === "[::1]" ||
+    hostname === "::1" ||
+    hostname === "localhost"
+  );
 }
 
 /**

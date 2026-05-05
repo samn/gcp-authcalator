@@ -600,9 +600,7 @@ describe("createConfirmModule", () => {
     });
   });
 
-  // F8: every operator-visible string passes through stripControlChars
-  // before reaching the dialog or pending queue.
-  describe("control-character sanitisation (F8)", () => {
+  describe("control-character sanitisation", () => {
     test("strips control characters from email in zenity --text", async () => {
       let capturedCmd: string[] = [];
       const spawnFn = (cmd: string[]) => {

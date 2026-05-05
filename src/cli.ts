@@ -12,11 +12,7 @@ import { runApprove } from "./commands/approve.ts";
 import { captureAndDeleteTlsBundleEnv } from "./tls/bundle.ts";
 import packageJson from "../package.json";
 
-// Capture the TLS client bundle env var into a module-private slot and
-// delete it from process.env BEFORE any subprocess can inherit it. This
-// runs at module load — earlier than main() — so that even the
-// `getCommitSha` call below (which spawns `git`) does not leak the bundle
-// via /proc/<pid>/environ.
+// Run before any code below that may spawn a subprocess (e.g. getCommitSha).
 captureAndDeleteTlsBundleEnv();
 
 const VERSION = packageJson.version;

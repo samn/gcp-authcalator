@@ -233,12 +233,8 @@ export async function runWithProd(
   }
   console.log(`with-prod: prod access acquired for ${initialEmail}`);
 
-  // F5: tighten umask while we create the token-bearing files so that
-  // mkdtempSync / writeFileSync land at 0o700 / 0o600 immediately,
-  // without a window in which they're looser. Restore the user's
-  // original umask before spawning the wrapped command — the child is
-  // arbitrary code and shouldn't inherit a tightened umask that could
-  // surprise it.
+  // Tighten umask only around the token-bearing file creation below.
+  // The wrapped child should not inherit it — restore before spawn.
   const previousUmask = process.umask(0o077);
 
   // Step 2: Create an isolated gcloud config directory BEFORE the token
@@ -256,9 +252,6 @@ export async function runWithProd(
     { mode: 0o600 },
   );
 
-  // Restore the operator's original umask before anything else runs:
-  // the wrapped child inherits process.umask, and tightening it might
-  // break legitimate file-creation patterns in the user's command.
   process.umask(previousUmask);
 
   // Step 3: Create a token provider that auto-refreshes from the gate.

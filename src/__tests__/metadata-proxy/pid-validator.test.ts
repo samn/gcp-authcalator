@@ -11,8 +11,8 @@ const TCP_HEADER =
 
 /**
  * Build a /proc/net/tcp line. port and inode are decimal, IP is always
- * 127.0.0.1. State defaults to "01" (TCP_ESTABLISHED) since the PID
- * validator now filters out non-ESTABLISHED rows (F7).
+ * 127.0.0.1. State defaults to "01" (TCP_ESTABLISHED) — the validator
+ * filters out non-ESTABLISHED rows.
  */
 function tcpLine(slot: number, port: number, inode: number, state: string = "01"): string {
   const portHex = port.toString(16).toUpperCase().padStart(4, "0");
@@ -187,9 +187,6 @@ describe("getOwnerPid", () => {
     expect(getOwnerPid(7070, fs)).toBe(20);
   });
 
-  // F7: only ESTABLISHED rows are considered. LISTEN / CLOSE_WAIT etc.
-  // share local-address/port with concurrent connections briefly and
-  // would otherwise be matched first, returning the wrong inode.
   test("ignores TCP_LISTEN rows (state 0A)", () => {
     const fs = fakeProcFS({
       sockets: [

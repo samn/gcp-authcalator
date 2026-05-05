@@ -111,11 +111,8 @@ function findInodeInFile(path: string, localAddrTarget: string, fs: ProcFS): num
     const localAddr = fields[1]!.toUpperCase();
     if (localAddr !== localAddrTarget) continue;
 
-    // F7: only ESTABLISHED rows reflect a live connection from a process
-    // the validator can attribute. LISTEN, TIME_WAIT and CLOSE_WAIT rows
-    // can share the same local 5-tuple shape transiently and would
-    // otherwise be picked up first, returning the inode of an
-    // unrelated socket.
+    // LISTEN / TIME_WAIT / CLOSE_WAIT rows can share the same local
+    // 5-tuple as a live connection; only ESTABLISHED is attributable.
     const state = fields[3]!.toUpperCase();
     if (state !== TCP_ESTABLISHED) continue;
 

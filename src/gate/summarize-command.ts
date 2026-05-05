@@ -8,6 +8,7 @@
 // ---------------------------------------------------------------------------
 
 import { basename } from "node:path";
+import { stripControlChars } from "./sanitize.ts";
 
 /** Maximum length for the full summarized command string. */
 const MAX_SUMMARY_LENGTH = 80;
@@ -22,12 +23,6 @@ const MAX_SUMMARY_LENGTH = 80;
 const SECRET_VALUE_RE = /^[A-Za-z0-9+/=_-]{40,}$/;
 const SECRET_KEY_RE =
   /^-*(?:.*(?:password|passwd|secret|token|key|credential|auth|api[_-]?key|private).*)[=:]/i;
-
-/** Strip control characters (newlines, tabs, etc.) that could manipulate dialog layout. */
-function stripControlChars(s: string): string {
-  // eslint-disable-next-line no-control-regex
-  return s.replace(/[\u0000-\u001f\u007f]/g, " ");
-}
 
 /** Redact an argument if it looks like a secret value. */
 function redactArg(arg: string): string {

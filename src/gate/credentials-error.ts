@@ -11,6 +11,7 @@
  */
 
 import { hostname as osHostname } from "node:os";
+import { stripControlChars } from "./sanitize.ts";
 
 /** Discriminator value emitted in JSON error responses (`{code}`). */
 export const CREDENTIALS_EXPIRED_CODE = "credentials_expired";
@@ -32,8 +33,7 @@ const MAX_MESSAGE_LENGTH = 1024;
  * sanitisation in `summarize-command.ts`.
  */
 function sanitizeMessage(s: string): string {
-  // eslint-disable-next-line no-control-regex
-  const stripped = s.replace(/[\u0000-\u001f\u007f]/g, " ");
+  const stripped = stripControlChars(s);
   if (stripped.length <= MAX_MESSAGE_LENGTH) return stripped;
   return `${stripped.slice(0, MAX_MESSAGE_LENGTH - 1)}…`;
 }
