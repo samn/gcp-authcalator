@@ -18,11 +18,11 @@ describe("createAuditModule", () => {
     expect(existsSync(logDir)).toBe(true);
   });
 
-  test("creates log directory with owner-only permissions (0o700)", () => {
+  test("creates log directory with 0o750 permissions (group-traversable)", () => {
     const logDir = join(tempDir, "private-dir");
     createAuditModule(logDir);
     const mode = statSync(logDir).mode & 0o777;
-    expect(mode).toBe(0o700);
+    expect(mode).toBe(0o750);
   });
 
   test("writes a single audit entry as JSON line", () => {

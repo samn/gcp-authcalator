@@ -9,9 +9,17 @@ project_id = "my-gcp-project"
 # Service account email to impersonate for dev tokens (required for `gate`)
 service_account = "dev-runner@my-gcp-project.iam.gserviceaccount.com"
 
-# Path to the Unix domain socket shared between host and container
+# Path to the Unix domain socket shared between host and container.
 # Default: $XDG_RUNTIME_DIR/gcp-authcalator.sock
 # (or ~/.gcp-authcalator/gcp-authcalator.sock if XDG_RUNTIME_DIR is unset)
+#
+# The socket is created mode 0660, group-owned by the gate UID's primary
+# group. The containing directory is set to 0750 — except when it is
+# $XDG_RUNTIME_DIR itself, which the gate leaves at the system-managed 0700
+# per the XDG spec. To grant a different-UID agent (e.g. a `the-robot` user
+# in a dev container) access to the main socket, place socket_path in a
+# directory the gate manages (e.g. ~/.gcp-authcalator/) and add the agent
+# user to the gate UID's primary group.
 # socket_path = "/run/user/1000/gcp-authcalator.sock"
 
 # Path to the admin socket for approve/deny commands (not mounted into containers)

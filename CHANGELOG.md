@@ -72,6 +72,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Main gate socket is now mode `0660` (group-readable) in a `0750`
+  directory, instead of `0600` in a `0700` directory.** A different-UID
+  agent that shares the gate UID's primary group (e.g. a `the-robot`
+  user in a dev container, added to the operator's primary group) can
+  now connect to the main socket without a post-create `chmod` step.
+  On Linux distros with per-user primary groups (UPG; default on
+  Debian/Ubuntu/RHEL/Arch/etc.), the gate UID's primary group contains
+  only the gate UID itself, so this is _effectively_ `0600` — no
+  change in who can connect. The privileged operator socket stays
+  `0600` in UID mode (kernel-blocks any non-gate UID, including agents
+  in the primary group). The `$XDG_RUNTIME_DIR` directory itself
+  (system-managed, shared with other apps) is left at `0700` per the
+  XDG spec — group access requires placing `socket_path` in a
+  gate-managed directory like `~/.gcp-authcalator/`.
 - **Config precedence change (BREAKING for callers that relied on env
   vars overriding `--flag`).** Was `env > CLI > TOML > defaults`;
   is now `CLI > env > TOML > defaults`, matching universal CLI

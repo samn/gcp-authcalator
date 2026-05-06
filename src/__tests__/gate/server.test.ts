@@ -261,9 +261,10 @@ setInterval(() => {}, 1000);`;
     );
   });
 
-  test("sets socket permissions to 0600 (owner-only)", async () => {
+  test("sets socket to 0660 in a 0750 directory", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "gate-srv-"));
-    const socketPath = join(tempDir, "gate.sock");
+    const socketDir = join(tempDir, "gate-dir");
+    const socketPath = join(socketDir, "gate.sock");
     const config = makeConfig(socketPath);
 
     result = await startGateServer(config, {
@@ -275,10 +276,9 @@ setInterval(() => {}, 1000);`;
       auditLogDir: join(tempDir, "audit"),
     });
 
-    const stats = statSync(socketPath);
-    // mode includes file-type bits; mask with 0o777 to get permission bits only
-    const permissions = stats.mode & 0o777;
-    expect(permissions).toBe(0o600);
+    const sockStats = statSync(socketPath);
+    expect(sockStats.mode & 0o777).toBe(0o660);
+    expect(statSync(socketDir).mode & 0o777).toBe(0o750);
   });
 
   test("stop() cleans up socket file", async () => {
@@ -460,8 +460,8 @@ describe("operator socket", () => {
     const stats = statSync(config.operator_socket_path!);
     expect(stats.mode & 0o777).toBe(0o660);
 
-    // Main socket still 0600, unaffected.
-    expect(statSync(config.socket_path).mode & 0o777).toBe(0o600);
+    // Main socket is 0660 (group access via the gate UID's primary group).
+    expect(statSync(config.socket_path).mode & 0o777).toBe(0o660);
   });
 
   test("operator socket auto-approves allowlisted PAM policy", async () => {
@@ -652,7 +652,11 @@ describe("operator socket — UID mode (no group)", () => {
     }
   });
 
-  test("creates 0600 socket owned by gate UID in a 0700 directory", async () => {
+  // UID-mode operator socket stays 0o600 (kernel blocks any non-gate UID),
+  // even though the containing dir is 0o750 (group-traversable so the agent
+  // can reach the main socket sitting alongside it). Group members can
+  // listdir but the operator socket's 0o600 still blocks connect().
+  test("creates 0600 socket owned by gate UID in a 0750 directory", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "gate-op-uid-"));
     const operatorSocketDir = join(tempDir, "op-dir");
     const config = uidModeConfig(tempDir, {
@@ -667,7 +671,7 @@ describe("operator socket — UID mode (no group)", () => {
     const sockStats = statSync(config.operator_socket_path!);
     expect(sockStats.mode & 0o777).toBe(0o600);
     expect(sockStats.uid).toBe(process.getuid!());
-    expect(statSync(operatorSocketDir).mode & 0o777).toBe(0o700);
+    expect(statSync(operatorSocketDir).mode & 0o777).toBe(0o750);
   });
 
   test("refuses to start when agent_uid equals gate uid", async () => {

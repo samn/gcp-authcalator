@@ -20,7 +20,7 @@ import {
   getGroupsForUid,
   isUidInPasswd,
 } from "./unix-group.ts";
-import { ensurePrivateDir } from "./dir-utils.ts";
+import { ensurePrivateDir, chooseSocketDirMode } from "./dir-utils.ts";
 
 // Bun's max idleTimeout (255s). Prod flows (POST /session, GET /token?level=prod)
 // can wait on the pending-approval queue (120s) and PAM grant polling (120s)
@@ -104,8 +104,6 @@ async function cleanStaleSocket(
 interface OperatorSocketAccess {
   /** Socket file mode (0o600 in UID mode, 0o660 in group mode). */
   sockMode: number;
-  /** Containing-directory mode (0o700 in UID mode, 0o750 in group mode). */
-  dirMode: number;
   /** Group GID for chown; undefined in UID mode (no group ownership). */
   gid: number | undefined;
 }
@@ -123,7 +121,7 @@ function resolveOperatorSocketAccess(
   unixDb: ReturnType<typeof loadUnixGroupDb>,
 ): OperatorSocketAccess {
   if (!groupName) {
-    return { sockMode: 0o600, dirMode: 0o700, gid: undefined };
+    return { sockMode: 0o600, gid: undefined };
   }
   const grp = lookupGroup(groupName, unixDb);
   if (!grp) {
@@ -150,7 +148,7 @@ function resolveOperatorSocketAccess(
         `Remove the agent uid from the group, or unset operator_socket_path.`,
     );
   }
-  return { sockMode: 0o660, dirMode: 0o750, gid: grp.gid };
+  return { sockMode: 0o660, gid: grp.gid };
 }
 
 export async function startGateServer(
@@ -237,7 +235,7 @@ export async function startGateServer(
   process.umask(0o077);
 
   const socketDir = dirname(config.socket_path);
-  ensurePrivateDir(socketDir, 0o700);
+  ensurePrivateDir(socketDir, chooseSocketDirMode(socketDir));
 
   await cleanStaleSocket(config.socket_path, "socket", { probeForRunning: true });
 
@@ -249,10 +247,12 @@ export async function startGateServer(
     },
   });
 
-  // Restrict socket to owner-only access (rw-------).
-  // This is the primary security boundary — without it any local user can
-  // connect and request tokens.
-  chmodSync(config.socket_path, 0o600);
+  // Group-readable socket (rw-rw----): a different-UID agent in the gate
+  // UID's primary group can connect. On systems with per-user primary
+  // groups (Linux UPG, default on modern distros) this is effectively
+  // owner-only. The directory's traversal mode (chooseSocketDirMode)
+  // additionally controls whether group reaches the socket at all.
+  chmodSync(config.socket_path, 0o660);
 
   // Optional TCP+mTLS server for remote devcontainer support
   let tcpServer: ReturnType<typeof Bun.serve> | undefined;
@@ -277,7 +277,7 @@ export async function startGateServer(
 
   // --- Admin socket (for approve/deny — NOT mounted into containers) ---
   const adminSocketDir = dirname(config.admin_socket_path);
-  ensurePrivateDir(adminSocketDir, 0o700);
+  ensurePrivateDir(adminSocketDir, chooseSocketDirMode(adminSocketDir));
 
   await cleanStaleSocket(config.admin_socket_path, "admin socket");
 
@@ -308,7 +308,7 @@ export async function startGateServer(
     const access = resolveOperatorSocketAccess(config.operator_socket_group, agentUid, unixDb);
 
     const operatorSocketDir = dirname(config.operator_socket_path);
-    ensurePrivateDir(operatorSocketDir, access.dirMode);
+    ensurePrivateDir(operatorSocketDir, chooseSocketDirMode(operatorSocketDir));
     if (access.gid !== undefined) {
       chownSync(operatorSocketDir, gateUid, access.gid);
     }

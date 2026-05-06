@@ -1,6 +1,20 @@
 import { mkdirSync, lstatSync, chmodSync } from "node:fs";
 
 /**
+ * Mode for socket / runtime directories. 0o750 lets a different-UID agent
+ * that shares the gate UID's primary group reach the main socket; the kernel
+ * still enforces per-socket access via file mode (0o660 main / 0o600 operator
+ * in UID mode), so this only affects listdir / traversal, not connect().
+ *
+ * Carve-out: $XDG_RUNTIME_DIR is system-managed and required to be 0o700 by
+ * spec, and is shared with other apps. Don't widen it — group access requires
+ * placing the socket path outside $XDG_RUNTIME_DIR.
+ */
+export function chooseSocketDirMode(dir: string): number {
+  return dir === process.env.XDG_RUNTIME_DIR ? 0o700 : 0o750;
+}
+
+/**
  * Create `dir` at exactly `mode`, or verify+chmod an existing directory.
  *
  * `mkdirSync({recursive:true,mode})` silently no-ops `mode` on a
