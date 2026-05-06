@@ -74,6 +74,33 @@ describe("Metadata-Flavor header validation", () => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /computeMetadata/v1/instance
+// ---------------------------------------------------------------------------
+
+describe("GET /computeMetadata/v1/instance", () => {
+  test("returns 200 with directory listing of available subpaths", async () => {
+    const res = await handleRequest(metadataRequest("/computeMetadata/v1/instance"), makeDeps());
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toBe("text/plain");
+    expect(res.headers.get("Metadata-Flavor")).toBe("Google");
+    expect(await res.text()).toBe("service-accounts/\n");
+  });
+
+  test("trailing slash variant resolves to the same handler", async () => {
+    const res = await handleRequest(metadataRequest("/computeMetadata/v1/instance/"), makeDeps());
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("service-accounts/\n");
+  });
+
+  test("returns 403 without Metadata-Flavor request header", async () => {
+    const res = await handleRequest(makeRequest("/computeMetadata/v1/instance"), makeDeps());
+    expect(res.status).toBe(403);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // GET /computeMetadata/v1/instance/service-accounts/default/token
 // ---------------------------------------------------------------------------
 

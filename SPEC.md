@@ -201,6 +201,11 @@ Both token endpoints accept an optional `scopes` query parameter (comma-separate
 A minimal HTTP server implementing the GCE metadata server protocol (using data from the gcp-gate):
 
 ```
+GET /computeMetadata/v1/instance
+  → directory listing ("service-accounts/") — minimal stub that lets
+    `gcp-metadata isAvailable()` (used by google-auth-library and
+    firebase-admin) detect the proxy as a GCE-style metadata server
+
 GET /computeMetadata/v1/instance/service-accounts/default/token
   → {"access_token": "ya29...", "expires_in": 3600, "token_type": "Bearer"}
 
