@@ -49,12 +49,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   TIME_WAIT / CLOSE_WAIT rows that share a local-address tuple with
   the connection of interest are no longer matched, removing an
   inode-collision class of misattribution. (F7)
-- The gate refuses to start with `operator_socket_path` set when the
-  resolved `agent_uid` is not present in `/etc/passwd`. NSS-managed
-  (LDAP/SSSD) users were silently invisible to the
+- In **group mode** (`operator_socket_group` set), the gate refuses to
+  start when the resolved `agent_uid` is not present in `/etc/passwd`.
+  NSS-managed (LDAP/SSSD) users were silently invisible to the
   "agent UID is not in operator group" guardrail; the new error
-  surfaces the misconfiguration instead of letting it slip
-  through. (F3)
+  surfaces the misconfiguration instead of letting it slip through.
+  UID mode is unaffected: its trust boundary is the kernel-enforced
+  `0600` socket owned by the gate UID, which does not need to
+  enumerate the agent's group memberships, so containerized agents
+  whose UID exists only inside the container continue to work. (F3)
 - Email and PAM-policy strings displayed in the confirmation dialog
   are now run through the same control-character stripper as command
   summaries before reaching zenity / osascript / the terminal prompt

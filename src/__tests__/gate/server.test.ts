@@ -1,5 +1,12 @@
 import { describe, expect, test, afterEach } from "bun:test";
-import { mkdtempSync, existsSync, writeFileSync, statSync, symlinkSync } from "node:fs";
+import {
+  mkdtempSync,
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  statSync,
+  symlinkSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { startGateServer, type GateServerResult } from "../../gate/server.ts";
@@ -7,6 +14,23 @@ import type { GateConfig } from "../../config.ts";
 import type { AuthClient } from "google-auth-library";
 import type { BunRequestInit } from "../../gate/connection.ts";
 import { execSync } from "node:child_process";
+
+/** Pick a UID that is not present in /etc/passwd on this host. */
+function uidAbsentFromPasswd(): number {
+  const present = new Set<number>();
+  for (const line of readFileSync("/etc/passwd", "utf-8").split("\n")) {
+    const fields = line.split(":");
+    if (fields.length >= 4) {
+      const uid = Number(fields[2]);
+      if (Number.isInteger(uid)) present.add(uid);
+    }
+  }
+  // Walk down from a high value; nsswitch typically reserves the bottom range.
+  for (let candidate = 4_000_000_000; candidate > 1_000_000; candidate--) {
+    if (!present.has(candidate)) return candidate;
+  }
+  throw new Error("could not find a UID absent from /etc/passwd");
+}
 
 function mockClient(token: string): AuthClient {
   return {
@@ -542,6 +566,28 @@ describe("operator socket", () => {
     ).rejects.toThrow(/equals gate uid/);
   });
 
+  test("refuses to start when agent_uid is not in /etc/passwd", async () => {
+    const { groupName } = operatorGroupForCurrentUser();
+    const tempDir = mkdtempSync(join(tmpdir(), "gate-op-"));
+    const config: GateConfig = {
+      ...makeConfig(join(tempDir, "gate.sock"), join(tempDir, "admin.sock")),
+      operator_socket_path: join(tempDir, "operator.sock"),
+      operator_socket_group: groupName,
+      agent_uid: uidAbsentFromPasswd(),
+    };
+
+    await expect(
+      startGateServer(config, {
+        authOptions: {
+          sourceClient: mockClient("source-tok"),
+          impersonatedClient: mockClient("dev-tok"),
+          fetchFn: mockFetch("test@example.com"),
+        },
+        auditLogDir: join(tempDir, "audit"),
+      }),
+    ).rejects.toThrow(/not present in \/etc\/passwd/);
+  });
+
   test("refuses to start when operator socket path is a symlink", async () => {
     const { groupName, agentUid } = operatorGroupForCurrentUser();
     const tempDir = mkdtempSync(join(tmpdir(), "gate-op-"));
@@ -634,5 +680,21 @@ describe("operator socket — UID mode (no group)", () => {
         auditLogDir: join(tempDir, "audit"),
       }),
     ).rejects.toThrow(/equals gate uid/);
+  });
+
+  // UID mode does not enumerate the agent's groups (the kernel-enforced 0600
+  // owner-only socket is the boundary), so a UID that is absent from
+  // /etc/passwd — typical for a containerized agent whose UID lives only in
+  // the container — must not block startup.
+  test("starts when agent_uid is not in /etc/passwd", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "gate-op-uid-"));
+    const config = uidModeConfig(tempDir, { agent_uid: uidAbsentFromPasswd() });
+
+    result = await startGateServer(config, {
+      authOptions: UID_MODE_AUTH_OPTIONS,
+      auditLogDir: join(tempDir, "audit"),
+    });
+
+    expect(existsSync(config.operator_socket_path!)).toBe(true);
   });
 });

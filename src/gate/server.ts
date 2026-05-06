@@ -131,6 +131,19 @@ function resolveOperatorSocketAccess(
       `gate: operator socket group '${groupName}' not found in /etc/group — refusing to start`,
     );
   }
+  // getGroupsForUid silently returns [] for any UID not in /etc/passwd, which
+  // would make the membership check below a no-op for NSS/LDAP/SSSD users.
+  // Refuse to start rather than silently bypass the guardrail.
+  if (!isUidInPasswd(agentUid, unixDb)) {
+    throw new Error(
+      `gate: agent_uid (${agentUid}) is not present in /etc/passwd. ` +
+        `In group mode the gate must enumerate the agent's group memberships ` +
+        `to verify it is not in operator group '${grp.name}', and that lookup ` +
+        `consults /etc/passwd and /etc/group directly — NSS/LDAP/SSSD-managed ` +
+        `users are not visible. Pass a numeric UID that exists in /etc/passwd, ` +
+        `or switch to UID mode (unset operator_socket_group).`,
+    );
+  }
   if (getGroupsForUid(agentUid, unixDb).includes(grp.gid)) {
     throw new Error(
       `gate: agent uid ${agentUid} is a member of operator group '${grp.name}' (gid ${grp.gid}) — refusing to start. ` +
@@ -289,20 +302,6 @@ export async function startGateServer(
     if (agentUid === gateUid) {
       throw new Error(
         `gate: agent_uid (${agentUid}) equals gate uid — operator-socket trust boundary cannot exist`,
-      );
-    }
-
-    // The operator-group guardrail (next call) consults /etc/passwd +
-    // /etc/group directly; NSS/LDAP/SSSD users are invisible to it and
-    // would silently bypass the check. Refuse to start in that case.
-    if (!isUidInPasswd(agentUid, unixDb)) {
-      throw new Error(
-        `gate: agent_uid (${agentUid}) is not present in /etc/passwd. ` +
-          `gcp-authcalator's operator-socket guardrails (agent UID is not the gate UID, ` +
-          `agent UID is not a member of the operator group in group mode) consult ` +
-          `/etc/passwd and /etc/group directly — NSS/LDAP/SSSD-managed users are not ` +
-          `visible to them. Pass a numeric UID that exists in /etc/passwd, or do not ` +
-          `enable the operator socket for NSS-managed agent users.`,
       );
     }
 

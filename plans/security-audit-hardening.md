@@ -38,18 +38,24 @@ trust boundary depends on these dir permissions.
 Apply at every `mkdirSync` for socket dirs (gate main/admin/operator),
 the audit log dir, the with-prod runtime dir, and the TLS dir.
 
-### F3 — Refuse to start when `agent_uid` is not in `/etc/passwd` and operator socket is enabled
+### F3 — Refuse to start in **group mode** when `agent_uid` is not in `/etc/passwd`
 
 **Why:** `getGroupsForUid` in `src/gate/unix-group.ts` returns `[]` for
 any UID that doesn't appear in `/etc/passwd`, silently making the
 "agent UID is not in operator group" guardrail a no-op for NSS/LDAP
 users.
 
-**Change:** When `operator_socket_path` is set, require that the
-resolved `agent_uid` is present in `/etc/passwd`. If not, refuse to
-start with an actionable error suggesting the user run `id -u <name>`
-and pass the numeric UID, or stop using NSS-managed users for the
-agent.
+**Change:** When `operator_socket_group` is set (group mode), require
+that the resolved `agent_uid` is present in `/etc/passwd`. If not,
+refuse to start with an actionable error suggesting the user run
+`id -u <name>` and pass the numeric UID, switch to UID mode, or stop
+using NSS-managed users for the agent.
+
+**Scope:** UID mode is unaffected — its trust boundary is the
+kernel-enforced `0600` socket owned by the gate UID, which never
+enumerates the agent's group memberships. Containerized agents whose
+UIDs live only inside the container (typical dev-container setup) are
+intentionally allowed under UID mode.
 
 ### F4 — Capture and delete `GCP_AUTHCALATOR_TLS_BUNDLE_B64` at the very first line of `main()`
 
