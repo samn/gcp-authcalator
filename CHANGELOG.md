@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [0.9.2] - 2026-05-05
+
 ### Added
 
 - `/computeMetadata/v1/instance` endpoint for compatibility with
