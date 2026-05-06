@@ -342,6 +342,7 @@ Set `GCE_METADATA_HOST=127.0.0.1:8173 GCE_METADATA_IP=127.0.0.1:8173 GCE_METADAT
 | Path                                                               | Response                               | `Metadata-Flavor: Google` required? |
 | ------------------------------------------------------------------ | -------------------------------------- | ----------------------------------- |
 | `GET /`                                                            | `200 ok` (detection ping)              | No                                  |
+| `GET /computeMetadata/v1/instance`                                 | Directory listing for GCE detection    | Yes                                 |
 | `GET /computeMetadata/v1/instance/service-accounts/default/token`  | Token JSON                             | Yes                                 |
 | `GET /computeMetadata/v1/project/project-id`                       | Plain text project ID                  | Yes                                 |
 | `GET /computeMetadata/v1/project/numeric-project-id`               | Plain text numeric project ID          | Yes                                 |

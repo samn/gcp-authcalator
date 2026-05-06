@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- `/computeMetadata/v1/instance` endpoint for compatibility with
+  `gcp-metadata`'s `isAvailable()` detection probe (used by
+  `google-auth-library` and `firebase-admin`). Returns a minimal
+  directory listing so client libraries recognise the proxy as a
+  GCE-style metadata server.
+
 ## [0.9.1] - 2026-05-05
 
 ### Fixed

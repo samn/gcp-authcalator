@@ -71,6 +71,8 @@ export async function handleRequest(req: Request, deps: MetadataProxyDeps): Prom
     }
 
     switch (pathname) {
+      case "/computeMetadata/v1/instance":
+        return textResponse("service-accounts/\n");
       case "/computeMetadata/v1/instance/service-accounts/default/token":
         return handleToken(deps);
       case "/computeMetadata/v1/project/project-id":
