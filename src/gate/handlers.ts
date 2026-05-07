@@ -1,5 +1,6 @@
 import {
   SESSION_NOT_PERMITTED_CODE,
+  type CachedToken,
   type GateDeps,
   type TokenResponse,
   type SessionResponse,
@@ -179,16 +180,18 @@ async function handleSessionTokenRefresh(
     // at session creation so renewed grants carry the same justification
     // as the initial grant in the GCP PAM audit log.
     let pamAuditFields: Pick<AuditEntry, "pam_grant" | "pam_cached"> = {};
+    let pamGrantExpiresAt: Date | undefined;
     if (session.pamPolicy && deps.ensurePamGrant) {
       const grantResult = await deps.ensurePamGrant(session.pamPolicy, session.commandSummary);
       pamAuditFields = {
         pam_grant: grantResult.name,
         pam_cached: grantResult.cached,
       };
+      pamGrantExpiresAt = grantResult.expiresAt;
     }
 
     const cached = await deps.mintProdToken(session.scopes, session.ttlSeconds);
-    const expiresIn = Math.max(0, Math.floor((cached.expires_at.getTime() - Date.now()) / 1000));
+    const expiresIn = expiresInClampedToGrant(cached, pamGrantExpiresAt);
 
     const body: TokenResponse = {
       access_token: cached.access_token,
@@ -271,6 +274,12 @@ interface ProdAccessGrant {
   /** Redacted, length-bounded summary of the wrapped command, if any. */
   commandSummary?: string;
   pamAuditFields: Pick<AuditEntry, "pam_grant" | "pam_cached">;
+  /**
+   * Computed PAM grant expiry, when a grant was acquired. Callers must clamp
+   * any minted access token to this value so the metadata-proxy cache cannot
+   * keep serving a token after its underlying authorization ends.
+   */
+  pamGrantExpiresAt?: Date;
   auditBase: Pick<
     AuditEntry,
     | "endpoint"
@@ -281,6 +290,21 @@ interface ProdAccessGrant {
     | "auto_approved"
     | "command"
   >;
+}
+
+/**
+ * Compute the `expires_in` to advertise for a minted prod token, clamped to
+ * the PAM grant's expiry when one is present. Without this clamp the
+ * metadata-proxy's caching token provider would keep serving a still-valid
+ * bearer token long after the grant ended, surfacing as opaque "access
+ * denied" errors at the GCP API.
+ */
+function expiresInClampedToGrant(token: CachedToken, grantExpiresAt: Date | undefined): number {
+  const effective =
+    grantExpiresAt && grantExpiresAt.getTime() < token.expires_at.getTime()
+      ? grantExpiresAt
+      : token.expires_at;
+  return Math.max(0, Math.floor((effective.getTime() - Date.now()) / 1000));
 }
 
 /**
@@ -406,12 +430,14 @@ async function acquireProdAccess(
 
     // Request PAM grant if a policy is configured
     let pamAuditFields: Pick<AuditEntry, "pam_grant" | "pam_cached"> = {};
+    let pamGrantExpiresAt: Date | undefined;
     if (effectivePamPolicy && deps.ensurePamGrant) {
       const grantResult = await deps.ensurePamGrant(effectivePamPolicy, commandSummary);
       pamAuditFields = {
         pam_grant: grantResult.name,
         pam_cached: grantResult.cached,
       };
+      pamGrantExpiresAt = grantResult.expiresAt;
     }
 
     const grantedAuditBase = autoApprove ? { ...auditBase, auto_approved: true } : auditBase;
@@ -420,6 +446,7 @@ async function acquireProdAccess(
       effectivePamPolicy,
       commandSummary,
       pamAuditFields,
+      pamGrantExpiresAt,
       auditBase: grantedAuditBase,
     };
   } catch (err) {
@@ -455,7 +482,7 @@ async function handleProdToken(
 
   try {
     const cached = await deps.mintProdToken(scopes, ttlSeconds);
-    const expiresIn = Math.max(0, Math.floor((cached.expires_at.getTime() - Date.now()) / 1000));
+    const expiresIn = expiresInClampedToGrant(cached, grant.pamGrantExpiresAt);
 
     deps.prodRateLimiter.release("granted");
 
@@ -569,7 +596,7 @@ async function handleCreateSession(
   try {
     // Mint the initial token
     const cached = await deps.mintProdToken(scopes, ttlResult.ttlSeconds);
-    const expiresIn = Math.max(0, Math.floor((cached.expires_at.getTime() - Date.now()) / 1000));
+    const expiresIn = expiresInClampedToGrant(cached, grant.pamGrantExpiresAt);
 
     // Create the session
     const effectiveTokenTtl = ttlResult.ttlSeconds ?? deps.defaultTokenTtlSeconds;

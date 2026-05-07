@@ -541,7 +541,12 @@ describe("GET /token?level=prod with PAM", () => {
       pamAllowedPolicies: new Set(["my-policy"]),
       ensurePamGrant: async (path) => {
         capturedPath = path;
-        return { name: "grants/g1", state: "ACTIVATED", cached: false };
+        return {
+          name: "grants/g1",
+          state: "ACTIVATED",
+          expiresAt: new Date(Date.now() + 3600 * 1000),
+          cached: false,
+        };
       },
     });
 
@@ -556,7 +561,12 @@ describe("GET /token?level=prod with PAM", () => {
       pamAllowedPolicies: new Set(["default-entitlement"]),
       ensurePamGrant: async (path) => {
         capturedPath = path;
-        return { name: "grants/g1", state: "ACTIVATED", cached: false };
+        return {
+          name: "grants/g1",
+          state: "ACTIVATED",
+          expiresAt: new Date(Date.now() + 3600 * 1000),
+          cached: false,
+        };
       },
     });
 
@@ -571,7 +581,12 @@ describe("GET /token?level=prod with PAM", () => {
       pamAllowedPolicies: new Set(["default-entitlement", "override-entitlement"]),
       ensurePamGrant: async (path) => {
         capturedPath = path;
-        return { name: "grants/g1", state: "ACTIVATED", cached: false };
+        return {
+          name: "grants/g1",
+          state: "ACTIVATED",
+          expiresAt: new Date(Date.now() + 3600 * 1000),
+          cached: false,
+        };
       },
     });
 
@@ -583,7 +598,12 @@ describe("GET /token?level=prod with PAM", () => {
     const logs: AuditEntry[] = [];
     const deps = makeDeps({
       pamAllowedPolicies: new Set(["allowed-policy"]),
-      ensurePamGrant: async () => ({ name: "g", state: "ACTIVATED", cached: false }),
+      ensurePamGrant: async () => ({
+        name: "g",
+        state: "ACTIVATED",
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        cached: false,
+      }),
       writeAuditLog: (e) => logs.push(e),
     });
 
@@ -620,7 +640,12 @@ describe("GET /token?level=prod with PAM", () => {
       pamDefaultPolicy: undefined,
       ensurePamGrant: async () => {
         ensureCalled = true;
-        return { name: "g", state: "ACTIVATED", cached: false };
+        return {
+          name: "g",
+          state: "ACTIVATED",
+          expiresAt: new Date(Date.now() + 3600 * 1000),
+          cached: false,
+        };
       },
     });
 
@@ -637,6 +662,7 @@ describe("GET /token?level=prod with PAM", () => {
       ensurePamGrant: async () => ({
         name: "grants/pam-grant-123",
         state: "ACTIVATED",
+        expiresAt: new Date(Date.now() + 3600 * 1000),
         cached: false,
       }),
       writeAuditLog: (e) => logs.push(e),
@@ -658,6 +684,7 @@ describe("GET /token?level=prod with PAM", () => {
       ensurePamGrant: async () => ({
         name: "g",
         state: "ACTIVATED",
+        expiresAt: new Date(Date.now() + 3600 * 1000),
         cached: false,
       }),
       confirmProdAccess: async (_email, _command, pamPolicy) => {
@@ -678,7 +705,12 @@ describe("GET /token?level=prod with PAM", () => {
       resolvePamPolicy: (_policy) => resolvedPath,
       ensurePamGrant: async (path) => {
         capturedPath = path;
-        return { name: "grants/g1", state: "ACTIVATED", cached: false };
+        return {
+          name: "grants/g1",
+          state: "ACTIVATED",
+          expiresAt: new Date(Date.now() + 3600 * 1000),
+          cached: false,
+        };
       },
     });
 
@@ -694,7 +726,12 @@ describe("GET /token?level=prod with PAM", () => {
       resolvePamPolicy: () => {
         throw new Error('Invalid PAM entitlement ID: "BAD!"');
       },
-      ensurePamGrant: async () => ({ name: "g", state: "ACTIVATED", cached: false }),
+      ensurePamGrant: async () => ({
+        name: "g",
+        state: "ACTIVATED",
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        cached: false,
+      }),
     });
 
     const res = await handleRequest(makeRequest("/token?level=prod&pam_policy=BAD!"), deps);
@@ -708,7 +745,12 @@ describe("GET /token?level=prod with PAM", () => {
     const deps = makeDeps({
       pamAllowedPolicies: new Set(["projects/p/locations/global/entitlements/allowed"]),
       resolvePamPolicy: (policy) => `projects/p/locations/global/entitlements/${policy}`,
-      ensurePamGrant: async () => ({ name: "g", state: "ACTIVATED", cached: false }),
+      ensurePamGrant: async () => ({
+        name: "g",
+        state: "ACTIVATED",
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        cached: false,
+      }),
     });
 
     const res = await handleRequest(makeRequest("/token?level=prod&pam_policy=forbidden"), deps);
@@ -746,7 +788,12 @@ describe("GET /token?level=prod with PAM", () => {
       pamAllowedPolicies: new Set(["my-policy"]),
       ensurePamGrant: async (_path, justification) => {
         capturedJustification = justification;
-        return { name: "grants/g1", state: "ACTIVATED", cached: false };
+        return {
+          name: "grants/g1",
+          state: "ACTIVATED",
+          expiresAt: new Date(Date.now() + 3600 * 1000),
+          cached: false,
+        };
       },
     });
 
@@ -759,6 +806,29 @@ describe("GET /token?level=prod with PAM", () => {
     expect(capturedJustification).toBe("gcloud compute instances list");
   });
 
+  test("clamps prod token expires_in to PAM grant expiry", async () => {
+    const deps = makeDeps({
+      pamDefaultPolicy: "my-policy",
+      pamAllowedPolicies: new Set(["my-policy"]),
+      mintProdToken: async () => ({
+        access_token: "tok",
+        expires_at: new Date(Date.now() + 3600 * 1000),
+      }),
+      ensurePamGrant: async () => ({
+        name: "grants/g1",
+        state: "ACTIVATED",
+        expiresAt: new Date(Date.now() + 4 * 60 * 1000),
+        cached: false,
+      }),
+    });
+
+    const res = await handleRequest(makeRequest("/token?level=prod"), deps);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, number>;
+    expect(body.expires_in).toBeGreaterThan(4 * 60 - 5);
+    expect(body.expires_in).toBeLessThanOrEqual(4 * 60);
+  });
+
   test("passes undefined justification to ensurePamGrant when no command header", async () => {
     let capturedJustification: string | undefined = "should-be-replaced";
     const deps = makeDeps({
@@ -766,7 +836,12 @@ describe("GET /token?level=prod with PAM", () => {
       pamAllowedPolicies: new Set(["my-policy"]),
       ensurePamGrant: async (_path, justification) => {
         capturedJustification = justification;
-        return { name: "grants/g1", state: "ACTIVATED", cached: false };
+        return {
+          name: "grants/g1",
+          state: "ACTIVATED",
+          expiresAt: new Date(Date.now() + 3600 * 1000),
+          cached: false,
+        };
       },
     });
 
@@ -1392,7 +1467,12 @@ describe("GET /token?session=<id>", () => {
       ensurePamGrant: async (entitlementPath) => {
         ensureGrantCalled = true;
         capturedEntitlement = entitlementPath;
-        return { name: "grants/g1", state: "ACTIVATED", cached: false };
+        return {
+          name: "grants/g1",
+          state: "ACTIVATED",
+          expiresAt: new Date(Date.now() + 3600 * 1000),
+          cached: false,
+        };
       },
     });
 
@@ -1416,7 +1496,12 @@ describe("GET /token?session=<id>", () => {
       sessionManager,
       ensurePamGrant: async () => {
         ensureGrantCalled = true;
-        return { name: "grants/g1", state: "ACTIVATED", cached: false };
+        return {
+          name: "grants/g1",
+          state: "ACTIVATED",
+          expiresAt: new Date(Date.now() + 3600 * 1000),
+          cached: false,
+        };
       },
     });
 
@@ -1439,7 +1524,12 @@ describe("GET /token?session=<id>", () => {
     const deps = makeDeps({
       sessionManager,
       writeAuditLog: (e) => logs.push(e),
-      ensurePamGrant: async () => ({ name: "grants/g1", state: "ACTIVATED", cached: true }),
+      ensurePamGrant: async () => ({
+        name: "grants/g1",
+        state: "ACTIVATED",
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        cached: true,
+      }),
     });
 
     await handleRequest(makeRequest(`/token?session=${session.id}`), deps);
@@ -1448,6 +1538,74 @@ describe("GET /token?session=<id>", () => {
     expect(logs[0]!.pam_grant).toBe("grants/g1");
     expect(logs[0]!.pam_cached).toBe(true);
     expect(logs[0]!.pam_policy).toBe("projects/p/locations/global/entitlements/e");
+  });
+
+  test("clamps session-refresh token expires_in to PAM grant expiry", async () => {
+    // The metadata-proxy caches the access token until its expires_at; if
+    // that exceeds the PAM grant's lifetime, calls keep using the stale
+    // token after the grant ends. The handler must clamp expires_in so the
+    // cache falls in line with the underlying authorization.
+    const sessionManager = createSessionManager();
+    const session = sessionManager.create({
+      email: "eng@example.com",
+      ttlSeconds: 3600,
+      sessionLifetimeSeconds: 28800,
+      pamPolicy: "projects/p/locations/global/entitlements/e",
+    });
+
+    const deps = makeDeps({
+      sessionManager,
+      // Token mint says 1h, but the PAM grant only has 4 minutes left.
+      mintProdToken: async () => ({
+        access_token: "tok",
+        expires_at: new Date(Date.now() + 3600 * 1000),
+      }),
+      ensurePamGrant: async () => ({
+        name: "grants/g1",
+        state: "ACTIVATED",
+        expiresAt: new Date(Date.now() + 4 * 60 * 1000),
+        cached: true,
+      }),
+    });
+
+    const res = await handleRequest(makeRequest(`/token?session=${session.id}`), deps);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, number>;
+    // ~4 minutes, allowing for sub-second skew between the mock and Date.now()
+    expect(body.expires_in).toBeGreaterThan(4 * 60 - 5);
+    expect(body.expires_in).toBeLessThanOrEqual(4 * 60);
+  });
+
+  test("does not extend session-refresh expires_in beyond what mintProdToken returned", async () => {
+    // When the access token would expire before the grant, the token's own
+    // expiry is the binding constraint and clamping must not push it later.
+    const sessionManager = createSessionManager();
+    const session = sessionManager.create({
+      email: "eng@example.com",
+      ttlSeconds: 600,
+      sessionLifetimeSeconds: 28800,
+      pamPolicy: "projects/p/locations/global/entitlements/e",
+    });
+
+    const deps = makeDeps({
+      sessionManager,
+      mintProdToken: async () => ({
+        access_token: "tok",
+        expires_at: new Date(Date.now() + 600 * 1000),
+      }),
+      ensurePamGrant: async () => ({
+        name: "grants/g1",
+        state: "ACTIVATED",
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        cached: true,
+      }),
+    });
+
+    const res = await handleRequest(makeRequest(`/token?session=${session.id}`), deps);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, number>;
+    expect(body.expires_in).toBeGreaterThan(600 - 5);
+    expect(body.expires_in).toBeLessThanOrEqual(600);
   });
 
   test("returns 500 when PAM grant renewal fails during session refresh", async () => {
@@ -1487,7 +1645,12 @@ describe("GET /token?session=<id>", () => {
       sessionManager,
       ensurePamGrant: async (_path, justification) => {
         capturedJustification = justification;
-        return { name: "grants/g1", state: "ACTIVATED", cached: false };
+        return {
+          name: "grants/g1",
+          state: "ACTIVATED",
+          expiresAt: new Date(Date.now() + 3600 * 1000),
+          cached: false,
+        };
       },
     });
 
@@ -1511,7 +1674,12 @@ describe("GET /token?session=<id>", () => {
       sessionManager,
       ensurePamGrant: async (_path, justification) => {
         capturedJustification = justification;
-        return { name: "grants/g1", state: "ACTIVATED", cached: false };
+        return {
+          name: "grants/g1",
+          state: "ACTIVATED",
+          expiresAt: new Date(Date.now() + 3600 * 1000),
+          cached: false,
+        };
       },
     });
 

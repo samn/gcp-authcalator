@@ -91,6 +91,12 @@ export interface PamGrantResult {
   name: string;
   /** Grant state ("ACTIVE" or "ACTIVATED" — PAM ships both spellings). */
   state: string;
+  /**
+   * Computed grant expiry (createTime + requestedDuration). Callers must
+   * clamp any access token they mint while this grant is the authorization
+   * source so the token cannot outlive the grant.
+   */
+  expiresAt: Date;
   /** Whether this was a cache hit. */
   cached: boolean;
 }
@@ -182,11 +188,6 @@ export function createPamModule(
 
   function hasUsableLifetime(expiresAt: Date): boolean {
     return expiresAt.getTime() - now() > CACHE_MARGIN_MS;
-  }
-
-  function isCacheValid(cached: CachedGrant | undefined): cached is CachedGrant {
-    if (!cached) return false;
-    return hasUsableLifetime(cached.expiresAt);
   }
 
   async function pamFetch(url: string, init?: RequestInit): Promise<Response> {
@@ -347,12 +348,14 @@ export function createPamModule(
     return new Date(now() + 15 * 60 * 1000);
   }
 
-  function cacheGrant(entitlementPath: string, grant: PamGrantResponse): void {
-    grantCache.set(entitlementPath, {
+  function cacheGrant(entitlementPath: string, grant: PamGrantResponse): CachedGrant {
+    const entry: CachedGrant = {
       name: grant.name!,
       state: grant.state!,
       expiresAt: computeGrantExpiry(grant),
-    });
+    };
+    grantCache.set(entitlementPath, entry);
+    return entry;
   }
 
   async function ensureGrant(
@@ -360,10 +363,25 @@ export function createPamModule(
     justification?: string,
   ): Promise<PamGrantResult> {
     const cached = grantCache.get(entitlementPath);
-    if (isCacheValid(cached)) {
-      return { name: cached.name, state: cached.state, cached: true };
+    if (cached) {
+      if (hasUsableLifetime(cached.expiresAt)) {
+        return {
+          name: cached.name,
+          state: cached.state,
+          expiresAt: cached.expiresAt,
+          cached: true,
+        };
+      }
+
+      // Within the cache margin but not yet past expiry. PAM will reject any
+      // new createGrant (409 / 400 FAILED_PRECONDITION) while the old grant
+      // is still open, and the post-#98 lifetime filter in findActiveGrant
+      // also rules it out. Revoke up front so the replacement create
+      // succeeds and the new expiry can clamp the next minted token.
+      if (cached.expiresAt.getTime() > now()) {
+        await revokeGrantBestEffort(cached.name, "renewing before expiry");
+      }
     }
-    // Drop dead entries so revokeAll on shutdown doesn't try to revoke them.
     grantCache.delete(entitlementPath);
 
     // Request a new grant
@@ -382,17 +400,22 @@ export function createPamModule(
       activated = await pollGrant(grant.name);
     }
 
-    cacheGrant(entitlementPath, activated);
+    const entry = cacheGrant(entitlementPath, activated);
 
-    return { name: activated.name!, state: activated.state!, cached: false };
+    return {
+      name: entry.name,
+      state: entry.state,
+      expiresAt: entry.expiresAt,
+      cached: false,
+    };
   }
 
-  async function revokeGrant(grantName: string): Promise<void> {
+  async function revokeGrantBestEffort(grantName: string, reason: string): Promise<void> {
     try {
       const url = `${PAM_API_BASE}/${grantName}:revoke`;
       const res = await pamFetch(url, {
         method: "POST",
-        body: JSON.stringify({ reason: "gcp-authcalator shutdown" }),
+        body: JSON.stringify({ reason: `gcp-authcalator: ${reason}` }),
       });
 
       if (!res.ok) {
@@ -413,7 +436,7 @@ export function createPamModule(
     if (entries.length === 0) return;
 
     console.log(`pam: revoking ${entries.length} active grant(s)...`);
-    await Promise.allSettled(entries.map((entry) => revokeGrant(entry.name)));
+    await Promise.allSettled(entries.map((entry) => revokeGrantBestEffort(entry.name, "shutdown")));
   }
 
   return { ensureGrant, revokeAll };

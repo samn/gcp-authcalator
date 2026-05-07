@@ -88,6 +88,38 @@ function mockFetch(responses: Array<{ status: number; body: unknown }>): typeof 
   }) as unknown as typeof globalThis.fetch;
 }
 
+/**
+ * Mock fetch that auto-responds to revoke POSTs with `{}` 200 and dispenses
+ * `creates` (lazy bodies — evaluated when the create call fires, so they can
+ * close over a `currentTime` that has advanced between calls). Returns the
+ * `events` log so tests can assert ordering of create vs revoke.
+ */
+function mockGrantOps(creates: Array<() => Record<string, unknown>>): {
+  fetchFn: typeof globalThis.fetch;
+  events: Array<{ kind: "create" | "revoke"; url: string }>;
+} {
+  const events: Array<{ kind: "create" | "revoke"; url: string }> = [];
+  let createIdx = 0;
+  const fetchFn = (async (url: string, init?: RequestInit) => {
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method === "POST" && url.includes(":revoke")) {
+      events.push({ kind: "revoke", url });
+      return new Response("{}", { status: 200 });
+    }
+    if (method === "POST") {
+      const factory = creates[createIdx++];
+      if (!factory) throw new Error(`unexpected create call: ${url}`);
+      events.push({ kind: "create", url });
+      return new Response(JSON.stringify(factory()), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    throw new Error(`unexpected fetch: ${method} ${url}`);
+  }) as unknown as typeof globalThis.fetch;
+  return { fetchFn, events };
+}
+
 function makeModule(
   fetchResponses: Array<{ status: number; body: unknown }>,
   nowFn?: () => number,
@@ -622,7 +654,10 @@ describe("ensureGrant", () => {
         // 409 on create, then find the old grant
         { status: 409, body: { error: { message: "Already exists" } } },
         { status: 200, body: { grants: [oldGrant] } },
-        // Second call gets a fresh grant
+        // Second ensureGrant: cached grant is within the cache margin but not
+        // yet expired, so the new behaviour revokes it before re-creating.
+        { status: 200, body: {} },
+        // Then it requests a fresh grant
         {
           status: 200,
           body: makeActivatedGrant(grantName2, new Date(currentTime + 7 * 60 * 1000).toISOString()),
@@ -660,6 +695,10 @@ describe("ensureGrant", () => {
     const { pam } = makeModule(
       [
         { status: 200, body: grantNoTime },
+        // Second ensureGrant fires within the cache margin of the conservative
+        // 15-minute fallback expiry, so the still-active grant is revoked
+        // before a new one is created.
+        { status: 200, body: {} },
         {
           status: 200,
           body: makeActivatedGrant(
@@ -745,6 +784,154 @@ describe("ensureGrant", () => {
 
     const result = await pam.ensureGrant(entitlementPath);
     expect(result.name).toBe(freshName);
+  });
+
+  test("returns expiresAt computed from createTime + requestedDuration", async () => {
+    const grantName = `${entitlementPath}/grants/grant-1`;
+    const createdAtMs = 5_000_000;
+    const { pam } = makeModule(
+      [
+        {
+          status: 200,
+          body: {
+            name: grantName,
+            state: "ACTIVATED",
+            createTime: new Date(createdAtMs).toISOString(),
+            requestedDuration: "3600s",
+          },
+        },
+      ],
+      () => createdAtMs,
+    );
+
+    const result = await pam.ensureGrant(entitlementPath);
+    expect(result.expiresAt.getTime()).toBe(createdAtMs + 3600 * 1000);
+  });
+
+  test("near-expiry renewal revokes old grant before creating a new one", async () => {
+    // The post-#98 lifetime filter in findActiveGrant turns the cache-margin
+    // window into a dead-end: createGrant 409s on the still-open grant and
+    // findActiveGrant rejects it for being too close to expiry. Pre-emptively
+    // revoking the old grant unblocks the create, so renewal succeeds even
+    // when triggered from inside the margin.
+    const grantName1 = `${entitlementPath}/grants/grant-1`;
+    const grantName2 = `${entitlementPath}/grants/grant-2`;
+    let currentTime = 1_000_000;
+    const createTime1 = new Date(currentTime).toISOString();
+
+    const { fetchFn, events } = mockGrantOps([
+      () => ({
+        name: grantName1,
+        state: "ACTIVATED",
+        createTime: createTime1,
+        requestedDuration: "3600s",
+      }),
+      () => ({
+        name: grantName2,
+        state: "ACTIVATED",
+        createTime: new Date(currentTime).toISOString(),
+        requestedDuration: "3600s",
+      }),
+    ]);
+
+    const pam = createPamModule(async () => "token", {
+      fetchFn,
+      now: () => currentTime,
+    });
+
+    const first = await pam.ensureGrant(entitlementPath);
+    expect(first.name).toBe(grantName1);
+
+    // Advance to within the 5-minute cache margin (grant has ~3 min left).
+    currentTime += 57 * 60 * 1000;
+
+    const second = await pam.ensureGrant(entitlementPath);
+    expect(second.name).toBe(grantName2);
+    expect(second.cached).toBe(false);
+
+    expect(events.map((e) => e.kind)).toEqual(["create", "revoke", "create"]);
+    expect(events[1]!.url).toContain(grantName1);
+  });
+
+  test("expired-grant renewal does not attempt to revoke", async () => {
+    // A grant whose computed expiry has already passed should not be revoked
+    // before re-creating — PAM has ended it on its own, and a revoke would
+    // be a wasted API call (or surface as a noisy error).
+    const grantName1 = `${entitlementPath}/grants/grant-1`;
+    const grantName2 = `${entitlementPath}/grants/grant-2`;
+    let currentTime = 1_000_000;
+    const createTime1 = new Date(currentTime).toISOString();
+
+    const { fetchFn, events } = mockGrantOps([
+      () => ({
+        name: grantName1,
+        state: "ACTIVATED",
+        createTime: createTime1,
+        requestedDuration: "3600s",
+      }),
+      () => ({
+        name: grantName2,
+        state: "ACTIVATED",
+        createTime: new Date(currentTime).toISOString(),
+        requestedDuration: "3600s",
+      }),
+    ]);
+
+    const pam = createPamModule(async () => "token", {
+      fetchFn,
+      now: () => currentTime,
+    });
+
+    await pam.ensureGrant(entitlementPath);
+
+    // Advance well past expiry.
+    currentTime += 3600 * 1000 + 60 * 1000;
+
+    await pam.ensureGrant(entitlementPath);
+    expect(events.map((e) => e.kind)).toEqual(["create", "create"]);
+  });
+
+  test("revoked grant is removed from cache so revokeAll skips it", async () => {
+    // After a near-expiry renewal revokes the old grant, the cache should
+    // hold the new grant only. Subsequent shutdown revokeAll must not
+    // re-revoke the old (already-revoked) grant.
+    const grantName1 = `${entitlementPath}/grants/grant-1`;
+    const grantName2 = `${entitlementPath}/grants/grant-2`;
+    let currentTime = 1_000_000;
+    const createTime1 = new Date(currentTime).toISOString();
+
+    const { fetchFn, events } = mockGrantOps([
+      () => ({
+        name: grantName1,
+        state: "ACTIVATED",
+        createTime: createTime1,
+        requestedDuration: "3600s",
+      }),
+      () => ({
+        name: grantName2,
+        state: "ACTIVATED",
+        createTime: new Date(currentTime).toISOString(),
+        requestedDuration: "3600s",
+      }),
+    ]);
+
+    const pam = createPamModule(async () => "token", {
+      fetchFn,
+      now: () => currentTime,
+    });
+
+    await pam.ensureGrant(entitlementPath);
+    currentTime += 57 * 60 * 1000;
+    await pam.ensureGrant(entitlementPath);
+
+    const revokes = events.filter((e) => e.kind === "revoke");
+    expect(revokes).toHaveLength(1);
+    expect(revokes[0]!.url).toContain(grantName1);
+
+    await pam.revokeAll();
+    const allRevokes = events.filter((e) => e.kind === "revoke");
+    expect(allRevokes).toHaveLength(2);
+    expect(allRevokes[1]!.url).toContain(grantName2);
   });
 
   test("expired cache entry is not retained after invalidation", async () => {
