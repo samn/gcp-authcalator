@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Fixed
+
+- `with-prod` no longer keeps serving a cached access token after the
+  underlying PAM grant has ended. The metadata-proxy's caching token
+  provider would refresh ~5 minutes before the token's own expiry, which
+  could be up to a full token TTL beyond the grant's actual end. The
+  gate now clamps each minted prod token's `expires_in` to the PAM
+  grant's expiry, so the proxy refreshes in step with PAM. To avoid the
+  9.1 lifetime filter dead-end during boundary refreshes, `ensureGrant`
+  also pre-emptively revokes a still-active near-expiry grant before
+  requesting its replacement instead of relying on `findActiveGrant`'s
+  409/400 fallback, which would otherwise reject the open grant for
+  being inside the cache margin.
+
 ## [0.9.2] - 2026-05-05
 
 ### Added

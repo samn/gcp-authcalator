@@ -14,7 +14,12 @@ function makeOpDeps(overrides: Parameters<typeof makeDeps>[0] = {}) {
     pamAllowedPolicies: new Set([ALLOWLISTED]),
     autoApprovePamPolicies: new Set([ALLOWLISTED]),
     pamDefaultPolicy: ALLOWLISTED,
-    ensurePamGrant: async () => ({ name: "grant-1", state: "ACTIVATED", cached: false }),
+    ensurePamGrant: async () => ({
+      name: "grant-1",
+      state: "ACTIVATED",
+      expiresAt: new Date(Date.now() + 3600 * 1000),
+      cached: false,
+    }),
     resolvePamPolicy: (p) => p,
     ...overrides,
   });
