@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [0.9.3] - 2026-05-07
+
 ### Fixed
 
 - `with-prod` no longer keeps serving a cached access token after the
