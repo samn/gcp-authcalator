@@ -5,8 +5,7 @@
 // IAM roles. Grants are cached, revoked when stale or expired, and
 // best-effort revoked on shutdown.
 //
-// API quirks and how we handle them (see
-// plans/review-https-docs-cloud-google-com-iam-d-effervescent-rainbow.md
+// API quirks and how we handle them (see plans/pam-rotation-drain-margin.md
 // for the full audit):
 //
 //   - `grants.revoke` returns a long-running `Operation`. `revokeGrantAndWait`
