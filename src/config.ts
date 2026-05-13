@@ -38,6 +38,22 @@ export function getDefaultAdminSocketPath(): string {
   return join(getDefaultRuntimeDir(), "gcp-authcalator-admin", "admin.sock");
 }
 
+/**
+ * Sandbox parent dir for `with-prod` (gcloud config + token files,
+ * created fresh per invocation). Resolved separately from
+ * `getDefaultRuntimeDir()` because the gate's runtime dir may be shared
+ * across UIDs (via group perms or a symlink), whereas this dir must be
+ * private to the *caller* — typically a different UID than the gate in
+ * two-user setups.
+ */
+export function getDefaultWithProdRuntimeDir(): string {
+  const xdg = process.env.XDG_RUNTIME_DIR;
+  if (xdg) return xdg;
+  const xdgCache = process.env.XDG_CACHE_HOME;
+  if (xdgCache) return join(xdgCache, "gcp-authcalator");
+  return join(homedir(), ".cache", "gcp-authcalator");
+}
+
 // ---------------------------------------------------------------------------
 // Path helpers
 // ---------------------------------------------------------------------------

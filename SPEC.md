@@ -194,6 +194,8 @@ Both token endpoints accept an optional `scopes` query parameter (comma-separate
 
 **Socket security:** The main Unix socket is created with `0660` permissions in a `0750` directory; the privileged operator socket (when configured) is `0600` in the same directory. The gate UID's primary group owns the directory and main socket — on UPG distros this is effectively `0600` end-to-end, but the gate UID's primary group can be deliberately extended (e.g. add a `the-robot` user) to grant a different-UID agent access to the main socket while still kernel-blocking it from the operator socket. The `$XDG_RUNTIME_DIR` directory itself is left at the system-managed `0700` per the XDG spec — group access to the main socket therefore requires placing `socket_path` in a gate-managed directory like `~/.gcp-authcalator/`. Stale sockets are cleaned up only after verifying ownership, refusing to follow symlinks, and checking that no other instance is running.
 
+`with-prod` resolves its per-invocation sandbox parent directory **separately** from the gate's runtime dir (`$XDG_RUNTIME_DIR` → `$XDG_CACHE_HOME/gcp-authcalator` → `~/.cache/gcp-authcalator`). This decouples the caller-owned sandbox (where ephemeral gcloud config and token files live, `0600` owned by the calling UID) from the gate-owned config/socket dir (which may be shared between users via group perms or a symlink).
+
 **Lifecycle:** Started by the devcontainer initialize script (runs on host before container build). Stopped when container is destroyed. Could later be a systemd/launchd user service for persistence.
 
 ### 3. `gcp-metadata-proxy` -- Container-Side Metadata Emulator

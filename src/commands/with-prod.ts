@@ -1,9 +1,8 @@
 import { randomBytes } from "node:crypto";
-import { chmodSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Config } from "../config.ts";
-import { getDefaultRuntimeDir, WithProdConfigSchema } from "../config.ts";
-import { ensurePrivateDir } from "../gate/dir-utils.ts";
+import { getDefaultWithProdRuntimeDir, WithProdConfigSchema } from "../config.ts";
 import {
   createProdSession,
   fetchProdToken,
@@ -239,8 +238,11 @@ export async function runWithProd(
 
   // Step 2: Create an isolated gcloud config directory BEFORE the token
   // provider so onRefresh can capture the file path in its closure.
-  const runtimeDir = getDefaultRuntimeDir();
-  ensurePrivateDir(runtimeDir, 0o700);
+  // The sandbox dir (mkdtempSync) is the real security boundary — created
+  // 0o700 owned by the caller, with 0o600 token files inside — so the
+  // parent's exact mode doesn't matter. mkdirSync no-ops on existing dirs.
+  const runtimeDir = getDefaultWithProdRuntimeDir();
+  mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
   const gcloudConfigDir = mkdtempSync(join(runtimeDir, "gcp-authcalator-gcloud-"));
   chmodSync(gcloudConfigDir, 0o700);
 

@@ -72,6 +72,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **`with-prod` now resolves its sandbox parent directory separately
+  from the gate's runtime dir** (`$XDG_RUNTIME_DIR` →
+  `$XDG_CACHE_HOME/gcp-authcalator` → `~/.cache/gcp-authcalator`).
+  Previously both the gate's socket/config and `with-prod`'s per-
+  invocation gcloud sandbox shared `getDefaultRuntimeDir()`, which
+  broke the two-user shared-gate pattern: when the operator's
+  `~/.gcp-authcalator/` is reachable to the agent only via a symlink
+  to the operator's home, the agent's `with-prod` couldn't pass the
+  symlink check (and even if it had, the target was operator-owned
+  `0o750` and not writable by the agent). The sandbox now always
+  lands inside the caller's own private space, regardless of how
+  the gate's socket dir is shared. `with-prod` also no longer
+  applies the strict `ensurePrivateDir` mode check to this parent —
+  it lives in the caller's own home (where the F2 attacker-pre-create
+  threat does not apply), and the actual security boundary is the
+  `mkdtempSync` sandbox inside (`0o700` owned by the caller, with
+  `0o600` token files). This lets `with-prod` tolerate the parent
+  already existing at `0o755` (typical when `umask 002` is set
+  system-wide in the container).
 - **Main gate socket is now mode `0660` (group-readable) in a `0750`
   directory, instead of `0600` in a `0700` directory.** A different-UID
   agent that shares the gate UID's primary group (e.g. a `the-robot`
