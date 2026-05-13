@@ -7,22 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Changed
+
+- **Prod tokens are now clamped to PAM grant expiry minus a 5-minute
+  drain margin (was: clamped to grant expiry).** PAM allows only one
+  active grant per `(entitlement, requester)`, so grant renewal has
+  no overlap window: concurrent clients holding a still-valid token
+  at the moment the gate revokes-and-recreates would see opaque
+  `PERMISSION_DENIED` errors for the duration of the rotation. The
+  drain-margin clamp pushes minted token expiries before the rotation
+  window so that by the time the gate revokes the old grant, no token
+  minted under it is still valid. Net effect: clients refresh ~5 min
+  earlier than before; concurrent clients no longer see auth flake
+  during grant rotation. Three handler paths share the same clamp
+  (`/token?level=prod`, `/session`, `/token?session=...`).
+
 ### Fixed
 
-- **PAM grant renewal no longer dead-ends after the grant's computed
-  expiry has passed.** When a `/token?session=...` refresh arrived
-  after the user had idled past their PAM grant's TTL (or during the
-  5-minute cache-margin renewal window), `ensureGrant` would
-  invalidate its cache, call createGrant, and hit a 409 / 400
-  FAILED_PRECONDITION because PAM still considered the old grant
-  open. The post-#98 lifetime filter then ruled the stale-but-open
-  grant ineligible for reuse and surfaced "PAM grant conflict but no
-  active grant found", dropping prod access despite a valid session.
-  The conflict path now revokes the offending stale grant in place
-  and retries createGrant once (bounded). The safety invariant that
-  callers never receive a grant with no usable lifetime is
-  preserved. Also covers the gate-restart and cross-instance cases
-  where no cached entry exists to pre-revoke.
+- **PAM `grants.revoke` is now correctly awaited as a long-running
+  Operation.** Revoke returns a `google.longrunning.Operation` with
+  `done:false` initially; we previously treated it as fire-and-forget,
+  so the follow-up `createGrant` would race the revoke and 409 with
+  "open Grant" because PAM still considered the old grant alive. The
+  gate now polls the returned Operation to `done:true` (best-effort,
+  30-s deadline, tolerant of `error` field — e.g. already-terminal
+  grants) before retrying create. Verified end-to-end against a real
+  entitlement: the Operation typically settles within ~3 seconds, and
+  an immediate create succeeds without conflict. This collapses the
+  multi-round retry logic that previously papered over the race.
+- **PAM grant rotation is now single-flight per entitlement.**
+  Concurrent `ensureGrant` callers that miss the cache fast-path
+  coalesce onto a single rotation Promise, eliminating redundant
+  `createGrant` / revoke API calls when multiple clients request a
+  token at the same moment a cached grant enters its drain window.
+- **`pollGrant` now treats EXPIRED, ACTIVATION_FAILED,
+  EXTERNALLY_MODIFIED, and WITHDRAWN as terminal states** alongside
+  the existing DENIED, REVOKED, ENDED. A grant that transitioned into
+  any of these during polling would previously silently retry until
+  the 120-second polling deadline; the gate now surfaces the terminal
+  state immediately with a clear error.
 
 ### Security
 

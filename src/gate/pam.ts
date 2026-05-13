@@ -2,7 +2,51 @@
 // GCP Privileged Access Manager (PAM) module
 //
 // Requests just-in-time PAM grants to temporarily elevate the engineer's
-// IAM roles. Grants are cached and best-effort revoked on shutdown.
+// IAM roles. Grants are cached, revoked when stale or expired, and
+// best-effort revoked on shutdown.
+//
+// API quirks and how we handle them (see
+// plans/review-https-docs-cloud-google-com-iam-d-effervescent-rainbow.md
+// for the full audit):
+//
+//   - `grants.revoke` returns a long-running `Operation`. `revokeGrantAndWait`
+//     polls the Operation to `done:true` before its caller retries create —
+//     without this, the follow-up createGrant races the revoke and 409s
+//     because PAM still considers the old grant open.
+//   - `grants.list` documents a `filter` query parameter but no syntax.
+//     Most filter expressions return 400 "invalid list filter"; the two
+//     that PAM does accept (`state="ACTIVE"` quoted, and `state:ACTIVE`)
+//     silently return 0 grants even when an ACTIVE grant exists. The
+//     `grants.search` endpoint exhibits the same broken-filter behavior
+//     (verified 2026-05-13 against a real entitlement). So we list
+//     unfiltered and bucket client-side. `orderBy=createTime desc` is also
+//     rejected as "unsupported sort order".
+//   - A Grant has no `expireTime` field — only `createTime` and
+//     `requestedDuration`. `computeGrantExpiry` derives expiry from those.
+//   - The `state` field can briefly lag actual expiry. The "open Grant" 409
+//     / 400 FAILED_PRECONDITION path lands inside that window, so the scan
+//     re-checks `createTime + requestedDuration` rather than trusting state.
+//   - "Open Grant" conflicts ship as both 409 Conflict and 400
+//     FAILED_PRECONDITION. `isOpenGrantPrecondition` narrowly matches the 400
+//     case so unrelated FAILED_PRECONDITION causes surface their original
+//     error.
+//   - State spelling varies: v1 uses `ACTIVE`, older responses use
+//     `ACTIVATED`. `ACTIVE_GRANT_STATES` accepts both.
+//   - Terminal states (DENIED, REVOKED, ENDED, EXPIRED, ACTIVATION_FAILED,
+//     EXTERNALLY_MODIFIED, WITHDRAWN) bypass polling and surface directly.
+//
+// Concurrent-client safety (drain margin + single-flight):
+//
+//   PAM allows only one active grant per `(entitlement, requester)` (the
+//   "open Grant" rule), so rotation has no overlap window. To keep
+//   concurrent clients from seeing 403s when the gate revokes-and-recreates,
+//   minted prod tokens are clamped to `grant_expiry - DRAIN_MARGIN_MS` in
+//   `handlers.ts:expiresInClampedToGrant`. By the time the gate revokes the
+//   old grant, no token minted under it is still valid, so no in-flight call
+//   is using the about-to-be-revoked authorization. `ensureGrant` is
+//   additionally single-flight per entitlement (the gate is single-instance
+//   per machine via the socket bind check) so concurrent token requests
+//   coalesce onto one rotation rather than racing.
 // ---------------------------------------------------------------------------
 
 const PAM_API_BASE = "https://privilegedaccessmanager.googleapis.com/v1";
@@ -10,13 +54,32 @@ const PAM_API_BASE = "https://privilegedaccessmanager.googleapis.com/v1";
 /** Fallback grant duration when not configured (1 hour). */
 const FALLBACK_GRANT_DURATION_SECONDS = 3600;
 
-/** Minimum remaining lifetime before we re-request a cached grant (5 minutes). */
-const CACHE_MARGIN_MS = 5 * 60 * 1000;
+/**
+ * Drain margin: the buffer between the start of the rotation window and the
+ * grant's actual expiry. Plays two roles:
+ *
+ *   1. `ensureGrant` rotates a cached grant when its remaining lifetime
+ *      drops below this threshold (`hasUsableLifetime` returns false).
+ *   2. Minted prod tokens are clamped to `grant_expiry - DRAIN_MARGIN_MS`
+ *      (see `expiresInClampedToGrant` in handlers.ts). This leaves a drain
+ *      window where no minted token is still valid, so revoke-and-rotate
+ *      has no in-flight tokens to disrupt.
+ */
+export const DRAIN_MARGIN_MS = 5 * 60 * 1000;
 
 /** Polling: initial delay, max delay, total timeout. */
 const POLL_INITIAL_MS = 1_000;
 const POLL_MAX_MS = 5_000;
 const POLL_TIMEOUT_MS = 120_000;
+
+/**
+ * LRO polling for grants.revoke Operations. Observed PAM behavior: revoke
+ * settles in ~3 s with sub-second polling; these constants give ~3 polls in
+ * that window without burning RTTs against a not-yet-done Operation.
+ */
+const REVOKE_OP_INITIAL_MS = 500;
+const REVOKE_OP_MAX_MS = 2_000;
+const REVOKE_OP_TIMEOUT_MS = 30_000;
 
 /** Valid GCP resource ID pattern for short-form entitlement IDs. */
 const ENTITLEMENT_ID_PATTERN = /^[a-z][a-z0-9-]*$/;
@@ -34,6 +97,24 @@ const ACTIVE_GRANT_STATES = new Set<string>(["ACTIVE", "ACTIVATED"]);
 
 function isActiveState(state: string | undefined): boolean {
   return state !== undefined && ACTIVE_GRANT_STATES.has(state);
+}
+
+/**
+ * Terminal grant states from the v1beta State enum. A grant in any of
+ * these states will never become ACTIVE — polling must surface immediately.
+ */
+const TERMINAL_GRANT_STATES = new Set<string>([
+  "DENIED",
+  "REVOKED",
+  "ENDED",
+  "EXPIRED",
+  "ACTIVATION_FAILED",
+  "EXTERNALLY_MODIFIED",
+  "WITHDRAWN",
+]);
+
+function isTerminalState(state: string | undefined): boolean {
+  return state !== undefined && TERMINAL_GRANT_STATES.has(state);
 }
 
 /** Expected full resource path pattern. */
@@ -77,6 +158,8 @@ export interface PamModuleOptions {
   now?: () => number;
   /** Grant duration in seconds. Defaults to 3600. */
   grantDurationSeconds?: number;
+  /** Override sleeping inside polling loops; tests pass `() => Promise.resolve()`. */
+  sleepFn?: (ms: number) => Promise<void>;
 }
 
 export interface PamModule {
@@ -92,9 +175,10 @@ export interface PamGrantResult {
   /** Grant state ("ACTIVE" or "ACTIVATED" — PAM ships both spellings). */
   state: string;
   /**
-   * Computed grant expiry (createTime + requestedDuration). Callers must
-   * clamp any access token they mint while this grant is the authorization
-   * source so the token cannot outlive the grant.
+   * Computed grant expiry (createTime + requestedDuration). Callers minting
+   * an access token under this grant must clamp the token's TTL — see
+   * `expiresInClampedToGrant` in handlers.ts, which subtracts DRAIN_MARGIN_MS
+   * before clamping to keep concurrent clients safe across rotation.
    */
   expiresAt: Date;
   /** Whether this was a cache hit. */
@@ -114,6 +198,12 @@ interface PamGrantResponse {
   privilegedAccess?: unknown;
   justification?: unknown;
   requestedDuration?: string;
+}
+
+interface PamOperation {
+  name?: string;
+  done?: boolean;
+  error?: { code?: number; message?: string };
 }
 
 interface CachedGrant {
@@ -183,11 +273,18 @@ export function createPamModule(
   const fetchFn = options.fetchFn ?? globalThis.fetch;
   const now = options.now ?? Date.now;
   const grantDuration = `${options.grantDurationSeconds ?? FALLBACK_GRANT_DURATION_SECONDS}s`;
+  const sleep =
+    options.sleepFn ?? ((ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms)));
 
   const grantCache = new Map<string, CachedGrant>();
+  // Single-flight rotation per entitlement: concurrent `ensureGrant` calls
+  // that miss the cache fast-path coalesce onto one rotation. The gate is
+  // single-instance per machine (server.ts:91), so in-process coordination
+  // is sufficient — no distributed lock needed.
+  const inFlightRotations = new Map<string, Promise<PamGrantResult>>();
 
   function hasUsableLifetime(expiresAt: Date): boolean {
-    return expiresAt.getTime() - now() > CACHE_MARGIN_MS;
+    return expiresAt.getTime() - now() > DRAIN_MARGIN_MS;
   }
 
   async function pamFetch(url: string, init?: RequestInit): Promise<Response> {
@@ -322,8 +419,8 @@ export function createPamModule(
 
     // 409 / 400 FAILED_PRECONDITION ("open Grant"): another grant is open
     // for the same privileged access. Scan to learn whether it's usable
-    // (we can just reuse it) or stale (PAM's state lags actual expiry and
-    // we have to revoke it before our retry can succeed).
+    // (reuse it) or stale (PAM's state lags actual expiry — revoke and
+    // retry). revokeGrantAndWait polls the LRO so a single retry suffices.
     const scan = await scanForOpenGrants(entitlementPath);
     if (scan.usable) return scan.usable;
 
@@ -335,19 +432,15 @@ export function createPamModule(
     }
 
     await Promise.allSettled(
-      scan.stale.map((g) => revokeGrantBestEffort(g.name, "clearing stale grant before retry")),
+      scan.stale.map((g) => revokeGrantAndWait(g.name, "clearing stale grant before retry")),
     );
 
     const retry = await createGrantOnce(entitlementPath, justification);
     if (retry.kind === "ok") return retry.grant;
 
-    // PAM still rejects after we revoked every stale open grant we could
-    // see. One more scan in case the previously-stale grant has now been
-    // replaced by a fresh one (race against another process); otherwise
-    // surface a distinct error so this doesn't look like the original
+    // The retry still conflicts after we waited for revoke to complete.
+    // Surface a distinct error so this doesn't look like the original
     // "no active grant found" deadlock.
-    const rescan = await scanForOpenGrants(entitlementPath);
-    if (rescan.usable) return rescan.usable;
     throw new Error(
       `PAM grant conflict persists after revoking ${scan.stale.length} stale grant(s) ` +
         `for "${entitlementPath}"`,
@@ -359,7 +452,7 @@ export function createPamModule(
     let delay = POLL_INITIAL_MS;
 
     while (now() < deadline) {
-      await new Promise((r) => setTimeout(r, delay));
+      await sleep(delay);
       delay = Math.min(delay * 2, POLL_MAX_MS);
 
       const url = `${PAM_API_BASE}/${grantName}`;
@@ -376,11 +469,12 @@ export function createPamModule(
         return grant;
       }
 
-      if (grant.state === "DENIED" || grant.state === "REVOKED" || grant.state === "ENDED") {
-        throw new Error(`PAM grant was ${grant.state}: ${grantName}`);
+      if (isTerminalState(grant.state)) {
+        throw new Error(`PAM grant entered terminal state ${grant.state}: ${grantName}`);
       }
 
-      // Still pending (APPROVAL_AWAITED, ACTIVATING, etc.) — continue polling
+      // Still pending (APPROVAL_AWAITED, ACTIVATING, SCHEDULED, etc.) —
+      // continue polling.
     }
 
     throw new Error(
@@ -419,44 +513,48 @@ export function createPamModule(
     justification?: string,
   ): Promise<PamGrantResult> {
     const cached = grantCache.get(entitlementPath);
-    if (cached) {
-      if (hasUsableLifetime(cached.expiresAt)) {
-        return {
-          name: cached.name,
-          state: cached.state,
-          expiresAt: cached.expiresAt,
-          cached: true,
-        };
-      }
+    if (cached && hasUsableLifetime(cached.expiresAt)) {
+      return {
+        name: cached.name,
+        state: cached.state,
+        expiresAt: cached.expiresAt,
+        cached: true,
+      };
+    }
 
-      // The cached grant is at or past the cache-margin boundary. Always
-      // revoke best-effort before discarding the cache entry: even when
-      // our computed expiry has already passed, PAM's state can lag and
-      // leave the grant in an "open" state that 409s the immediate
-      // createGrant. revokeGrantBestEffort tolerates already-ended grants,
-      // so this is safe in both the near-expiry and post-expiry cases.
-      await revokeGrantBestEffort(cached.name, "renewing before expiry");
+    const pending = inFlightRotations.get(entitlementPath);
+    if (pending) return pending;
+
+    const rotation = doRotateGrant(entitlementPath, justification, cached);
+    inFlightRotations.set(entitlementPath, rotation);
+    try {
+      return await rotation;
+    } finally {
+      inFlightRotations.delete(entitlementPath);
+    }
+  }
+
+  async function doRotateGrant(
+    entitlementPath: string,
+    justification: string | undefined,
+    cached: CachedGrant | undefined,
+  ): Promise<PamGrantResult> {
+    // Revoke the cached grant before re-creating. Even when our computed
+    // expiry has passed, PAM's state can lag and leave the grant in an "open"
+    // state that 409s the immediate createGrant. revokeGrantAndWait polls the
+    // LRO so the follow-up create doesn't race the revoke.
+    if (cached) {
+      await revokeGrantAndWait(cached.name, "renewing before expiry");
     }
     grantCache.delete(entitlementPath);
 
-    // Request a new grant. createGrantWithRecovery handles the 409 / 400
-    // FAILED_PRECONDITION ("open Grant") path including revoking any
-    // stale-but-still-open grants that PAM is using to block creation.
     const grant = await createGrantWithRecovery(entitlementPath, justification);
 
     if (!grant.name) {
       throw new Error("PAM API returned a grant with no resource name");
     }
 
-    let activated: PamGrantResponse;
-
-    if (isActiveState(grant.state)) {
-      activated = grant;
-    } else {
-      // Poll until activated
-      activated = await pollGrant(grant.name);
-    }
-
+    const activated = isActiveState(grant.state) ? grant : await pollGrant(grant.name);
     const entry = cacheGrant(entitlementPath, activated);
 
     return {
@@ -467,7 +565,54 @@ export function createPamModule(
     };
   }
 
-  async function revokeGrantBestEffort(grantName: string, reason: string): Promise<void> {
+  async function pollRevokeOperation(operationName: string, deadlineMs: number): Promise<void> {
+    const deadline = now() + deadlineMs;
+    let delay = REVOKE_OP_INITIAL_MS;
+
+    while (now() < deadline) {
+      // Sleep first: the initial revoke response already reported `done:false`,
+      // so the operation cannot have settled in the microseconds since.
+      await sleep(delay);
+      delay = Math.min(delay * 2, REVOKE_OP_MAX_MS);
+
+      const res = await pamFetch(`${PAM_API_BASE}/${operationName}`);
+
+      if (res.ok) {
+        const op = (await res.json().catch(() => ({}))) as PamOperation;
+        if (op.done) {
+          if (op.error) {
+            // Already-terminal grant or harmless tail-end error. Don't throw —
+            // revoke is best-effort, the goal state is reached.
+            console.error(
+              `pam: revoke operation ${operationName} returned error: ${JSON.stringify(op.error)}`,
+            );
+          }
+          return;
+        }
+        continue;
+      }
+
+      if (res.status === 404) {
+        // Operation already garbage-collected; the revoke completed earlier.
+        return;
+      }
+
+      if (res.status >= 400 && res.status < 500) {
+        console.error(`pam: revoke operation ${operationName} polling gave up after ${res.status}`);
+        return;
+      }
+      // 5xx — keep retrying within the deadline budget.
+    }
+
+    console.error(`pam: revoke operation ${operationName} did not complete within ${deadlineMs}ms`);
+  }
+
+  async function revokeGrantAndWait(
+    grantName: string,
+    reason: string,
+    deadlineMs: number = REVOKE_OP_TIMEOUT_MS,
+  ): Promise<void> {
+    const startedAt = now();
     try {
       const url = `${PAM_API_BASE}/${grantName}:revoke`;
       const res = await pamFetch(url, {
@@ -477,13 +622,35 @@ export function createPamModule(
 
       if (!res.ok) {
         const text = await res.text();
-        console.error(`pam: failed to revoke grant ${grantName}: ${res.status} ${text}`);
+        console.error(`pam: revoke ${grantName} failed: ${res.status} ${text}`);
+        return;
+      }
+
+      const op = (await res.json().catch(() => ({}))) as PamOperation;
+      if (op.done || !op.name) {
+        // Synchronous revoke or untrackable response — assume done.
+        if (op.error) {
+          console.error(`pam: revoke ${grantName} operation error: ${JSON.stringify(op.error)}`);
+        }
+        return;
+      }
+
+      const remaining = deadlineMs - (now() - startedAt);
+      if (remaining > 0) {
+        await pollRevokeOperation(op.name, remaining);
       }
     } catch (err) {
       console.error(
-        `pam: failed to revoke grant ${grantName}: ${err instanceof Error ? err.message : String(err)}`,
+        `pam: revoke ${grantName} threw: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+  }
+
+  // Fire-and-forget: deadline 0 means revokeGrantAndWait POSTs the revoke,
+  // reads its Operation response, and skips polling. Used on shutdown where
+  // we want the request landed but not the LRO confirmation.
+  function revokeGrantFireAndForget(grantName: string, reason: string): Promise<void> {
+    return revokeGrantAndWait(grantName, reason, 0);
   }
 
   async function revokeAll(): Promise<void> {
@@ -493,7 +660,11 @@ export function createPamModule(
     if (entries.length === 0) return;
 
     console.log(`pam: revoking ${entries.length} active grant(s)...`);
-    await Promise.allSettled(entries.map((entry) => revokeGrantBestEffort(entry.name, "shutdown")));
+    // Shutdown path: fire-and-forget. We don't poll the LRO because the
+    // process is exiting and we just want the request landed on PAM's side.
+    await Promise.allSettled(
+      entries.map((entry) => revokeGrantFireAndForget(entry.name, "shutdown")),
+    );
   }
 
   return { ensureGrant, revokeAll };

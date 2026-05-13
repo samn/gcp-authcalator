@@ -11,6 +11,7 @@ import {
   type RequestContext,
 } from "./types.ts";
 import { CredentialsExpiredError } from "./credentials-error.ts";
+import { DRAIN_MARGIN_MS } from "./pam.ts";
 import { parseCommandHeader, summarizeCommand } from "./summarize-command.ts";
 
 const JSON_HEADERS = { "Content-Type": "application/json" };
@@ -293,18 +294,20 @@ interface ProdAccessGrant {
 }
 
 /**
- * Compute the `expires_in` to advertise for a minted prod token, clamped to
- * the PAM grant's expiry when one is present. Without this clamp the
- * metadata-proxy's caching token provider would keep serving a still-valid
- * bearer token long after the grant ended, surfacing as opaque "access
- * denied" errors at the GCP API.
+ * `expires_in` for a minted prod token, clamped to `grant_expiry - DRAIN_MARGIN_MS`
+ * (not to `grant_expiry`). PAM allows only one active grant per
+ * (entitlement, requester), so rotation has no overlap window; the drain
+ * margin ensures every token minted under the old grant has expired before
+ * the gate revokes it during rotation. Concurrent clients therefore see no
+ * permission errors as the gate swaps grants.
  */
 function expiresInClampedToGrant(token: CachedToken, grantExpiresAt: Date | undefined): number {
-  const effective =
-    grantExpiresAt && grantExpiresAt.getTime() < token.expires_at.getTime()
-      ? grantExpiresAt
-      : token.expires_at;
-  return Math.max(0, Math.floor((effective.getTime() - Date.now()) / 1000));
+  const tokenExpiresMs = token.expires_at.getTime();
+  const drainStartMs = grantExpiresAt
+    ? grantExpiresAt.getTime() - DRAIN_MARGIN_MS
+    : Number.POSITIVE_INFINITY;
+  const effectiveMs = Math.min(drainStartMs, tokenExpiresMs);
+  return Math.max(0, Math.floor((effectiveMs - Date.now()) / 1000));
 }
 
 /**

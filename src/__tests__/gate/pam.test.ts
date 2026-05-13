@@ -296,7 +296,28 @@ describe("ensureGrant", () => {
       { status: 200, body: { name: grantName, state: "DENIED" } },
     ]);
 
-    await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow("PAM grant was DENIED");
+    await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow(
+      "PAM grant entered terminal state DENIED",
+    );
+  });
+
+  test.each([
+    "EXPIRED",
+    "ACTIVATION_FAILED",
+    "EXTERNALLY_MODIFIED",
+    "WITHDRAWN",
+    "ENDED",
+    "REVOKED",
+  ])("throws on terminal state %s during polling", async (state) => {
+    const grantName = `${entitlementPath}/grants/grant-1`;
+    const { pam } = makeModule([
+      { status: 200, body: { name: grantName, state: "APPROVAL_AWAITED" } },
+      { status: 200, body: { name: grantName, state } },
+    ]);
+
+    await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow(
+      `PAM grant entered terminal state ${state}`,
+    );
   });
 
   test("throws when grant response has no name", async () => {
@@ -1324,5 +1345,391 @@ describe("revokeAll", () => {
     const { pam } = makeModule([]);
     // Should not throw
     await pam.revokeAll();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Single-flight rotation
+// ---------------------------------------------------------------------------
+
+describe("ensureGrant single-flight", () => {
+  const entitlementPath = "projects/p/locations/global/entitlements/e";
+
+  test("concurrent calls coalesce onto one create when cache is cold", async () => {
+    const grantName = `${entitlementPath}/grants/g1`;
+    let createCalls = 0;
+    let releaseCreate: (() => void) | undefined;
+    const createGate = new Promise<void>((r) => {
+      releaseCreate = r;
+    });
+
+    const pam = createPamModule(async () => "token", {
+      fetchFn: (async (_url: string, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          createCalls++;
+          await createGate; // Block until released so we can fan-out callers.
+          return new Response(
+            JSON.stringify({
+              name: grantName,
+              state: "ACTIVATED",
+              createTime: new Date().toISOString(),
+              requestedDuration: "3600s",
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        throw new Error(`unexpected fetch: ${init?.method}`);
+      }) as unknown as typeof globalThis.fetch,
+    });
+
+    const fanOut = Array.from({ length: 5 }, () => pam.ensureGrant(entitlementPath));
+    // Yield so all five callers enter ensureGrant before we release the create.
+    await new Promise((r) => setTimeout(r, 0));
+    releaseCreate!();
+
+    const results = await Promise.all(fanOut);
+    expect(createCalls).toBe(1);
+    for (const r of results) {
+      expect(r.name).toBe(grantName);
+    }
+  });
+
+  test("concurrent rotations during cache renewal coalesce onto one rotation", async () => {
+    const grantName1 = `${entitlementPath}/grants/g1`;
+    const grantName2 = `${entitlementPath}/grants/g2`;
+    let currentTime = 1_000_000;
+    const createTime1 = new Date(currentTime).toISOString();
+
+    let createCalls = 0;
+    let revokeCalls = 0;
+    let releaseSecondCreate: (() => void) | undefined;
+    const secondCreateGate = new Promise<void>((r) => {
+      releaseSecondCreate = r;
+    });
+
+    const pam = createPamModule(async () => "token", {
+      fetchFn: (async (url: string, init?: RequestInit) => {
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (method === "POST" && url.includes(":revoke")) {
+          revokeCalls++;
+          return new Response("{}", { status: 200 });
+        }
+        if (method === "POST" && url.endsWith("/grants")) {
+          createCalls++;
+          if (createCalls === 1) {
+            // First ensureGrant — return grant-1 synchronously.
+            return new Response(
+              JSON.stringify({
+                name: grantName1,
+                state: "ACTIVATED",
+                createTime: createTime1,
+                requestedDuration: "3600s",
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            );
+          }
+          // Second create — block to let three concurrent callers pile up.
+          await secondCreateGate;
+          return new Response(
+            JSON.stringify({
+              name: grantName2,
+              state: "ACTIVATED",
+              createTime: new Date(currentTime).toISOString(),
+              requestedDuration: "3600s",
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        throw new Error(`unexpected fetch: ${method} ${url}`);
+      }) as unknown as typeof globalThis.fetch,
+      now: () => currentTime,
+    });
+
+    await pam.ensureGrant(entitlementPath);
+    // Advance past the drain margin so the cached grant triggers rotation.
+    currentTime += 57 * 60 * 1000;
+
+    const fanOut = Array.from({ length: 3 }, () => pam.ensureGrant(entitlementPath));
+    await new Promise((r) => setTimeout(r, 0));
+    releaseSecondCreate!();
+
+    const results = await Promise.all(fanOut);
+    expect(createCalls).toBe(2); // initial + one rotation create (not three)
+    expect(revokeCalls).toBe(1); // single pre-revoke for the rotation
+    for (const r of results) {
+      expect(r.name).toBe(grantName2);
+    }
+  });
+
+  test("does not coalesce when the cache fast-path serves both callers", async () => {
+    const grantName = `${entitlementPath}/grants/g1`;
+    let createCalls = 0;
+
+    const pam = createPamModule(async () => "token", {
+      fetchFn: (async (_url: string, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          createCalls++;
+          return new Response(
+            JSON.stringify({
+              name: grantName,
+              state: "ACTIVATED",
+              createTime: new Date().toISOString(),
+              requestedDuration: "3600s",
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        throw new Error(`unexpected ${init?.method}`);
+      }) as unknown as typeof globalThis.fetch,
+    });
+
+    // Warm the cache.
+    await pam.ensureGrant(entitlementPath);
+    // Two concurrent reads hit the cache fast-path; no rotation triggered.
+    const [a, b] = await Promise.all([
+      pam.ensureGrant(entitlementPath),
+      pam.ensureGrant(entitlementPath),
+    ]);
+    expect(createCalls).toBe(1);
+    expect(a.cached).toBe(true);
+    expect(b.cached).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Revoke LRO polling
+// ---------------------------------------------------------------------------
+
+describe("revoke Operation (LRO) polling", () => {
+  const entitlementPath = "projects/p/locations/global/entitlements/e";
+  const grantName1 = `${entitlementPath}/grants/g1`;
+  const grantName2 = `${entitlementPath}/grants/g2`;
+
+  test("waits for the revoke Operation to report done:true before retrying create", async () => {
+    // When the revoke endpoint returns an Operation with done:false, the
+    // recovery path must poll the operation to done:true before posting
+    // the follow-up createGrant — otherwise PAM still sees the old grant
+    // as open and 409s the create.
+    let currentTime = 1_000_000;
+    const createTime1 = new Date(currentTime).toISOString();
+    const operationName = `${entitlementPath}/operations/op-1`;
+
+    let createCalls = 0;
+    let revokePosts = 0;
+    let opPolls = 0;
+    let opDone = false;
+
+    const pam = createPamModule(async () => "token", {
+      fetchFn: (async (url: string, init?: RequestInit) => {
+        const method = (init?.method ?? "GET").toUpperCase();
+
+        if (method === "POST" && url.includes(":revoke")) {
+          revokePosts++;
+          return new Response(JSON.stringify({ name: operationName, done: false }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+
+        if (method === "GET" && url.includes(operationName)) {
+          opPolls++;
+          // After 2 polls, the operation flips to done:true.
+          if (opPolls >= 2) opDone = true;
+          return new Response(JSON.stringify({ name: operationName, done: opDone }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+
+        if (method === "POST" && url.endsWith("/grants")) {
+          createCalls++;
+          if (createCalls === 1) {
+            // Initial create returns grant-1.
+            return new Response(
+              JSON.stringify({
+                name: grantName1,
+                state: "ACTIVATED",
+                createTime: createTime1,
+                requestedDuration: "3600s",
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            );
+          }
+          // Retry create after revoke LRO done — succeeds.
+          return new Response(
+            JSON.stringify({
+              name: grantName2,
+              state: "ACTIVATED",
+              createTime: new Date(currentTime).toISOString(),
+              requestedDuration: "3600s",
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
+        throw new Error(`unexpected fetch: ${method} ${url}`);
+      }) as unknown as typeof globalThis.fetch,
+      now: () => currentTime,
+      sleepFn: () => Promise.resolve(),
+    });
+
+    await pam.ensureGrant(entitlementPath);
+    currentTime += 57 * 60 * 1000;
+
+    const result = await pam.ensureGrant(entitlementPath);
+    expect(result.name).toBe(grantName2);
+    expect(revokePosts).toBe(1);
+    expect(opPolls).toBeGreaterThanOrEqual(2);
+  });
+
+  test("synchronous revoke response (done:true initial) skips polling", async () => {
+    let currentTime = 1_000_000;
+    const createTime1 = new Date(currentTime).toISOString();
+    let opPolls = 0;
+    let createCalls = 0;
+
+    const pam = createPamModule(async () => "token", {
+      fetchFn: (async (url: string, init?: RequestInit) => {
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (method === "POST" && url.includes(":revoke")) {
+          return new Response(
+            JSON.stringify({ name: `${entitlementPath}/operations/op-sync`, done: true }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (method === "GET" && url.includes("operations/")) {
+          opPolls++;
+          return new Response("{}", { status: 200 });
+        }
+        if (method === "POST" && url.endsWith("/grants")) {
+          createCalls++;
+          const grant = createCalls === 1 ? grantName1 : grantName2;
+          return new Response(
+            JSON.stringify({
+              name: grant,
+              state: "ACTIVATED",
+              createTime: createCalls === 1 ? createTime1 : new Date(currentTime).toISOString(),
+              requestedDuration: "3600s",
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        throw new Error(`unexpected fetch: ${method} ${url}`);
+      }) as unknown as typeof globalThis.fetch,
+      now: () => currentTime,
+      sleepFn: () => Promise.resolve(),
+    });
+
+    await pam.ensureGrant(entitlementPath);
+    currentTime += 57 * 60 * 1000;
+    await pam.ensureGrant(entitlementPath);
+    expect(opPolls).toBe(0);
+  });
+
+  test("revoke Operation reporting an error returns without throwing", async () => {
+    // Operation with done:true and a non-empty error field is treated as
+    // an already-terminal grant — revoke is best-effort so we don't throw.
+    let currentTime = 1_000_000;
+    const createTime1 = new Date(currentTime).toISOString();
+    let createCalls = 0;
+
+    const pam = createPamModule(async () => "token", {
+      fetchFn: (async (url: string, init?: RequestInit) => {
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (method === "POST" && url.includes(":revoke")) {
+          return new Response(
+            JSON.stringify({
+              name: `${entitlementPath}/operations/op-err`,
+              done: true,
+              error: { code: 9, message: "Grant is already in REVOKED state" },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (method === "POST" && url.endsWith("/grants")) {
+          createCalls++;
+          const grant = createCalls === 1 ? grantName1 : grantName2;
+          return new Response(
+            JSON.stringify({
+              name: grant,
+              state: "ACTIVATED",
+              createTime: createCalls === 1 ? createTime1 : new Date(currentTime).toISOString(),
+              requestedDuration: "3600s",
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        throw new Error(`unexpected fetch: ${method} ${url}`);
+      }) as unknown as typeof globalThis.fetch,
+      now: () => currentTime,
+      sleepFn: () => Promise.resolve(),
+    });
+
+    await pam.ensureGrant(entitlementPath);
+    currentTime += 57 * 60 * 1000;
+    // Should not throw — revoke is best-effort.
+    const result = await pam.ensureGrant(entitlementPath);
+    expect(result.name).toBe(grantName2);
+  });
+
+  test("revoke Operation that never finishes returns within its deadline (best-effort)", async () => {
+    // If PAM never reports done:true, revokeGrantAndWait must give up at
+    // the deadline rather than blocking forever. Best-effort: it logs and
+    // returns, the caller still attempts the follow-up create.
+    let currentTime = 1_000_000;
+    const createTime1 = new Date(currentTime).toISOString();
+    let createCalls = 0;
+    let opPolls = 0;
+
+    const pam = createPamModule(async () => "token", {
+      fetchFn: (async (url: string, init?: RequestInit) => {
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (method === "POST" && url.includes(":revoke")) {
+          return new Response(
+            JSON.stringify({ name: `${entitlementPath}/operations/op-stuck`, done: false }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (method === "GET" && url.includes("operations/")) {
+          opPolls++;
+          // Advance time toward the deadline so the loop exits.
+          currentTime += 5_000;
+          return new Response(
+            JSON.stringify({ name: `${entitlementPath}/operations/op-stuck`, done: false }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (method === "POST" && url.endsWith("/grants")) {
+          createCalls++;
+          const grant = createCalls === 1 ? grantName1 : grantName2;
+          return new Response(
+            JSON.stringify({
+              name: grant,
+              state: "ACTIVATED",
+              createTime: createCalls === 1 ? createTime1 : new Date(currentTime).toISOString(),
+              requestedDuration: "3600s",
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        throw new Error(`unexpected fetch: ${method} ${url}`);
+      }) as unknown as typeof globalThis.fetch,
+      now: () => currentTime,
+      sleepFn: () => Promise.resolve(),
+    });
+
+    await pam.ensureGrant(entitlementPath);
+    const t0 = currentTime;
+    currentTime += 57 * 60 * 1000;
+    const t1 = currentTime;
+
+    const result = await pam.ensureGrant(entitlementPath);
+    expect(result.name).toBe(grantName2);
+    expect(opPolls).toBeGreaterThan(0);
+    // Cumulative time advance from operation polls stays inside the 30s
+    // deadline; once exhausted the helper returns and create proceeds.
+    expect(currentTime - t1).toBeLessThan(60 * 1000);
+    // Sanity: we did advance past the cache margin between the two calls.
+    expect(t1 - t0).toBeGreaterThan(50 * 60 * 1000);
   });
 });
