@@ -202,10 +202,12 @@ export function createPamModule(
     });
   }
 
-  async function createGrant(
+  type CreateGrantOnceResult = { kind: "ok"; grant: PamGrantResponse } | { kind: "open-conflict" };
+
+  async function createGrantOnce(
     entitlementPath: string,
     justification?: string,
-  ): Promise<PamGrantResponse> {
+  ): Promise<CreateGrantOnceResult> {
     const url = `${PAM_API_BASE}/${entitlementPath}/grants`;
     const body = {
       requestedDuration: grantDuration,
@@ -220,8 +222,7 @@ export function createPamModule(
     });
 
     if (res.status === 409) {
-      // Grant already exists — try to find and reuse the active one
-      return findActiveGrant(entitlementPath);
+      return { kind: "open-conflict" };
     }
 
     if (res.status === 403) {
@@ -243,24 +244,37 @@ export function createPamModule(
       const text = await res.text();
 
       if (res.status === 400 && isOpenGrantPrecondition(text)) {
-        return findActiveGrant(entitlementPath);
+        return { kind: "open-conflict" };
       }
 
       throw new Error(`PAM API error (${res.status}): ${text}`);
     }
 
-    return (await res.json()) as PamGrantResponse;
+    return { kind: "ok", grant: (await res.json()) as PamGrantResponse };
   }
 
-  async function findActiveGrant(entitlementPath: string): Promise<PamGrantResponse> {
+  interface OpenGrantScan {
+    /** First active grant with usable remaining lifetime, if any. */
+    usable?: PamGrantResponse & { name: string };
+    /**
+     * Active grants whose computed expiry has already passed. These are
+     * what's blocking createGrant via PAM's state lag — the recovery path
+     * revokes them and retries.
+     */
+    stale: Array<PamGrantResponse & { name: string }>;
+    scanned: number;
+  }
+
+  async function scanForOpenGrants(entitlementPath: string): Promise<OpenGrantScan> {
     // PAM's grants.list endpoint rejects every `filter=` we've tried as
-    // "invalid list filter", so we list unfiltered and select client-side.
+    // "invalid list filter", so we list unfiltered and bucket client-side.
     // ENDED grants stick around in the response, so on a busy entitlement
-    // the active grant may not be on the first page — page through up to
-    // LIST_GRANTS_MAX_PAGES before giving up. We also re-check
-    // createTime+duration: PAM's `state` field can lag actual expiry, and
-    // the 409/400 "open Grant" path lands us here precisely in that window.
+    // the open grant may not be on the first page — page through up to
+    // LIST_GRANTS_MAX_PAGES before giving up. We re-check createTime+duration:
+    // PAM's `state` field can lag actual expiry, and the 409/400 "open Grant"
+    // path lands us here precisely in that window.
     const baseUrl = `${PAM_API_BASE}/${entitlementPath}/grants?pageSize=${LIST_GRANTS_PAGE_SIZE}`;
+    const stale: Array<PamGrantResponse & { name: string }> = [];
     let scanned = 0;
     let pageToken: string | undefined;
 
@@ -280,21 +294,63 @@ export function createPamModule(
       const grants = data.grants ?? [];
       scanned += grants.length;
 
-      const active = grants.find(
-        (g): g is PamGrantResponse & { name: string } =>
-          isActiveState(g.state) &&
-          typeof g.name === "string" &&
-          hasUsableLifetime(computeGrantExpiry(g)),
-      );
-      if (active) return active;
+      // Once we find a usable grant we're done — the caller wants to reuse
+      // it directly without revoking the stale ones (they'll age out on
+      // their own and don't block anything).
+      for (const g of grants) {
+        if (!isActiveState(g.state) || typeof g.name !== "string") continue;
+        const named = g as PamGrantResponse & { name: string };
+        if (hasUsableLifetime(computeGrantExpiry(named))) {
+          return { usable: named, stale, scanned };
+        }
+        stale.push(named);
+      }
 
       if (!data.nextPageToken) break;
       pageToken = data.nextPageToken;
     }
 
+    return { stale, scanned };
+  }
+
+  async function createGrantWithRecovery(
+    entitlementPath: string,
+    justification?: string,
+  ): Promise<PamGrantResponse> {
+    const first = await createGrantOnce(entitlementPath, justification);
+    if (first.kind === "ok") return first.grant;
+
+    // 409 / 400 FAILED_PRECONDITION ("open Grant"): another grant is open
+    // for the same privileged access. Scan to learn whether it's usable
+    // (we can just reuse it) or stale (PAM's state lags actual expiry and
+    // we have to revoke it before our retry can succeed).
+    const scan = await scanForOpenGrants(entitlementPath);
+    if (scan.usable) return scan.usable;
+
+    if (scan.stale.length === 0) {
+      throw new Error(
+        `PAM grant conflict but no active grant found for "${entitlementPath}" ` +
+          `(scanned ${scan.scanned} grant(s) across ${LIST_GRANTS_MAX_PAGES} page(s))`,
+      );
+    }
+
+    await Promise.allSettled(
+      scan.stale.map((g) => revokeGrantBestEffort(g.name, "clearing stale grant before retry")),
+    );
+
+    const retry = await createGrantOnce(entitlementPath, justification);
+    if (retry.kind === "ok") return retry.grant;
+
+    // PAM still rejects after we revoked every stale open grant we could
+    // see. One more scan in case the previously-stale grant has now been
+    // replaced by a fresh one (race against another process); otherwise
+    // surface a distinct error so this doesn't look like the original
+    // "no active grant found" deadlock.
+    const rescan = await scanForOpenGrants(entitlementPath);
+    if (rescan.usable) return rescan.usable;
     throw new Error(
-      `PAM grant conflict but no active grant found for "${entitlementPath}" ` +
-        `(scanned ${scanned} grant(s) across ${LIST_GRANTS_MAX_PAGES} page(s))`,
+      `PAM grant conflict persists after revoking ${scan.stale.length} stale grant(s) ` +
+        `for "${entitlementPath}"`,
     );
   }
 
@@ -373,19 +429,20 @@ export function createPamModule(
         };
       }
 
-      // Within the cache margin but not yet past expiry. PAM will reject any
-      // new createGrant (409 / 400 FAILED_PRECONDITION) while the old grant
-      // is still open, and the post-#98 lifetime filter in findActiveGrant
-      // also rules it out. Revoke up front so the replacement create
-      // succeeds and the new expiry can clamp the next minted token.
-      if (cached.expiresAt.getTime() > now()) {
-        await revokeGrantBestEffort(cached.name, "renewing before expiry");
-      }
+      // The cached grant is at or past the cache-margin boundary. Always
+      // revoke best-effort before discarding the cache entry: even when
+      // our computed expiry has already passed, PAM's state can lag and
+      // leave the grant in an "open" state that 409s the immediate
+      // createGrant. revokeGrantBestEffort tolerates already-ended grants,
+      // so this is safe in both the near-expiry and post-expiry cases.
+      await revokeGrantBestEffort(cached.name, "renewing before expiry");
     }
     grantCache.delete(entitlementPath);
 
-    // Request a new grant
-    const grant = await createGrant(entitlementPath, justification);
+    // Request a new grant. createGrantWithRecovery handles the 409 / 400
+    // FAILED_PRECONDITION ("open Grant") path including revoking any
+    // stale-but-still-open grants that PAM is using to block creation.
+    const grant = await createGrantWithRecovery(entitlementPath, justification);
 
     if (!grant.name) {
       throw new Error("PAM API returned a grant with no resource name");

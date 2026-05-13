@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Fixed
+
+- **PAM grant renewal no longer dead-ends after the grant's computed
+  expiry has passed.** When a `/token?session=...` refresh arrived
+  after the user had idled past their PAM grant's TTL (or during the
+  5-minute cache-margin renewal window), `ensureGrant` would
+  invalidate its cache, call createGrant, and hit a 409 / 400
+  FAILED_PRECONDITION because PAM still considered the old grant
+  open. The post-#98 lifetime filter then ruled the stale-but-open
+  grant ineligible for reuse and surfaced "PAM grant conflict but no
+  active grant found", dropping prod access despite a valid session.
+  The conflict path now revokes the offending stale grant in place
+  and retries createGrant once (bounded). The safety invariant that
+  callers never receive a grant with no usable lifetime is
+  preserved. Also covers the gate-restart and cross-instance cases
+  where no cached entry exists to pre-revoke.
+
 ### Security
 
 - **Default `admin_socket_path` moved to `$XDG_RUNTIME_DIR/gcp-authcalator-admin/admin.sock`.**

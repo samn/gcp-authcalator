@@ -220,6 +220,9 @@ describe("ensureGrant", () => {
     const { pam } = makeModule(
       [
         { status: 200, body: makeActivatedGrant(grantName1, createTime) },
+        // ensureGrant pre-revokes the cached entry before re-creating
+        // (PAM's state can lag; the revoke clears any stale "open" state).
+        { status: 200, body: {} },
         { status: 200, body: makeActivatedGrant(grantName2, createTime) },
       ],
       () => currentTime,
@@ -721,32 +724,174 @@ describe("ensureGrant", () => {
     expect(second.cached).toBe(false);
   });
 
-  test("findActiveGrant skips ACTIVE grants whose actual expiry has passed", async () => {
+  test("409 with a stale-but-still-open grant: revokes the stale grant and retries create", async () => {
     // PAM's `state` field can lag actual expiry: a grant whose
     // createTime + requestedDuration is already in the past may briefly
-    // continue to be reported as ACTIVE/ACTIVATED. Reusing such a grant
-    // would hand the caller a dead entitlement, so we must skip past it
-    // and (when no usable grant exists) fall through to the "no active
-    // grant found" error so the next attempt re-creates a fresh grant.
+    // continue to be reported as ACTIVE/ACTIVATED, blocking a new
+    // createGrant with 409 / 400 FAILED_PRECONDITION. Reusing the stale
+    // grant directly would hand the caller a dead entitlement, so the
+    // recovery harness revokes the stale grant and retries createGrant
+    // once — the returned grant always has usable remaining lifetime.
     const currentTime = 10_000_000;
-    const expiredButStillActiveName = `${entitlementPath}/grants/stale-active`;
-    const expiredGrant = {
-      name: expiredButStillActiveName,
+    const staleName = `${entitlementPath}/grants/stale-active`;
+    const freshName = `${entitlementPath}/grants/fresh-active`;
+    const staleGrant = {
+      name: staleName,
       state: "ACTIVE",
       // Created 2 hours ago with a 1-hour duration — clearly expired.
       createTime: new Date(currentTime - 2 * 60 * 60 * 1000).toISOString(),
       requestedDuration: "3600s",
     };
+    const freshGrant = {
+      name: freshName,
+      state: "ACTIVATED",
+      createTime: new Date(currentTime).toISOString(),
+      requestedDuration: "3600s",
+    };
 
-    const { pam } = makeModule(
-      [
-        { status: 409, body: { error: { message: "Already exists" } } },
-        { status: 200, body: { grants: [expiredGrant] } },
-      ],
-      () => currentTime,
-    );
+    const revokedNames: string[] = [];
+    let listCalls = 0;
+    let createCalls = 0;
+    const pam = createPamModule(async () => "token", {
+      fetchFn: (async (url: string, init?: RequestInit) => {
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (method === "POST" && url.includes(":revoke")) {
+          revokedNames.push(url);
+          return new Response("{}", { status: 200 });
+        }
+        if (method === "GET" && /\/grants\?pageSize=\d+/.test(url)) {
+          listCalls++;
+          return new Response(JSON.stringify({ grants: [staleGrant] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        if (method === "POST" && url.endsWith("/grants")) {
+          createCalls++;
+          if (createCalls === 1) {
+            // First create: PAM rejects because the stale grant is still open.
+            return new Response(JSON.stringify({ error: { message: "Already exists" } }), {
+              status: 409,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          // Second create (after the stale grant was revoked) succeeds.
+          return new Response(JSON.stringify(freshGrant), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        throw new Error(`unexpected fetch: ${method} ${url}`);
+      }) as unknown as typeof globalThis.fetch,
+      now: () => currentTime,
+    });
 
-    await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow("no active grant found");
+    const result = await pam.ensureGrant(entitlementPath);
+    expect(result.name).toBe(freshName);
+    expect(createCalls).toBe(2);
+    expect(listCalls).toBeGreaterThanOrEqual(1);
+    expect(revokedNames).toHaveLength(1);
+    expect(revokedNames[0]).toContain(staleName);
+    // The post-#98 invariant — never return a grant with no usable lifetime —
+    // must still hold after the recovery path.
+    expect(result.expiresAt.getTime() - currentTime).toBeGreaterThan(5 * 60 * 1000);
+  });
+
+  test("409 with only stale grants but persistent conflict surfaces a distinct error", async () => {
+    // After revoking every stale grant the scan returned, a second
+    // createGrant that still 409s is a real conflict (likely PAM lag
+    // longer than our bounded retry can absorb, or another process
+    // racing us). The error message must distinguish this from the
+    // "no active grant found" path so operators can tell them apart.
+    const currentTime = 10_000_000;
+    const staleName = `${entitlementPath}/grants/stale-active`;
+    const staleGrant = {
+      name: staleName,
+      state: "ACTIVE",
+      createTime: new Date(currentTime - 2 * 60 * 60 * 1000).toISOString(),
+      requestedDuration: "3600s",
+    };
+
+    const pam = createPamModule(async () => "token", {
+      fetchFn: (async (url: string, init?: RequestInit) => {
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (method === "POST" && url.includes(":revoke")) {
+          return new Response("{}", { status: 200 });
+        }
+        if (method === "GET" && /\/grants\?pageSize=\d+/.test(url)) {
+          return new Response(JSON.stringify({ grants: [staleGrant] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        // Both creates 409.
+        return new Response(JSON.stringify({ error: { message: "Already exists" } }), {
+          status: 409,
+          headers: { "Content-Type": "application/json" },
+        });
+      }) as unknown as typeof globalThis.fetch,
+      now: () => currentTime,
+    });
+
+    await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow(/grant conflict persists/);
+  });
+
+  test("recovery path tolerates revoke failure on the stale grant", async () => {
+    // revokeGrantBestEffort swallows errors so a 5xx on the revoke
+    // doesn't abort the retry — the next createGrant may still succeed
+    // if PAM has caught up on its own by the time we try.
+    const currentTime = 10_000_000;
+    const staleName = `${entitlementPath}/grants/stale-active`;
+    const freshName = `${entitlementPath}/grants/fresh-active`;
+    const staleGrant = {
+      name: staleName,
+      state: "ACTIVE",
+      createTime: new Date(currentTime - 2 * 60 * 60 * 1000).toISOString(),
+      requestedDuration: "3600s",
+    };
+    const freshGrant = {
+      name: freshName,
+      state: "ACTIVATED",
+      createTime: new Date(currentTime).toISOString(),
+      requestedDuration: "3600s",
+    };
+
+    let createCalls = 0;
+    const pam = createPamModule(async () => "token", {
+      fetchFn: (async (url: string, init?: RequestInit) => {
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (method === "POST" && url.includes(":revoke")) {
+          return new Response(JSON.stringify({ error: { message: "boom" } }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        if (method === "GET" && /\/grants\?pageSize=\d+/.test(url)) {
+          return new Response(JSON.stringify({ grants: [staleGrant] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        if (method === "POST" && url.endsWith("/grants")) {
+          createCalls++;
+          if (createCalls === 1) {
+            return new Response(JSON.stringify({ error: { message: "Already exists" } }), {
+              status: 409,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          return new Response(JSON.stringify(freshGrant), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        throw new Error(`unexpected fetch: ${method} ${url}`);
+      }) as unknown as typeof globalThis.fetch,
+      now: () => currentTime,
+    });
+
+    const result = await pam.ensureGrant(entitlementPath);
+    expect(result.name).toBe(freshName);
   });
 
   test("findActiveGrant returns a still-fresh active grant on a later page", async () => {
@@ -808,6 +953,103 @@ describe("ensureGrant", () => {
     expect(result.expiresAt.getTime()).toBe(createdAtMs + 3600 * 1000);
   });
 
+  test("near-expiry renewal recovers when PAM still 409s after our pre-revoke", async () => {
+    // The proactive pre-revoke in ensureGrant clears most of the
+    // cache-margin races, but PAM may still echo the just-revoked grant
+    // as "open" if the create lands before PAM has propagated the
+    // revoke. The recovery harness must scan, re-revoke the stale
+    // grant, and retry create — without rolling back the
+    // "never return a grant with no usable lifetime" invariant.
+    const grantName1 = `${entitlementPath}/grants/grant-1`;
+    const grantName2 = `${entitlementPath}/grants/grant-2`;
+    let currentTime = 1_000_000;
+    const createTime1 = new Date(currentTime).toISOString();
+
+    const revokedNames: string[] = [];
+    let createCalls = 0;
+    let staleStillAppearsOpen = true;
+    const pam = createPamModule(async () => "token", {
+      fetchFn: (async (url: string, init?: RequestInit) => {
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (method === "POST" && url.includes(":revoke")) {
+          revokedNames.push(url);
+          // After a second revoke against the stale grant, PAM finally
+          // catches up — the next create can succeed.
+          if (revokedNames.filter((u) => u.includes(grantName1)).length >= 2) {
+            staleStillAppearsOpen = false;
+          }
+          return new Response("{}", { status: 200 });
+        }
+        if (method === "GET" && /\/grants\?pageSize=\d+/.test(url)) {
+          // PAM still reports grant-1 as ACTIVE even though we revoked it,
+          // but its computed expiry has passed (we advanced into the
+          // margin), so the scan classifies it as stale.
+          return new Response(
+            JSON.stringify({
+              grants: [
+                {
+                  name: grantName1,
+                  state: "ACTIVE",
+                  createTime: createTime1,
+                  requestedDuration: "3600s",
+                },
+              ],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (method === "POST" && url.endsWith("/grants")) {
+          createCalls++;
+          if (createCalls === 1) {
+            // Initial create the test driver runs against an empty cache.
+            return new Response(
+              JSON.stringify({
+                name: grantName1,
+                state: "ACTIVATED",
+                createTime: createTime1,
+                requestedDuration: "3600s",
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            );
+          }
+          if (staleStillAppearsOpen) {
+            return new Response(JSON.stringify({ error: { message: "Already exists" } }), {
+              status: 409,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          return new Response(
+            JSON.stringify({
+              name: grantName2,
+              state: "ACTIVATED",
+              createTime: new Date(currentTime).toISOString(),
+              requestedDuration: "3600s",
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        throw new Error(`unexpected fetch: ${method} ${url}`);
+      }) as unknown as typeof globalThis.fetch,
+      now: () => currentTime,
+    });
+
+    await pam.ensureGrant(entitlementPath);
+
+    // Step into the 5-minute cache margin (grant has ~3 min left).
+    currentTime += 57 * 60 * 1000;
+
+    const second = await pam.ensureGrant(entitlementPath);
+    expect(second.name).toBe(grantName2);
+    expect(second.cached).toBe(false);
+    // Two revoke calls against grant-1: the pre-revoke that ensureGrant
+    // issues and the recovery-path revoke against the stale scan result.
+    expect(revokedNames.filter((u) => u.includes(grantName1))).toHaveLength(2);
+    // Two create attempts after the initial: one 409, one success.
+    expect(createCalls).toBe(3);
+    // Invariant: the returned grant has usable remaining lifetime.
+    expect(second.expiresAt.getTime() - currentTime).toBeGreaterThan(5 * 60 * 1000);
+  });
+
   test("near-expiry renewal revokes old grant before creating a new one", async () => {
     // The post-#98 lifetime filter in findActiveGrant turns the cache-margin
     // window into a dead-end: createGrant 409s on the still-open grant and
@@ -853,10 +1095,13 @@ describe("ensureGrant", () => {
     expect(events[1]!.url).toContain(grantName1);
   });
 
-  test("expired-grant renewal does not attempt to revoke", async () => {
-    // A grant whose computed expiry has already passed should not be revoked
-    // before re-creating — PAM has ended it on its own, and a revoke would
-    // be a wasted API call (or surface as a noisy error).
+  test("expired-grant renewal best-effort revokes stale cache entry", async () => {
+    // A grant whose computed expiry has already passed must still be
+    // revoked before we re-create: PAM's state can lag actual expiry,
+    // leaving the old grant in an "open" state that 409s the immediate
+    // create. revokeGrantBestEffort is a no-op against truly-ended
+    // grants, so this is safe in both cases — and it saves a recovery
+    // round trip whenever PAM hasn't caught up yet.
     const grantName1 = `${entitlementPath}/grants/grant-1`;
     const grantName2 = `${entitlementPath}/grants/grant-2`;
     let currentTime = 1_000_000;
@@ -888,7 +1133,8 @@ describe("ensureGrant", () => {
     currentTime += 3600 * 1000 + 60 * 1000;
 
     await pam.ensureGrant(entitlementPath);
-    expect(events.map((e) => e.kind)).toEqual(["create", "create"]);
+    expect(events.map((e) => e.kind)).toEqual(["create", "revoke", "create"]);
+    expect(events[1]!.url).toContain(grantName1);
   });
 
   test("revoked grant is removed from cache so revokeAll skips it", async () => {
@@ -935,9 +1181,11 @@ describe("ensureGrant", () => {
   });
 
   test("expired cache entry is not retained after invalidation", async () => {
-    // After a cached grant expires, ensureGrant must re-request and the
-    // dead entry must not stay in the map (revokeAll would otherwise try
-    // to revoke an entitlement that has already ended at PAM).
+    // After a cached grant's expiry passes, ensureGrant pre-revokes it
+    // (best-effort, to clear PAM's lagged state) and purges the cache
+    // entry before attempting to re-create. If the re-create then fails,
+    // revokeAll must not double-revoke grant-1 — the cache should
+    // already be empty.
     const grantName1 = `${entitlementPath}/grants/grant-1`;
     let currentTime = 1_000_000;
     const createTime1 = new Date(currentTime).toISOString();
@@ -976,12 +1224,16 @@ describe("ensureGrant", () => {
     // Advance past expiry
     currentTime += 3600 * 1000 + 1000;
 
-    // Calling ensureGrant again should fail (no further mock responses),
-    // but the expired entry should already be purged. The subsequent
-    // revokeAll must therefore not try to revoke grant-1.
+    // Calling ensureGrant again pre-revokes grant-1 and then attempts to
+    // re-create (which fails — no further create mock). After the
+    // failure the cache should be empty so revokeAll doesn't try to
+    // revoke grant-1 a second time.
     await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow();
+    expect(revokedNames).toHaveLength(1);
+    expect(revokedNames[0]).toContain(grantName1);
+
     await pam.revokeAll();
-    expect(revokedNames).toHaveLength(0);
+    expect(revokedNames).toHaveLength(1);
   });
 });
 
