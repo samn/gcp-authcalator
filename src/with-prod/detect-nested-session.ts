@@ -13,6 +13,27 @@ export interface NestedSessionInfo {
 }
 
 /**
+ * Accept only literal loopback hosts (127.0.0.1, ::1, localhost). DNS
+ * is intentionally NOT resolved — a same-UID attacker who plants a
+ * non-loopback value in the env could otherwise redirect the wrapped
+ * command's metadata traffic off-host.
+ */
+function isLoopbackHost(metadataHost: string): boolean {
+  let hostname: string;
+  try {
+    hostname = new URL(`http://${metadataHost}`).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  return (
+    hostname === "127.0.0.1" ||
+    hostname === "[::1]" ||
+    hostname === "::1" ||
+    hostname === "localhost"
+  );
+}
+
+/**
  * Check if we are already inside a with-prod session with a live proxy.
  *
  * Returns session info if the parent proxy is alive and serving valid tokens,
@@ -24,6 +45,14 @@ export async function detectNestedSession(
 ): Promise<NestedSessionInfo | null> {
   const metadataHost = env[PROD_SESSION_ENV_VAR];
   if (!metadataHost) return null;
+
+  if (!isLoopbackHost(metadataHost)) {
+    console.error(
+      `with-prod: ignoring ${PROD_SESSION_ENV_VAR}=${metadataHost} — not a loopback address. ` +
+        `Nested-session reuse only follows 127.0.0.1, ::1, or localhost.`,
+    );
+    return null;
+  }
 
   try {
     // Health check: root ping — verify it's a metadata proxy

@@ -5,36 +5,56 @@ import { loadClientBundle, loadClientBundleFromBase64 } from "./store.ts";
 
 const TLS_BUNDLE_B64_ENV = "GCP_AUTHCALATOR_TLS_BUNDLE_B64";
 
+let capturedTlsBundleB64: string | undefined;
+
 /**
- * Resolve the client bundle from available sources, in priority order:
- *
- * 1. `GCP_AUTHCALATOR_TLS_BUNDLE_B64` env var (base64-encoded)
- * 2. `tls_bundle` config / CLI option (file path)
- * 3. `tls_dir` — load `client-bundle.pem` from the TLS directory
- * 4. null (no bundle → Unix socket mode)
- *
- * After resolving from the env var, it is deleted from process.env to
- * mitigate /proc/&lt;pid&gt;/environ exposure.
+ * Move `GCP_AUTHCALATOR_TLS_BUNDLE_B64` out of `process.env` into a
+ * module-private slot. Call before any subprocess can be spawned so the
+ * bundle is no longer visible via `/proc/<pid>/environ`. Idempotent.
+ */
+export function captureAndDeleteTlsBundleEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  const b64 = env[TLS_BUNDLE_B64_ENV];
+  if (b64 !== undefined) {
+    capturedTlsBundleB64 = b64;
+    delete env[TLS_BUNDLE_B64_ENV];
+  }
+  return capturedTlsBundleB64;
+}
+
+/** Test-only: clear the captured bundle slot. */
+export function _resetCapturedTlsBundleForTesting(): void {
+  capturedTlsBundleB64 = undefined;
+}
+
+/**
+ * Resolve the client bundle. Priority: captured env value > live env
+ * var (test fallback) > `tls_bundle` path > `tls_dir/client-bundle.pem`
+ * > null (Unix-socket mode).
  */
 export function resolveClientBundle(
   config: { tls_bundle?: string; tls_dir?: string },
   env: Record<string, string | undefined> = process.env,
 ): ClientBundle | null {
-  // Priority 1: base64-encoded env var
+  if (capturedTlsBundleB64) {
+    return loadClientBundleFromBase64(capturedTlsBundleB64);
+  }
+
+  // Tests that import this module without going through cli.ts can still
+  // resolve from the live env var. Production callers never hit this
+  // branch because main() captures the value first.
   const b64 = env[TLS_BUNDLE_B64_ENV];
   if (b64) {
     const bundle = loadClientBundleFromBase64(b64);
-    // Clear from process env to prevent inheritance by child processes
     delete process.env[TLS_BUNDLE_B64_ENV];
     return bundle;
   }
 
-  // Priority 2: file path from config
   if (config.tls_bundle) {
     return loadClientBundle(config.tls_bundle);
   }
 
-  // Priority 3: client-bundle.pem inside tls_dir
   if (config.tls_dir) {
     const bundlePath = join(config.tls_dir, "client-bundle.pem");
     if (existsSync(bundlePath)) {
@@ -42,6 +62,5 @@ export function resolveClientBundle(
     }
   }
 
-  // No bundle available
   return null;
 }

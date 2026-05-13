@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { chmodSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Config } from "../config.ts";
-import { getDefaultRuntimeDir, WithProdConfigSchema } from "../config.ts";
+import { getDefaultWithProdRuntimeDir, WithProdConfigSchema } from "../config.ts";
 import {
   createProdSession,
   fetchProdToken,
@@ -232,9 +232,16 @@ export async function runWithProd(
   }
   console.log(`with-prod: prod access acquired for ${initialEmail}`);
 
+  // Tighten umask only around the token-bearing file creation below.
+  // The wrapped child should not inherit it — restore before spawn.
+  const previousUmask = process.umask(0o077);
+
   // Step 2: Create an isolated gcloud config directory BEFORE the token
   // provider so onRefresh can capture the file path in its closure.
-  const runtimeDir = getDefaultRuntimeDir();
+  // The sandbox dir (mkdtempSync) is the real security boundary — created
+  // 0o700 owned by the caller, with 0o600 token files inside — so the
+  // parent's exact mode doesn't matter. mkdirSync no-ops on existing dirs.
+  const runtimeDir = getDefaultWithProdRuntimeDir();
   mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
   const gcloudConfigDir = mkdtempSync(join(runtimeDir, "gcp-authcalator-gcloud-"));
   chmodSync(gcloudConfigDir, 0o700);
@@ -246,6 +253,8 @@ export async function runWithProd(
     `[auth]\naccess_token_file = ${tokenFilePath}\n`,
     { mode: 0o600 },
   );
+
+  process.umask(previousUmask);
 
   // Step 3: Create a token provider that auto-refreshes from the gate.
   // The session ID (when present) stays in this closure — the subprocess

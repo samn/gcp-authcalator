@@ -99,13 +99,17 @@ export function resolveAgentUid(value: number | string, db: UnixGroupDb): number
   return entry.uid;
 }
 
+function findPasswdByUid(uid: number, db: UnixGroupDb): PasswdEntry | undefined {
+  return db.passwd.find((p) => p.uid === uid);
+}
+
 /**
  * Return all gids the given UID is a member of: primary gid from /etc/passwd
  * plus every supplementary gid where the username appears in /etc/group's
  * member list. Returns an empty array if the UID is not in /etc/passwd.
  */
 export function getGroupsForUid(uid: number, db: UnixGroupDb): number[] {
-  const user = db.passwd.find((p) => p.uid === uid);
+  const user = findPasswdByUid(uid, db);
   if (!user) return [];
 
   const gids = new Set<number>([user.gid]);
@@ -113,4 +117,13 @@ export function getGroupsForUid(uid: number, db: UnixGroupDb): number[] {
     if (g.members.includes(user.name)) gids.add(g.gid);
   }
   return [...gids];
+}
+
+/**
+ * True iff `uid` is in /etc/passwd. NSS-managed (LDAP/SSSD) users are
+ * invisible to this parser, which the operator-socket startup check
+ * uses to refuse such configurations.
+ */
+export function isUidInPasswd(uid: number, db: UnixGroupDb): boolean {
+  return findPasswdByUid(uid, db) !== undefined;
 }

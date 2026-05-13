@@ -169,7 +169,7 @@ This produces a single compiled `gcp-authcalator` binary.
 ## Configuration
 
 Settings can be provided via CLI flags, a TOML config file, environment variables, or a combination.
-Precedence: environment variables > CLI flags > TOML file > defaults.
+Precedence: CLI flags > environment variables > TOML file > defaults.
 
 ### CLI flags
 
@@ -177,7 +177,7 @@ Precedence: environment variables > CLI flags > TOML file > defaults.
 --project-id <id>          GCP project ID
 --service-account <email>  Service account email to impersonate
 --socket-path <path>       Unix socket path (default: $XDG_RUNTIME_DIR/gcp-authcalator.sock)
---admin-socket-path <path> Admin socket path for approve/deny (default: /tmp/gcp-authcalator-admin-<uid>/admin.sock)
+--admin-socket-path <path> Admin socket path for approve/deny (default: $XDG_RUNTIME_DIR/gcp-authcalator-admin/admin.sock)
 -p, --port <port>          Metadata proxy port (default: 8173)
 --gate-tls-port <port>          Gate TCP+mTLS listener port (enables remote devcontainer support)
 --tls-dir <path>           TLS certificate directory (default: ~/.gcp-authcalator/tls/)
@@ -224,7 +224,7 @@ project_id = "my-gcp-project"
 service_account = "dev-runner@my-gcp-project.iam.gserviceaccount.com"
 # socket_path defaults to $XDG_RUNTIME_DIR/gcp-authcalator.sock
 # (or ~/.gcp-authcalator/gcp-authcalator.sock if XDG_RUNTIME_DIR is unset)
-# admin_socket_path defaults to /tmp/gcp-authcalator-admin-<uid>/admin.sock
+# admin_socket_path defaults to $XDG_RUNTIME_DIR/gcp-authcalator-admin/admin.sock
 # (used by approve/deny commands — not mounted into containers)
 port = 8173
 
@@ -404,7 +404,7 @@ gcp-authcalator deny <id>
 
 When the gate's confirmation module cannot show a GUI dialog or terminal prompt, it queues the request and prints the request ID to stderr with instructions. The `with-prod` command also prints the pending ID before requesting a session, so you can approve it immediately. Requests auto-deny after 120 seconds if not resolved.
 
-Both commands connect to the gate's **admin socket** (separate from the main socket, not mounted into devcontainers). They do not require `--project-id` — only `--admin-socket-path` is needed (defaults to `/tmp/gcp-authcalator-admin-<uid>/admin.sock`).
+Both commands connect to the gate's **admin socket** (separate from the main socket, not mounted into devcontainers). They do not require `--project-id` — only `--admin-socket-path` is needed (defaults to `$XDG_RUNTIME_DIR/gcp-authcalator-admin/admin.sock`).
 
 ### `init-tls` — TLS certificate management
 
@@ -620,7 +620,7 @@ gcp-authcalator is designed for environments where a coding agent (or other untr
 **Hard security boundaries:**
 
 - **Credentials never enter the container.** The host daemon holds ADC; the container only receives short-lived, downscoped tokens. Even if the container is fully compromised, the attacker gets only a dev service account token — not the engineer's identity.
-- **Cross-user isolation.** The Unix socket is set to `0600` (owner-only) and lives in a `0700` directory (`$XDG_RUNTIME_DIR` or `~/.gcp-authcalator/`). Processes running as other OS users cannot connect. **For strongest isolation, run coding agents as a separate OS user** — they will be unable to access the socket at all.
+- **Cross-user isolation.** The main Unix socket is set to `0660` (group-readable by the gate UID's primary group) in a `0750` directory; the privileged operator socket is `0600` (owner-only) in the same directory. On modern Linux distros (UPG), the gate UID's primary group contains only the gate UID itself, so this is _effectively_ `0600` end-to-end. To grant a different-UID agent access to the main socket (e.g. a `the-robot` user in a dev container), add that user to the gate UID's primary group; the kernel still blocks access to the operator socket because its file mode is `0600`. The `$XDG_RUNTIME_DIR` directory itself is left at the system-managed `0700` per the XDG spec — group access requires placing `socket_path` in a gate-managed directory like `~/.gcp-authcalator/`. `with-prod`'s per-invocation sandbox dir (where ephemeral gcloud config and token files live) is resolved separately from the gate's runtime dir (`$XDG_RUNTIME_DIR` → `$XDG_CACHE_HOME/gcp-authcalator` → `~/.cache/gcp-authcalator`), so the agent's sandbox stays in its own private, owned space even when the gate's `~/.gcp-authcalator/` is shared via symlink. **For strongest isolation, run coding agents as a separate OS user _not_ in the gate's primary group** — they will be unable to access the main socket at all.
 - **Mutual TLS for remote transport.** When using TCP for remote devcontainers, both gate and the client verify each other's identity via self-signed certificates. The gate only listens on localhost (port forwarding is required for remote access). The `gate_url` config option enforces `https://` — plaintext `http://` connections are rejected at config parse time.
 - **Human-in-the-loop for production access.** Prod tokens require explicit confirmation via a desktop dialog (`osascript` on macOS, `zenity` on Linux), terminal prompt, or CLI approval (`gcp-authcalator approve`) on the host. If no method resolves within 120 seconds, access is denied.
 - **Rate limiting** prevents automated brute-forcing of the confirmation flow: one dialog at a time, a 1-second cooldown after denial, and a maximum of 10 attempts per minute.

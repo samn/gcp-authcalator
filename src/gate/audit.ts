@@ -1,7 +1,8 @@
-import { mkdirSync, appendFileSync } from "node:fs";
+import { appendFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AuditEntry } from "./types.ts";
 import { getDefaultRuntimeDir } from "../config.ts";
+import { ensurePrivateDir, chooseSocketDirMode } from "./dir-utils.ts";
 
 const LOG_FILENAME = "audit.log";
 
@@ -15,13 +16,14 @@ export function createAuditModule(logDir: string = getDefaultRuntimeDir()): {
 } {
   const logPath = join(logDir, LOG_FILENAME);
 
-  // Ensure directory exists with owner-only permissions (0o700).
-  // The audit log contains timestamps, access decisions, and email addresses
-  // — restrict directory access so other local users cannot read it.
+  // The audit log file itself is owner-only (0o600 via the gate's startup
+  // umask), so the directory mode only affects listdir, not log readability.
+  // We use chooseSocketDirMode here to stay consistent with the gate socket
+  // dir mode — typically the same directory in non-XDG deployments.
   try {
-    mkdirSync(logDir, { recursive: true, mode: 0o700 });
+    ensurePrivateDir(logDir, chooseSocketDirMode(logDir));
   } catch (err) {
-    console.error(`audit: failed to create log directory ${logDir}:`, err);
+    console.error(`audit: failed to ensure log directory ${logDir}:`, err);
   }
 
   function writeAuditLog(entry: AuditEntry): void {

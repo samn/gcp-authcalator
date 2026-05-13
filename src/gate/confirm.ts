@@ -1,5 +1,6 @@
 import type { Subprocess } from "bun";
 import type { PendingQueue } from "./pending.ts";
+import { stripControlChars } from "./sanitize.ts";
 
 type SpawnFn = (cmd: string[], opts?: { stdin?: "pipe" | "inherit" }) => Subprocess;
 
@@ -40,10 +41,15 @@ export function createConfirmModule(options: ConfirmOptions = {}): {
     pamPolicy?: string,
     pendingId?: string,
   ): Promise<boolean> {
+    // Sanitise every operator-visible string before it reaches a dialog.
+    const safeEmail = stripControlChars(email);
+    const safeCommand = command !== undefined ? stripControlChars(command) : undefined;
+    const safePamPolicy = pamPolicy !== undefined ? stripControlChars(pamPolicy) : undefined;
+
     const tryGui = platform === "darwin" ? tryOsascript : tryZenity;
 
     try {
-      const result = await tryGui(email, spawnFn, command, pamPolicy);
+      const result = await tryGui(safeEmail, spawnFn, safeCommand, safePamPolicy);
       if (result !== null) return result;
     } catch {
       // GUI not available, fall through to terminal
@@ -51,13 +57,13 @@ export function createConfirmModule(options: ConfirmOptions = {}): {
 
     // Fallback to terminal prompt if TTY is available
     if (isTTY) {
-      return tryTerminalPrompt(email, command, pamPolicy);
+      return tryTerminalPrompt(safeEmail, safeCommand, safePamPolicy);
     }
 
     // Fallback to pending queue for CLI-based approval
     if (pendingQueue) {
       console.error("confirm: no interactive method available, queuing for CLI approval");
-      return pendingQueue.enqueue(email, command, pamPolicy, pendingId);
+      return pendingQueue.enqueue(safeEmail, safeCommand, safePamPolicy, pendingId);
     }
 
     console.error("confirm: no interactive method available, denying prod access");

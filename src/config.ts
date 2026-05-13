@@ -29,15 +29,29 @@ export function getDefaultSocketPath(): string {
 }
 
 /**
- * Default admin socket path in /tmp.
- *
- * Uses /tmp because host /tmp is almost never mounted into containers
- * (containers get their own tmpfs), keeping the admin socket unreachable
- * from devcontainer processes.
+ * Default admin socket path inside the user-private runtime directory.
+ * The parent dir is kernel-isolated `0o700` (owned by the user), unlike
+ * `/tmp` which is world-writable and lets another local user pre-create
+ * the parent mode `0o777` and intercept the socket.
  */
 export function getDefaultAdminSocketPath(): string {
-  const uid = process.getuid?.() ?? 0;
-  return join(`/tmp/gcp-authcalator-admin-${uid}`, "admin.sock");
+  return join(getDefaultRuntimeDir(), "gcp-authcalator-admin", "admin.sock");
+}
+
+/**
+ * Sandbox parent dir for `with-prod` (gcloud config + token files,
+ * created fresh per invocation). Resolved separately from
+ * `getDefaultRuntimeDir()` because the gate's runtime dir may be shared
+ * across UIDs (via group perms or a symlink), whereas this dir must be
+ * private to the *caller* — typically a different UID than the gate in
+ * two-user setups.
+ */
+export function getDefaultWithProdRuntimeDir(): string {
+  const xdg = process.env.XDG_RUNTIME_DIR;
+  if (xdg) return xdg;
+  const xdgCache = process.env.XDG_CACHE_HOME;
+  if (xdgCache) return join(xdgCache, "gcp-authcalator");
+  return join(homedir(), ".cache", "gcp-authcalator");
 }
 
 // ---------------------------------------------------------------------------
@@ -256,15 +270,14 @@ export function loadTOML(configPath: string): Record<string, unknown> {
 }
 
 /**
- * Load configuration by merging TOML file values, CLI arg overrides, and
- * environment variables, then validating through the base ConfigSchema.
- *
- * Precedence: env vars > CLI args > TOML file > schema defaults.
+ * Load configuration by merging TOML file values, env-var overrides,
+ * and CLI arg overrides, then validating through the base ConfigSchema.
+ * Precedence: CLI args > env vars > TOML file > schema defaults.
  */
 export function loadConfig(cliValues: Record<string, unknown>, configPath?: string): Config {
   const envValues = loadEnvVars();
   const fileValues = configPath ? loadTOML(configPath) : {};
-  const merged = { ...fileValues, ...cliValues, ...envValues };
+  const merged = { ...fileValues, ...envValues, ...cliValues };
 
   // Deep-merge the env record so CLI --env values add to TOML [env] values
   const fileEnv = fileValues.env as Record<string, string> | undefined;

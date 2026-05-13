@@ -186,4 +186,79 @@ describe("detectNestedSession", () => {
       projectId: "my-project",
     });
   });
+
+  describe("loopback host enforcement", () => {
+    test("accepts 127.0.0.1 with port", async () => {
+      const result = await detectNestedSession(
+        { [PROD_SESSION_ENV_VAR]: "127.0.0.1:54321" },
+        mockProxyFetch(),
+      );
+      expect(result).not.toBeNull();
+    });
+
+    test("accepts localhost with port", async () => {
+      const result = await detectNestedSession(
+        { [PROD_SESSION_ENV_VAR]: "localhost:54321" },
+        mockProxyFetch(),
+      );
+      expect(result).not.toBeNull();
+    });
+
+    test("accepts bracketed [::1] with port", async () => {
+      const result = await detectNestedSession(
+        { [PROD_SESSION_ENV_VAR]: "[::1]:54321" },
+        mockProxyFetch(),
+      );
+      expect(result).not.toBeNull();
+    });
+
+    test("rejects a remote IPv4 address", async () => {
+      const result = await detectNestedSession(
+        { [PROD_SESSION_ENV_VAR]: "10.1.2.3:54321" },
+        mockProxyFetch(),
+      );
+      expect(result).toBeNull();
+    });
+
+    test("rejects a hostname that resolves to loopback (no DNS resolution)", async () => {
+      // We do NOT resolve DNS — DNS could be attacker-controlled. Hostnames
+      // other than the literal `localhost` are rejected.
+      const result = await detectNestedSession(
+        { [PROD_SESSION_ENV_VAR]: "loopback.example.com:54321" },
+        mockProxyFetch(),
+      );
+      expect(result).toBeNull();
+    });
+
+    test("rejects a public hostname", async () => {
+      const result = await detectNestedSession(
+        { [PROD_SESSION_ENV_VAR]: "evil.example.com:54321" },
+        mockProxyFetch(),
+      );
+      expect(result).toBeNull();
+    });
+
+    test("does not call fetch when host is non-loopback", async () => {
+      let fetchCalls = 0;
+      const spyFetch = (async () => {
+        fetchCalls++;
+        return new Response("ok");
+      }) as unknown as typeof globalThis.fetch;
+
+      const result = await detectNestedSession(
+        { [PROD_SESSION_ENV_VAR]: "evil.example.com:54321" },
+        spyFetch,
+      );
+      expect(result).toBeNull();
+      expect(fetchCalls).toBe(0);
+    });
+
+    test("LOCALHOST is normalised case-insensitively", async () => {
+      const result = await detectNestedSession(
+        { [PROD_SESSION_ENV_VAR]: "LOCALHOST:54321" },
+        mockProxyFetch(),
+      );
+      expect(result).not.toBeNull();
+    });
+  });
 });

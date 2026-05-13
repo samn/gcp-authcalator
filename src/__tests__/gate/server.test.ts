@@ -1,5 +1,12 @@
 import { describe, expect, test, afterEach } from "bun:test";
-import { mkdtempSync, existsSync, writeFileSync, statSync, symlinkSync } from "node:fs";
+import {
+  mkdtempSync,
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  statSync,
+  symlinkSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { startGateServer, type GateServerResult } from "../../gate/server.ts";
@@ -7,6 +14,23 @@ import type { GateConfig } from "../../config.ts";
 import type { AuthClient } from "google-auth-library";
 import type { BunRequestInit } from "../../gate/connection.ts";
 import { execSync } from "node:child_process";
+
+/** Pick a UID that is not present in /etc/passwd on this host. */
+function uidAbsentFromPasswd(): number {
+  const present = new Set<number>();
+  for (const line of readFileSync("/etc/passwd", "utf-8").split("\n")) {
+    const fields = line.split(":");
+    if (fields.length >= 4) {
+      const uid = Number(fields[2]);
+      if (Number.isInteger(uid)) present.add(uid);
+    }
+  }
+  // Walk down from a high value; nsswitch typically reserves the bottom range.
+  for (let candidate = 4_000_000_000; candidate > 1_000_000; candidate--) {
+    if (!present.has(candidate)) return candidate;
+  }
+  throw new Error("could not find a UID absent from /etc/passwd");
+}
 
 function mockClient(token: string): AuthClient {
   return {
@@ -237,9 +261,10 @@ setInterval(() => {}, 1000);`;
     );
   });
 
-  test("sets socket permissions to 0600 (owner-only)", async () => {
+  test("sets socket to 0660 in a 0750 directory", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "gate-srv-"));
-    const socketPath = join(tempDir, "gate.sock");
+    const socketDir = join(tempDir, "gate-dir");
+    const socketPath = join(socketDir, "gate.sock");
     const config = makeConfig(socketPath);
 
     result = await startGateServer(config, {
@@ -251,10 +276,9 @@ setInterval(() => {}, 1000);`;
       auditLogDir: join(tempDir, "audit"),
     });
 
-    const stats = statSync(socketPath);
-    // mode includes file-type bits; mask with 0o777 to get permission bits only
-    const permissions = stats.mode & 0o777;
-    expect(permissions).toBe(0o600);
+    const sockStats = statSync(socketPath);
+    expect(sockStats.mode & 0o777).toBe(0o660);
+    expect(statSync(socketDir).mode & 0o777).toBe(0o750);
   });
 
   test("stop() cleans up socket file", async () => {
@@ -436,8 +460,8 @@ describe("operator socket", () => {
     const stats = statSync(config.operator_socket_path!);
     expect(stats.mode & 0o777).toBe(0o660);
 
-    // Main socket still 0600, unaffected.
-    expect(statSync(config.socket_path).mode & 0o777).toBe(0o600);
+    // Main socket is 0660 (group access via the gate UID's primary group).
+    expect(statSync(config.socket_path).mode & 0o777).toBe(0o660);
   });
 
   test("operator socket auto-approves allowlisted PAM policy", async () => {
@@ -542,6 +566,28 @@ describe("operator socket", () => {
     ).rejects.toThrow(/equals gate uid/);
   });
 
+  test("refuses to start when agent_uid is not in /etc/passwd", async () => {
+    const { groupName } = operatorGroupForCurrentUser();
+    const tempDir = mkdtempSync(join(tmpdir(), "gate-op-"));
+    const config: GateConfig = {
+      ...makeConfig(join(tempDir, "gate.sock"), join(tempDir, "admin.sock")),
+      operator_socket_path: join(tempDir, "operator.sock"),
+      operator_socket_group: groupName,
+      agent_uid: uidAbsentFromPasswd(),
+    };
+
+    await expect(
+      startGateServer(config, {
+        authOptions: {
+          sourceClient: mockClient("source-tok"),
+          impersonatedClient: mockClient("dev-tok"),
+          fetchFn: mockFetch("test@example.com"),
+        },
+        auditLogDir: join(tempDir, "audit"),
+      }),
+    ).rejects.toThrow(/not present in \/etc\/passwd/);
+  });
+
   test("refuses to start when operator socket path is a symlink", async () => {
     const { groupName, agentUid } = operatorGroupForCurrentUser();
     const tempDir = mkdtempSync(join(tmpdir(), "gate-op-"));
@@ -606,7 +652,11 @@ describe("operator socket — UID mode (no group)", () => {
     }
   });
 
-  test("creates 0600 socket owned by gate UID in a 0700 directory", async () => {
+  // UID-mode operator socket stays 0o600 (kernel blocks any non-gate UID),
+  // even though the containing dir is 0o750 (group-traversable so the agent
+  // can reach the main socket sitting alongside it). Group members can
+  // listdir but the operator socket's 0o600 still blocks connect().
+  test("creates 0600 socket owned by gate UID in a 0750 directory", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "gate-op-uid-"));
     const operatorSocketDir = join(tempDir, "op-dir");
     const config = uidModeConfig(tempDir, {
@@ -621,7 +671,7 @@ describe("operator socket — UID mode (no group)", () => {
     const sockStats = statSync(config.operator_socket_path!);
     expect(sockStats.mode & 0o777).toBe(0o600);
     expect(sockStats.uid).toBe(process.getuid!());
-    expect(statSync(operatorSocketDir).mode & 0o777).toBe(0o700);
+    expect(statSync(operatorSocketDir).mode & 0o777).toBe(0o750);
   });
 
   test("refuses to start when agent_uid equals gate uid", async () => {
@@ -634,5 +684,21 @@ describe("operator socket — UID mode (no group)", () => {
         auditLogDir: join(tempDir, "audit"),
       }),
     ).rejects.toThrow(/equals gate uid/);
+  });
+
+  // UID mode does not enumerate the agent's groups (the kernel-enforced 0600
+  // owner-only socket is the boundary), so a UID that is absent from
+  // /etc/passwd — typical for a containerized agent whose UID lives only in
+  // the container — must not block startup.
+  test("starts when agent_uid is not in /etc/passwd", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "gate-op-uid-"));
+    const config = uidModeConfig(tempDir, { agent_uid: uidAbsentFromPasswd() });
+
+    result = await startGateServer(config, {
+      authOptions: UID_MODE_AUTH_OPTIONS,
+      auditLogDir: join(tempDir, "audit"),
+    });
+
+    expect(existsSync(config.operator_socket_path!)).toBe(true);
   });
 });

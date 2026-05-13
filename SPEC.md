@@ -192,7 +192,9 @@ Both token endpoints accept an optional `scopes` query parameter (comma-separate
 | `credentials_expired`                      | 500  | The gate's gcloud Application Default Credentials need re-authentication. The `error` field contains the action-oriented recovery instruction, including the gate machine's hostname (from `os.hostname()`) so engineers in remote dev environments know which physical machine to run `gcloud auth application-default login` on. The gate clears its cached source client on this error so the next request after re-authentication succeeds without restarting the daemon. |
 | `session_not_permitted_on_operator_socket` | 403  | Sessions are disabled on the operator socket. `with-prod` falls back to per-request token mode automatically.                                                                                                                                                                                                                                                                                                                                                                 |
 
-**Socket security:** The Unix socket is created with `0600` permissions in a `0700` directory (`$XDG_RUNTIME_DIR` or `~/.gcp-authcalator/`). Stale sockets are cleaned up only after verifying ownership, refusing to follow symlinks, and checking that no other instance is running.
+**Socket security:** The main Unix socket is created with `0660` permissions in a `0750` directory; the privileged operator socket (when configured) is `0600` in the same directory. The gate UID's primary group owns the directory and main socket — on UPG distros this is effectively `0600` end-to-end, but the gate UID's primary group can be deliberately extended (e.g. add a `the-robot` user) to grant a different-UID agent access to the main socket while still kernel-blocking it from the operator socket. The `$XDG_RUNTIME_DIR` directory itself is left at the system-managed `0700` per the XDG spec — group access to the main socket therefore requires placing `socket_path` in a gate-managed directory like `~/.gcp-authcalator/`. Stale sockets are cleaned up only after verifying ownership, refusing to follow symlinks, and checking that no other instance is running.
+
+`with-prod` resolves its per-invocation sandbox parent directory **separately** from the gate's runtime dir (`$XDG_RUNTIME_DIR` → `$XDG_CACHE_HOME/gcp-authcalator` → `~/.cache/gcp-authcalator`). This decouples the caller-owned sandbox (where ephemeral gcloud config and token files live, `0600` owned by the calling UID) from the gate-owned config/socket dir (which may be shared between users via group perms or a symlink).
 
 **Lifecycle:** Started by the devcontainer initialize script (runs on host before container build). Stopped when container is destroyed. Could later be a systemd/launchd user service for persistence.
 
@@ -279,7 +281,7 @@ When the gate's confirmation module cannot show a GUI dialog or terminal prompt 
 
 The `with-prod` command generates and prints the pending ID before requesting a session, so you can approve it immediately. Pending requests auto-deny after 120 seconds (2x the GUI dialog timeout, to allow time for terminal switching). The gate logs request IDs and approval instructions to stderr when a request is queued.
 
-Both commands connect to the gate's **admin socket** (separate from the main socket, not mounted into devcontainers). They do not require `--project-id` — only `--admin-socket-path` is needed (defaults to `/tmp/gcp-authcalator-admin-<uid>/admin.sock`).
+Both commands connect to the gate's **admin socket** (separate from the main socket, not mounted into devcontainers). They do not require `--project-id` — only `--admin-socket-path` is needed (defaults to `$XDG_RUNTIME_DIR/gcp-authcalator-admin/admin.sock`).
 
 ### 6. `init-tls` -- TLS Certificate Management
 
@@ -303,7 +305,7 @@ New config options and env vars for remote devcontainer support:
 | `tls_bundle`    | `--tls-bundle`    | `GCP_AUTHCALATOR_TLS_BUNDLE`     | Path to TLS client bundle file           |
 | —               | —                 | `GCP_AUTHCALATOR_TLS_BUNDLE_B64` | Base64-encoded client bundle (preferred) |
 
-Config precedence: env vars > CLI args > TOML file > schema defaults.
+Config precedence: CLI args > env vars > TOML file > schema defaults. (Until v0.10 this was `env > CLI > TOML`, which inverted universal CLI convention; the swap matches expectations and removes the silent override of explicit `--flag` invocations by inherited env vars.)
 
 `gate_url` is validated to require `https://` — `http://` URLs are rejected at config parse time, preventing accidental plaintext connections to gate.
 

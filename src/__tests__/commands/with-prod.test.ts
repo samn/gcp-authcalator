@@ -1,5 +1,7 @@
 import { describe, expect, test, beforeEach, afterEach, spyOn } from "bun:test";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { z } from "zod";
 import { resolveEnvSubstitutions, runWithProd } from "../../commands/with-prod.ts";
 import { PROD_SESSION_ENV_VAR } from "../../with-prod/detect-nested-session.ts";
@@ -297,6 +299,105 @@ describe("runWithProd", () => {
     }
 
     expect(capturedMode).toBe(0o700);
+  });
+
+  // Regression: with-prod's sandbox must land in the caller's own private
+  // dir, not the gate's runtime dir. In two-user setups the gate's
+  // ~/.gcp-authcalator/ is reachable to the agent only via a symlink to
+  // a foreign-owned dir, which cascades into symlink/owner/write errors
+  // at sandbox creation if the two dirs are conflated.
+  test("creates gcloudConfigDir under $XDG_RUNTIME_DIR, not under the gate's runtime dir", async () => {
+    const isolatedRuntimeDir = mkdtempSync(join(tmpdir(), "wp-runtime-"));
+    const savedXdgRuntime = process.env.XDG_RUNTIME_DIR;
+    const savedXdgCache = process.env.XDG_CACHE_HOME;
+    process.env.XDG_RUNTIME_DIR = isolatedRuntimeDir;
+    delete process.env.XDG_CACHE_HOME;
+
+    const mockFetchFn = mockGateFetch();
+    let capturedConfigDir: string | undefined;
+    const mockSpawnFn = (_cmd: string[], opts: { env: Record<string, string | undefined> }) => {
+      capturedConfigDir = opts.env.CLOUDSDK_CONFIG;
+      return {
+        exited: Promise.resolve(0),
+        kill: () => {},
+      } as unknown as Subprocess;
+    };
+
+    try {
+      await runWithProd(
+        {
+          project_id: "my-proj",
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
+        },
+        ["echo", "test"],
+        {
+          fetchOptions: { fetchFn: mockFetchFn },
+          spawnFn: mockSpawnFn,
+        },
+      );
+    } catch {
+      // process.exit mock throws
+    } finally {
+      if (savedXdgRuntime !== undefined) process.env.XDG_RUNTIME_DIR = savedXdgRuntime;
+      else delete process.env.XDG_RUNTIME_DIR;
+      if (savedXdgCache !== undefined) process.env.XDG_CACHE_HOME = savedXdgCache;
+      rmSync(isolatedRuntimeDir, { recursive: true, force: true });
+    }
+
+    expect(capturedConfigDir).toBeDefined();
+    expect(capturedConfigDir!.startsWith(isolatedRuntimeDir)).toBe(true);
+    expect(capturedConfigDir).not.toContain(".gcp-authcalator/gcp-authcalator-gcloud-");
+  });
+
+  // Regression: containers with `umask 002` (default on the mono devcontainer)
+  // create ~/.cache/gcp-authcalator/ at 0o755 the first time anything writes
+  // there. with-prod must tolerate that — the sandbox dir (mkdtempSync, 0o700
+  // owned by caller) is the real boundary, not the parent.
+  test("succeeds when the runtime parent dir already exists at 0o755", async () => {
+    const isolatedRuntimeDir = mkdtempSync(join(tmpdir(), "wp-runtime-"));
+    chmodSync(isolatedRuntimeDir, 0o755);
+    const savedXdgRuntime = process.env.XDG_RUNTIME_DIR;
+    const savedXdgCache = process.env.XDG_CACHE_HOME;
+    process.env.XDG_RUNTIME_DIR = isolatedRuntimeDir;
+    delete process.env.XDG_CACHE_HOME;
+
+    const mockFetchFn = mockGateFetch();
+    let capturedSandboxMode: number | undefined;
+    const mockSpawnFn = (_cmd: string[], opts: { env: Record<string, string | undefined> }) => {
+      const configDir = opts.env.CLOUDSDK_CONFIG;
+      if (configDir) capturedSandboxMode = statSync(configDir).mode & 0o777;
+      return {
+        exited: Promise.resolve(0),
+        kill: () => {},
+      } as unknown as Subprocess;
+    };
+
+    try {
+      await runWithProd(
+        {
+          project_id: "my-proj",
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
+        },
+        ["echo", "test"],
+        {
+          fetchOptions: { fetchFn: mockFetchFn },
+          spawnFn: mockSpawnFn,
+        },
+      );
+    } catch {
+      // process.exit mock throws
+    } finally {
+      if (savedXdgRuntime !== undefined) process.env.XDG_RUNTIME_DIR = savedXdgRuntime;
+      else delete process.env.XDG_RUNTIME_DIR;
+      if (savedXdgCache !== undefined) process.env.XDG_CACHE_HOME = savedXdgCache;
+      rmSync(isolatedRuntimeDir, { recursive: true, force: true });
+    }
+
+    expect(capturedSandboxMode).toBe(0o700);
   });
 
   test("writes access_token file with mode 0600 containing the prod token", async () => {
