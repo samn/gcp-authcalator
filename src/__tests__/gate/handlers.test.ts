@@ -5,7 +5,7 @@ import type { AuditEntry, CachedToken } from "../../gate/types.ts";
 import type { ProdRateLimiter } from "../../gate/rate-limit.ts";
 import { createSessionManager } from "../../gate/session.ts";
 import { createPendingQueue } from "../../gate/pending.ts";
-import { makeGateDeps as makeDeps, makeRequest } from "./test-helpers.ts";
+import { makeGateDeps as makeDeps, makeRequest, withFakeNow } from "./test-helpers.ts";
 
 /** A rate limiter that always blocks. */
 function blockedRateLimiter(reason = "rate limited"): ProdRateLimiter {
@@ -806,7 +806,38 @@ describe("GET /token?level=prod with PAM", () => {
     expect(capturedJustification).toBe("gcloud compute instances list");
   });
 
-  test("clamps prod token expires_in to PAM grant expiry", async () => {
+  test("clamps prod token expires_in to PAM grant expiry minus drain margin", async () => {
+    // Drain-margin clamping: a grant with 10 minutes of remaining lifetime
+    // mints a token that expires at the start of the 5-minute drain window
+    // (i.e. 10 - 5 = 5 minutes from now), not at grant expiry. This leaves
+    // a 5-minute window where no minted token is still valid, so when the
+    // gate revokes the old grant during rotation no concurrent client is
+    // still using it.
+    const deps = makeDeps({
+      pamDefaultPolicy: "my-policy",
+      pamAllowedPolicies: new Set(["my-policy"]),
+      mintProdToken: async () => ({
+        access_token: "tok",
+        expires_at: new Date(Date.now() + 3600 * 1000),
+      }),
+      ensurePamGrant: async () => ({
+        name: "grants/g1",
+        state: "ACTIVATED",
+        expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+        cached: false,
+      }),
+    });
+
+    const res = await handleRequest(makeRequest("/token?level=prod"), deps);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, number>;
+    expect(body.expires_in).toBeGreaterThan(5 * 60 - 5);
+    expect(body.expires_in).toBeLessThanOrEqual(5 * 60);
+  });
+
+  test("clamps prod token expires_in to 0 when grant remaining is below drain margin", async () => {
+    // Below-drain-margin grants yield 0-TTL tokens. ensureGrant normally
+    // rotates before this point (same DRAIN_MARGIN_MS threshold).
     const deps = makeDeps({
       pamDefaultPolicy: "my-policy",
       pamAllowedPolicies: new Set(["my-policy"]),
@@ -825,8 +856,58 @@ describe("GET /token?level=prod with PAM", () => {
     const res = await handleRequest(makeRequest("/token?level=prod"), deps);
     expect(res.status).toBe(200);
     const body = (await res.json()) as Record<string, number>;
-    expect(body.expires_in).toBeGreaterThan(4 * 60 - 5);
-    expect(body.expires_in).toBeLessThanOrEqual(4 * 60);
+    expect(body.expires_in).toBe(0);
+  });
+
+  test("second /token?level=prod call mid-grant clamps expires_in to the cached grant's remaining lifetime minus drain margin", async () => {
+    // A second prod-access request that reuses an existing PAM grant
+    // must return a token whose advertised lifetime matches the grant's
+    // remaining lifetime minus the drain margin, not the freshly minted
+    // underlying token's nominal TTL. Without this, the metadata-proxy's
+    // token cache would keep serving the token past the grant's drain
+    // boundary.
+    const grantStart = Date.now();
+    const grantExpiresAt = new Date(grantStart + 3600 * 1000);
+    let ensureCalls = 0;
+    const deps = makeDeps({
+      pamDefaultPolicy: "my-policy",
+      pamAllowedPolicies: new Set(["my-policy"]),
+      // Every call to mintProdToken returns a token whose expires_at is
+      // a full hour from now — exactly the scenario where the clamp is
+      // load-bearing for the multi-invocation case.
+      mintProdToken: async () => ({
+        access_token: "tok",
+        expires_at: new Date(Date.now() + 3600 * 1000),
+      }),
+      ensurePamGrant: async () => {
+        ensureCalls++;
+        return {
+          name: "grants/g1",
+          state: "ACTIVATED",
+          expiresAt: grantExpiresAt,
+          cached: ensureCalls > 1,
+        };
+      },
+    });
+
+    const first = await handleRequest(makeRequest("/token?level=prod"), deps);
+    expect(first.status).toBe(200);
+    const firstBody = (await first.json()) as Record<string, number>;
+    // 3600 - 300 (drain margin) = 3300 sec.
+    expect(firstBody.expires_in).toBeGreaterThan(3300 - 5);
+    expect(firstBody.expires_in).toBeLessThanOrEqual(3300);
+
+    // Move forward 40 minutes — the grant now has ~1200s of usable
+    // lifetime left, regardless of what mintProdToken says.
+    await withFakeNow(grantStart + 40 * 60 * 1000, async () => {
+      const second = await handleRequest(makeRequest("/token?level=prod"), deps);
+      expect(second.status).toBe(200);
+      const secondBody = (await second.json()) as Record<string, number>;
+      // ~20 minutes remaining minus 5-minute drain margin = ~900s.
+      expect(secondBody.expires_in).toBeLessThanOrEqual(15 * 60);
+      expect(secondBody.expires_in).toBeGreaterThan(15 * 60 - 5);
+      expect(ensureCalls).toBe(2);
+    });
   });
 
   test("passes undefined justification to ensurePamGrant when no command header", async () => {
@@ -1229,6 +1310,56 @@ describe("POST /session", () => {
     expect(session!.ttlSeconds).toBe(900);
   });
 
+  test("second /session call mid-grant clamps initial expires_in to the cached grant's remaining lifetime minus drain margin", async () => {
+    // Running with-prod twice against the same gate creates two
+    // independent sessions, but typically reuses the same underlying
+    // PAM grant. The second /session response's `expires_in` must be
+    // the grant's remaining lifetime minus the drain margin — otherwise
+    // the new session's metadata-proxy will believe its token is good
+    // past the grant's drain boundary, when rotation could revoke it.
+    const grantStart = Date.now();
+    const grantExpiresAt = new Date(grantStart + 3600 * 1000);
+    let ensureCalls = 0;
+    const auditEntries: AuditEntry[] = [];
+    const deps = makeDeps({
+      pamDefaultPolicy: "my-policy",
+      pamAllowedPolicies: new Set(["my-policy"]),
+      mintProdToken: async () => ({
+        access_token: "tok",
+        expires_at: new Date(Date.now() + 3600 * 1000),
+      }),
+      ensurePamGrant: async () => {
+        ensureCalls++;
+        return {
+          name: "grants/g1",
+          state: "ACTIVATED",
+          expiresAt: grantExpiresAt,
+          cached: ensureCalls > 1,
+        };
+      },
+      writeAuditLog: (e) => auditEntries.push(e),
+    });
+
+    const first = await handleRequest(makeRequest("/session", "POST"), deps);
+    expect(first.status).toBe(200);
+    const firstBody = (await first.json()) as Record<string, number>;
+    // 3600 - 300 (drain margin) = 3300 sec.
+    expect(firstBody.expires_in).toBeGreaterThan(3300 - 5);
+    expect(firstBody.expires_in).toBeLessThanOrEqual(3300);
+
+    await withFakeNow(grantStart + 40 * 60 * 1000, async () => {
+      const second = await handleRequest(makeRequest("/session", "POST"), deps);
+      expect(second.status).toBe(200);
+      const secondBody = (await second.json()) as Record<string, number>;
+      // ~20 minutes left on the cached grant minus 5-minute drain = ~15 min.
+      expect(secondBody.expires_in).toBeLessThanOrEqual(15 * 60);
+      expect(secondBody.expires_in).toBeGreaterThan(15 * 60 - 5);
+    });
+
+    expect(ensureCalls).toBe(2);
+    expect(auditEntries[1]!.pam_cached).toBe(true);
+  });
+
   test("stores wrapped command summary on the session for later refresh", async () => {
     const sessionManager = createSessionManager();
     const deps = makeDeps({ sessionManager });
@@ -1555,7 +1686,8 @@ describe("GET /token?session=<id>", () => {
 
     const deps = makeDeps({
       sessionManager,
-      // Token mint says 1h, but the PAM grant only has 4 minutes left.
+      // Token mint says 1h, but the PAM grant only has 10 minutes left, so
+      // the drain-margin clamp puts the token's expiry 5 minutes from now.
       mintProdToken: async () => ({
         access_token: "tok",
         expires_at: new Date(Date.now() + 3600 * 1000),
@@ -1563,7 +1695,7 @@ describe("GET /token?session=<id>", () => {
       ensurePamGrant: async () => ({
         name: "grants/g1",
         state: "ACTIVATED",
-        expiresAt: new Date(Date.now() + 4 * 60 * 1000),
+        expiresAt: new Date(Date.now() + 10 * 60 * 1000),
         cached: true,
       }),
     });
@@ -1571,9 +1703,54 @@ describe("GET /token?session=<id>", () => {
     const res = await handleRequest(makeRequest(`/token?session=${session.id}`), deps);
     expect(res.status).toBe(200);
     const body = (await res.json()) as Record<string, number>;
-    // ~4 minutes, allowing for sub-second skew between the mock and Date.now()
-    expect(body.expires_in).toBeGreaterThan(4 * 60 - 5);
-    expect(body.expires_in).toBeLessThanOrEqual(4 * 60);
+    // 10 minutes remaining minus 5-minute drain margin = ~5 minutes.
+    expect(body.expires_in).toBeGreaterThan(5 * 60 - 5);
+    expect(body.expires_in).toBeLessThanOrEqual(5 * 60);
+  });
+
+  test("/token?session=... refresh after near-expiry grant renewal clamps to the new grant's expiry", async () => {
+    // When the cached PAM grant is in the cache margin, ensurePamGrant
+    // revokes it and creates a fresh one — the refresh response's
+    // expires_in must reflect the *new* grant's full lifetime, not the
+    // old grant's near-zero remaining time. This is the path the
+    // metadata-proxy uses to keep the grant alive across an active
+    // with-prod session.
+    const sessionManager = createSessionManager();
+    const session = sessionManager.create({
+      email: "eng@example.com",
+      ttlSeconds: 3600,
+      sessionLifetimeSeconds: 28800,
+      pamPolicy: "projects/p/locations/global/entitlements/e",
+    });
+
+    let ensureCalls = 0;
+    const deps = makeDeps({
+      sessionManager,
+      mintProdToken: async () => ({
+        access_token: "tok",
+        expires_at: new Date(Date.now() + 3600 * 1000),
+      }),
+      ensurePamGrant: async () => {
+        ensureCalls++;
+        // Simulate ensureGrant renewing inside the margin: the new
+        // grant expires a fresh 3600s from "now".
+        return {
+          name: `grants/g${ensureCalls}`,
+          state: "ACTIVATED",
+          expiresAt: new Date(Date.now() + 3600 * 1000),
+          cached: false,
+        };
+      },
+    });
+
+    const res = await handleRequest(makeRequest(`/token?session=${session.id}`), deps);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, number>;
+    // The renewed grant gives a full 3600s of headroom — clamping must
+    // not drag this back down to the old grant's remaining lifetime.
+    // After drain-margin clamping (3600 - 300) = 3300 sec.
+    expect(body.expires_in).toBeGreaterThan(3300 - 5);
+    expect(body.expires_in).toBeLessThanOrEqual(3300);
   });
 
   test("does not extend session-refresh expires_in beyond what mintProdToken returned", async () => {

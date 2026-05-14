@@ -10,6 +10,23 @@ export function makeRequest(
   return new Request(`http://localhost${path}`, { method, headers });
 }
 
+/**
+ * Pin Date.now to `fixedNow` for the duration of `fn`, restoring the
+ * real Date.now afterwards (including on throw). The handlers use
+ * Date.now directly (not an injected clock) when computing
+ * expires_in, so tests that need to simulate the passage of time
+ * between two handler invocations have to stub it out.
+ */
+export async function withFakeNow<T>(fixedNow: number, fn: () => Promise<T>): Promise<T> {
+  const realDateNow = Date.now;
+  Date.now = () => fixedNow;
+  try {
+    return await fn();
+  } finally {
+    Date.now = realDateNow;
+  }
+}
+
 export function makeGateDeps(overrides: Partial<GateDeps> = {}): GateDeps {
   const token: CachedToken = {
     access_token: "test-access-token",
