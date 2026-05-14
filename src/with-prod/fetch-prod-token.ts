@@ -49,6 +49,12 @@ export interface FetchProdTokenOptions {
   scopes?: string[];
   /** PAM entitlement to escalate to (passed to gate as query param). */
   pamPolicy?: string;
+  /**
+   * Target project (sent to gate as `?project=`). Required in folder mode;
+   * optional in project mode, where the gate accepts it if equal to the
+   * configured project_id and rejects mismatches.
+   */
+  project?: string;
   /** Token TTL override in seconds (must be LTE gate's configured default). */
   tokenTtlSeconds?: number;
   /** Session TTL override in seconds (for createProdSession). */
@@ -90,6 +96,9 @@ export async function fetchProdAccessToken(
   }
   if (options.pamPolicy) {
     tokenUrl += `&pam_policy=${encodeURIComponent(options.pamPolicy)}`;
+  }
+  if (options.project) {
+    tokenUrl += `&project=${encodeURIComponent(options.project)}`;
   }
   if (options.tokenTtlSeconds !== undefined) {
     tokenUrl += `&token_ttl_seconds=${options.tokenTtlSeconds}`;
@@ -186,6 +195,9 @@ export async function createProdSession(
   }
   if (options.pamPolicy) {
     params.push(`pam_policy=${encodeURIComponent(options.pamPolicy)}`);
+  }
+  if (options.project) {
+    params.push(`project=${encodeURIComponent(options.project)}`);
   }
   if (options.tokenTtlSeconds !== undefined) {
     params.push(`token_ttl_seconds=${options.tokenTtlSeconds}`);

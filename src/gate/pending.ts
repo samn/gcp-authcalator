@@ -17,6 +17,8 @@ export interface PendingRequest {
   id: string;
   /** Engineer's email requesting prod access. */
   email: string;
+  /** Target project (resolved before enqueue). */
+  projectId: string;
   /** Summarized command, if available. */
   command?: string;
   /** PAM policy, if applicable. */
@@ -37,7 +39,13 @@ export interface PendingQueueOptions {
 export interface PendingQueue {
   /** Enqueue a confirmation request. Returns a promise that resolves when approved, denied, or timed out.
    *  If clientId is provided, it must be exactly 32 lowercase hex chars and not already in use. */
-  enqueue(email: string, command?: string, pamPolicy?: string, clientId?: string): Promise<boolean>;
+  enqueue(
+    email: string,
+    projectId: string,
+    command?: string,
+    pamPolicy?: string,
+    clientId?: string,
+  ): Promise<boolean>;
   /** List all currently pending requests. */
   list(): PendingRequest[];
   /** Approve a pending request by ID. Returns false if not found or expired. */
@@ -63,6 +71,7 @@ export function createPendingQueue(options: PendingQueueOptions = {}): PendingQu
 
   function enqueue(
     email: string,
+    projectId: string,
     command?: string,
     pamPolicy?: string,
     clientId?: string,
@@ -79,7 +88,15 @@ export function createPendingQueue(options: PendingQueueOptions = {}): PendingQu
     const createdAt = new Date(now());
     const expiresAt = new Date(now() + timeoutMs);
 
-    const request: PendingRequest = { id, email, command, pamPolicy, createdAt, expiresAt };
+    const request: PendingRequest = {
+      id,
+      email,
+      projectId,
+      command,
+      pamPolicy,
+      createdAt,
+      expiresAt,
+    };
 
     const promise = new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => {
@@ -99,7 +116,7 @@ export function createPendingQueue(options: PendingQueueOptions = {}): PendingQu
     const detail = command ? ` (${command})` : "";
     const pam = pamPolicy ? ` [PAM: ${pamPolicy}]` : "";
     console.error(
-      `gate: pending approval ${id} — ${email}${detail}${pam} — expires in ${timeoutSecs}s`,
+      `gate: pending approval ${id} — ${email} (project ${projectId})${detail}${pam} — expires in ${timeoutSecs}s`,
     );
     console.error(
       `gate: run 'gcp-authcalator approve ${id}' to approve, or 'gcp-authcalator deny ${id}' to deny`,

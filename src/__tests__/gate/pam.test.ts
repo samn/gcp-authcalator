@@ -1,65 +1,136 @@
 import { describe, expect, test } from "bun:test";
+import type { Scope } from "../../config.ts";
 import { resolveEntitlementPath, createPamModule, type PamModule } from "../../gate/pam.ts";
 
+const projectScope = (projectId: string): Scope => ({ kind: "project", projectId });
+const folderScope = (folderId: string): Scope => ({ kind: "folder", folderId });
+
 // ---------------------------------------------------------------------------
-// resolveEntitlementPath
+// resolveEntitlementPath — project mode
 // ---------------------------------------------------------------------------
 
-describe("resolveEntitlementPath", () => {
+describe("resolveEntitlementPath (project mode)", () => {
   test("expands short-form entitlement ID", () => {
-    const result = resolveEntitlementPath("prod-db-admin", "my-project", "global");
+    const result = resolveEntitlementPath("prod-db-admin", projectScope("my-project"), "global");
     expect(result).toBe("projects/my-project/locations/global/entitlements/prod-db-admin");
   });
 
   test("expands short-form with non-global location", () => {
-    const result = resolveEntitlementPath("my-policy", "my-project", "us-central1");
+    const result = resolveEntitlementPath("my-policy", projectScope("my-project"), "us-central1");
     expect(result).toBe("projects/my-project/locations/us-central1/entitlements/my-policy");
   });
 
   test("defaults location to global", () => {
-    const result = resolveEntitlementPath("my-policy", "my-project");
+    const result = resolveEntitlementPath("my-policy", projectScope("my-project"));
     expect(result).toBe("projects/my-project/locations/global/entitlements/my-policy");
   });
 
   test("passes through full resource path unchanged", () => {
     const fullPath = "projects/my-project/locations/global/entitlements/prod-admin";
-    const result = resolveEntitlementPath(fullPath, "my-project", "global");
+    const result = resolveEntitlementPath(fullPath, projectScope("my-project"), "global");
     expect(result).toBe(fullPath);
   });
 
   test("rejects short-form ID with uppercase letters", () => {
-    expect(() => resolveEntitlementPath("ProdAdmin", "p")).toThrow("Invalid PAM entitlement ID");
+    expect(() => resolveEntitlementPath("ProdAdmin", projectScope("p"))).toThrow(
+      "Invalid PAM entitlement ID",
+    );
   });
 
   test("rejects short-form ID with underscores", () => {
-    expect(() => resolveEntitlementPath("prod_admin", "p")).toThrow("Invalid PAM entitlement ID");
+    expect(() => resolveEntitlementPath("prod_admin", projectScope("p"))).toThrow(
+      "Invalid PAM entitlement ID",
+    );
   });
 
   test("rejects short-form ID starting with digit", () => {
-    expect(() => resolveEntitlementPath("1-policy", "p")).toThrow("Invalid PAM entitlement ID");
+    expect(() => resolveEntitlementPath("1-policy", projectScope("p"))).toThrow(
+      "Invalid PAM entitlement ID",
+    );
   });
 
   test("rejects short-form ID starting with hyphen", () => {
-    expect(() => resolveEntitlementPath("-policy", "p")).toThrow("Invalid PAM entitlement ID");
+    expect(() => resolveEntitlementPath("-policy", projectScope("p"))).toThrow(
+      "Invalid PAM entitlement ID",
+    );
   });
 
   test("rejects full path with wrong format", () => {
-    expect(() => resolveEntitlementPath("projects/p/entitlements/e", "p")).toThrow(
+    expect(() => resolveEntitlementPath("projects/p/entitlements/e", projectScope("p"))).toThrow(
       "Invalid PAM entitlement path",
     );
   });
 
   test("rejects full path referencing wrong project", () => {
     const path = "projects/other-project/locations/global/entitlements/admin";
-    expect(() => resolveEntitlementPath(path, "my-project")).toThrow(
+    expect(() => resolveEntitlementPath(path, projectScope("my-project"))).toThrow(
       'references project "other-project" but gate is configured for "my-project"',
     );
   });
 
   test("accepts full path with matching project", () => {
     const path = "projects/my-project/locations/us-east1/entitlements/reader";
-    const result = resolveEntitlementPath(path, "my-project");
+    const result = resolveEntitlementPath(path, projectScope("my-project"));
     expect(result).toBe(path);
+  });
+
+  test("rejects folder path in project mode", () => {
+    const path = "folders/123/locations/global/entitlements/reader";
+    expect(() => resolveEntitlementPath(path, projectScope("my-project"))).toThrow(
+      "In project mode, expected: projects/",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveEntitlementPath — folder mode
+// ---------------------------------------------------------------------------
+
+describe("resolveEntitlementPath (folder mode)", () => {
+  test("expands short-form entitlement ID to folder path", () => {
+    const result = resolveEntitlementPath("prod-db-admin", folderScope("123456789012"), "global");
+    expect(result).toBe("folders/123456789012/locations/global/entitlements/prod-db-admin");
+  });
+
+  test("expands short-form with non-global location", () => {
+    const result = resolveEntitlementPath("my-policy", folderScope("123456789012"), "us-central1");
+    expect(result).toBe("folders/123456789012/locations/us-central1/entitlements/my-policy");
+  });
+
+  test("defaults location to global", () => {
+    const result = resolveEntitlementPath("my-policy", folderScope("123456789012"));
+    expect(result).toBe("folders/123456789012/locations/global/entitlements/my-policy");
+  });
+
+  test("passes through matching full folder path unchanged", () => {
+    const path = "folders/123456789012/locations/us-east1/entitlements/reader";
+    expect(resolveEntitlementPath(path, folderScope("123456789012"))).toBe(path);
+  });
+
+  test("rejects full folder path with wrong folder id", () => {
+    const path = "folders/999/locations/global/entitlements/admin";
+    expect(() => resolveEntitlementPath(path, folderScope("123456789012"))).toThrow(
+      'references folder "999" but gate is configured for "123456789012"',
+    );
+  });
+
+  test("rejects project path in folder mode", () => {
+    const path = "projects/my-project/locations/global/entitlements/admin";
+    expect(() => resolveEntitlementPath(path, folderScope("123456789012"))).toThrow(
+      "In folder mode, expected: folders/",
+    );
+  });
+
+  test("rejects malformed folder path", () => {
+    expect(() =>
+      resolveEntitlementPath("folders/123/entitlements/e", folderScope("123456789012")),
+    ).toThrow("Invalid PAM entitlement path");
+  });
+
+  test("rejects short-form ID with uppercase letters", () => {
+    expect(() => resolveEntitlementPath("ProdAdmin", folderScope("123456789012"))).toThrow(
+      "Invalid PAM entitlement ID",
+    );
   });
 });
 

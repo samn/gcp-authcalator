@@ -834,6 +834,180 @@ describe("runWithProd", () => {
     // Sentinel should match the metadata host
     expect(env[PROD_SESSION_ENV_VAR]).toBe(env.GCE_METADATA_HOST);
   });
+
+  // ---- Project selection (folder mode + --project flag) ----
+
+  /** Capture all gate URLs that the mock fetch sees. */
+  function captureGateUrls(): {
+    fetchFn: typeof globalThis.fetch;
+    gateUrls: string[];
+  } {
+    const gateUrls: string[] = [];
+    const fetchFn = (async (url: string, init?: RequestInit) => {
+      gateUrls.push(url);
+      const parsed = new URL(url);
+      const method = init?.method ?? "GET";
+      if (parsed.pathname === "/session" && method === "POST") {
+        return new Response(
+          JSON.stringify({
+            session_id: "sid",
+            access_token: "tok",
+            expires_in: 1800,
+            token_type: "Bearer",
+            email: "eng@example.com",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response(JSON.stringify({ status: "revoked" }), { status: 200 });
+    }) as unknown as typeof globalThis.fetch;
+    return { fetchFn, gateUrls };
+  }
+
+  function noopSpawn() {
+    return (_cmd: string[]) =>
+      ({ exited: Promise.resolve(0), kill: () => {} }) as unknown as Subprocess;
+  }
+
+  test("folder mode: --project flag is forwarded to gate as ?project=", async () => {
+    const { fetchFn, gateUrls } = captureGateUrls();
+    try {
+      await runWithProd(
+        {
+          folder_id: "123456789012",
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
+        },
+        ["echo", "hi"],
+        {
+          project: "tenant-a",
+          fetchOptions: { fetchFn },
+          spawnFn: noopSpawn(),
+        },
+      );
+    } catch {
+      // process.exit mock throws
+    }
+    const sessionCreate = gateUrls.find((u) => u.includes("/session"));
+    expect(sessionCreate).toBeDefined();
+    expect(sessionCreate).toContain("project=tenant-a");
+  });
+
+  test("folder mode: falls back to CLOUDSDK_CORE_PROJECT when --project is absent", async () => {
+    const { fetchFn, gateUrls } = captureGateUrls();
+    process.env.CLOUDSDK_CORE_PROJECT = "tenant-from-env";
+    try {
+      await runWithProd(
+        {
+          folder_id: "123456789012",
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
+        },
+        ["echo", "hi"],
+        { fetchOptions: { fetchFn }, spawnFn: noopSpawn() },
+      );
+    } catch {
+      // process.exit mock throws
+    } finally {
+      delete process.env.CLOUDSDK_CORE_PROJECT;
+    }
+    expect(gateUrls.find((u) => u.includes("/session"))).toContain("project=tenant-from-env");
+  });
+
+  test("folder mode: falls back to gcloud resolver when --project and env are absent", async () => {
+    const { fetchFn, gateUrls } = captureGateUrls();
+    try {
+      await runWithProd(
+        {
+          folder_id: "123456789012",
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
+        },
+        ["echo", "hi"],
+        {
+          fetchOptions: { fetchFn },
+          spawnFn: noopSpawn(),
+          resolveGcloudProject: () => "tenant-from-gcloud",
+        },
+      );
+    } catch {
+      // process.exit mock throws
+    }
+    expect(gateUrls.find((u) => u.includes("/session"))).toContain("project=tenant-from-gcloud");
+  });
+
+  test("folder mode: exits when no project source is available", async () => {
+    const { fetchFn } = captureGateUrls();
+    delete process.env.CLOUDSDK_CORE_PROJECT;
+    await expect(
+      runWithProd(
+        {
+          folder_id: "123456789012",
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
+        },
+        ["echo", "hi"],
+        {
+          fetchOptions: { fetchFn },
+          spawnFn: noopSpawn(),
+          resolveGcloudProject: () => undefined,
+        },
+      ),
+    ).rejects.toThrow("process.exit");
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
+    expect(errorOutput).toContain("folder mode requires a project");
+  });
+
+  test("project mode: --project matching configured project_id is accepted", async () => {
+    const { fetchFn, gateUrls } = captureGateUrls();
+    try {
+      await runWithProd(
+        {
+          project_id: "my-proj",
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
+        },
+        ["echo", "hi"],
+        {
+          project: "my-proj",
+          fetchOptions: { fetchFn },
+          spawnFn: noopSpawn(),
+        },
+      );
+    } catch {
+      // process.exit mock throws
+    }
+    expect(gateUrls.find((u) => u.includes("/session"))).toContain("project=my-proj");
+  });
+
+  test("project mode: --project mismatching configured project_id exits 1", async () => {
+    const { fetchFn } = captureGateUrls();
+    await expect(
+      runWithProd(
+        {
+          project_id: "my-proj",
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
+        },
+        ["echo", "hi"],
+        {
+          project: "different-proj",
+          fetchOptions: { fetchFn },
+          spawnFn: noopSpawn(),
+        },
+      ),
+    ).rejects.toThrow("process.exit");
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
+    expect(errorOutput).toContain("does not match configured project_id");
+  });
 });
 
 describe("runWithProd nested sessions", () => {

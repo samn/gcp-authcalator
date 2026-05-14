@@ -174,7 +174,10 @@ Precedence: CLI flags > environment variables > TOML file > defaults.
 ### CLI flags
 
 ```
---project-id <id>          GCP project ID
+--project-id <id>          GCP project ID (project mode; mutually exclusive with --folder-id)
+--folder-id <id>           GCP folder ID (folder mode; numeric, e.g. 123456789012)
+--project <id>             Per-invocation project for with-prod (folder mode);
+                           in project mode must match --project-id
 --service-account <email>  Service account email to impersonate
 --socket-path <path>       Unix socket path (default: $XDG_RUNTIME_DIR/gcp-authcalator.sock)
 --admin-socket-path <path> Admin socket path for approve/deny (default: $XDG_RUNTIME_DIR/gcp-authcalator-admin/admin.sock)
@@ -200,6 +203,7 @@ Most config options can be set via `GCP_AUTHCALATOR_*` environment variables (up
 | Variable                                | Description                                                        |
 | --------------------------------------- | ------------------------------------------------------------------ |
 | `GCP_AUTHCALATOR_PROJECT_ID`            | GCP project ID (same as `--project-id`)                            |
+| `GCP_AUTHCALATOR_FOLDER_ID`             | GCP folder ID (same as `--folder-id`)                              |
 | `GCP_AUTHCALATOR_SERVICE_ACCOUNT`       | Service account email (same as `--service-account`)                |
 | `GCP_AUTHCALATOR_SOCKET_PATH`           | Unix socket path (same as `--socket-path`)                         |
 | `GCP_AUTHCALATOR_ADMIN_SOCKET_PATH`     | Admin socket path for approve/deny (same as `--admin-socket-path`) |
@@ -278,11 +282,13 @@ gcp-authcalator gate \
   --gate-tls-port 8174
 ```
 
-**Required options:** `--project-id`, and at least one of `--service-account` or `--pam-policy`:
+**Required options:** exactly one of `--project-id` or `--folder-id`, and at least one of `--service-account` or `--pam-policy`:
 
-- `--service-account` alone: dev tokens via impersonation, prod tokens via ADC
-- `--pam-policy` alone: prod tokens only (dev tokens disabled), with just-in-time PAM escalation
-- Both: dev tokens via impersonation, prod tokens with PAM escalation
+- **Project mode** (`--project-id`):
+  - `--service-account` alone: dev tokens via impersonation, prod tokens via ADC
+  - `--pam-policy` alone: prod tokens only (dev tokens disabled), with just-in-time PAM escalation
+  - Both: dev tokens via impersonation, prod tokens with PAM escalation
+- **Folder mode** (`--folder-id`): PAM-only, no dev tier. See [Folder mode](#folder-mode) below.
 
 **Optional:** `--gate-tls-port` enables a TCP listener with mutual TLS, allowing remote devcontainers to connect. TLS certificates must be generated first with `gcp-authcalator init-tls` and are stored in `~/.gcp-authcalator/tls/`.
 
@@ -323,7 +329,40 @@ Both `/token` and `/token?level=prod` accept an optional `scopes` query paramete
 
 Prod token requests are rate-limited: one confirmation dialog at a time, a 1-second cooldown after denial, and a maximum of 10 attempts per minute.
 
-**Audit logging:** All token requests are logged as JSON lines to the runtime directory's `audit.log` (`$XDG_RUNTIME_DIR/audit.log` or `~/.gcp-authcalator/audit.log`).
+**Audit logging:** All token requests are logged as JSON lines to the runtime directory's `audit.log` (`$XDG_RUNTIME_DIR/audit.log` or `~/.gcp-authcalator/audit.log`). Each entry carries `project_id` (in folder mode, the per-request project; in project mode, the configured project).
+
+#### Folder mode
+
+When `--folder-id` is set, the gate brokers tokens for any project under that folder.
+
+- PAM entitlements live at the folder level
+  (`folders/{folder_id}/locations/.../entitlements/{id}`); each grant covers
+  every descendant project.
+- Each token request must carry a `?project=<id>` query parameter. The gate
+  verifies via Cloud Resource Manager that the project is a descendant of
+  the configured folder (with caching; 10-minute positive / 30-second
+  negative TTL, plus a 5-minute stale-OK window on transient CRM 5xx).
+- **No dev tier.** `--service-account` is not allowed and `/token` (level
+  `dev`) returns 501. The engineer's standing ADC is the non-elevated
+  fallback; PAM is the only elevation path.
+- `metadata-proxy` (the long-running container-side daemon) is not supported
+  in folder mode — folder-mode users go through `with-prod` exclusively. Use
+  `with-prod --project <id>` per invocation.
+
+```bash
+# Start a folder-mode gate
+gcp-authcalator gate \
+  --folder-id 123456789012 \
+  --pam-policy prod-readonly
+
+# In a devcontainer
+gcp-authcalator with-prod --project tenant-a -- gcloud sql instances list
+# Or: set CLOUDSDK_CORE_PROJECT, then with-prod inherits it.
+# Or: rely on the `gcloud config get-value project` fallback.
+```
+
+The confirmation prompt displays the resolved project so operators see
+which tenant they're authorising for each elevation.
 
 ### `metadata-proxy` — Container-side metadata emulator
 
@@ -375,7 +414,15 @@ gcp-authcalator with-prod \
   -- ogr2ogr ...
 ```
 
-**Required options:** `--project-id`
+**Required options:** exactly one of `--project-id` (project mode) or `--folder-id` (folder mode).
+
+In folder mode the per-invocation `--project <id>` flag selects which descendant project to elevate against. Resolution ladder when `--project` is omitted:
+
+1. `CLOUDSDK_CORE_PROJECT` environment variable
+2. `gcloud config get-value project` (one-shot spawn)
+3. Error — `with-prod` exits 1 with a clear message
+
+In project mode `--project` is optional; if passed it must match `--project-id`.
 
 This command:
 

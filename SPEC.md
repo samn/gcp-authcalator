@@ -8,6 +8,8 @@ Running an AI coding agent inside the same devcontainer as the engineer is conve
 
 gcp-authcalator keeps credentials on the host and requires human approval for all privilege escalation. Processes running as other OS users cannot access the token socket (ideally, coding agents should run as a separate user). For same-user processes, defense-in-depth measures (PID-based restriction, environment isolation, rate limiting) make credential abuse significantly harder.
 
+The gate can be bound to a **single GCP project** (project mode, the original design) or to a **GCP Folder** (folder mode), where it brokers tokens for any descendant project of that folder against folder-level PAM entitlements. Folder mode is the paved path for single-tenant project layouts — one devcontainer can operate against many tenant projects without per-tenant configuration. See [§6](#6-folder-mode-per-request-project-selection-and-dynamic-descendant-verification).
+
 ## Architecture
 
 ```mermaid
@@ -136,10 +138,30 @@ The shared rate limiter is intentional: a flooding agent surfaces as a real rate
 
 The single residual threat the operator socket cannot mitigate is **confused deputy via the operator's own UID**: anything that runs as the operator UID _is_ the operator from the gate's view (a malicious npm postinstall, an agent-suggested shell command, a planted shell rc, a tampered Makefile). The `auto_approve_pam_policies` allowlist caps the blast radius to a small set of pre-blessed entitlements — which is why the docs require treating that list with the same review rigor as IAM policy changes.
 
+### 6. Folder mode: per-request project selection and dynamic descendant verification
+
+**Motivation.** Single-tenant project layouts (one GCP project per tenant, grouped under a Folder) need a way for one engineer's devcontainer to escalate against any tenant without per-tenant gate configuration or per-tenant IAM provisioning. Folder mode is configured with `folder_id` instead of `project_id` and brokers tokens for any descendant project of that folder.
+
+**Mutually exclusive with project mode at the config layer.** `GateConfigSchema` refines that exactly one of `project_id` / `folder_id` is set. Project mode preserves the pre-folder behavior end-to-end (service-account impersonation for dev tokens, configured project for prod). Folder mode imposes additional constraints described below. The mutual-exclusion lives in the schema, not in runtime branches, so unreachable combinations are rejected at config-parse time rather than mid-request.
+
+**No dev tier in folder mode.** `service_account` is rejected by the schema, and `mintDevToken` returns 501 from `handleDevToken`. The engineer's standing ADC is assumed already downscoped — PAM is the sole elevation route. Dropping the dev tier removes two assumptions that don't generalize across tenants: (1) one impersonated service account that can act in every project (would concentrate standing privilege), and (2) one project's `numeric-project-id` served from the long-running metadata-proxy (no single answer is correct when the active project varies per call). The long-running `metadata-proxy` command is consequently rejected with a clear error in folder mode; folder-mode users go through `with-prod` exclusively, which spins up an ephemeral per-invocation proxy bound to the chosen tenant project.
+
+**PAM at the folder level.** Entitlements live at `folders/{id}/locations/{loc}/entitlements/{id}` and grants cover every descendant project — one source of truth instead of N copies. `pam_policy` is required (the schema enforces this), and `resolveEntitlementPath` rejects `projects/...` paths in folder mode (and `folders/...` paths in project mode) so a misplaced policy ID cannot silently bypass the configured boundary.
+
+**Per-request project selection.** Every prod-path call carries `?project=<id>`. The gate calls Cloud Resource Manager v3 (`GET /v3/projects/{id}` and walking `parent` up the resource hierarchy, bounded to 8 hops) to verify the project is a descendant of the configured folder before honoring the request. Project mode accepts `?project=` only when it matches the configured `project_id` (so the same client code works against both modes); a mismatch returns 400. Session refreshes reject `?project=` entirely — sessions are bound to the project chosen at creation.
+
+**Cache semantics.** `createFolderMembershipChecker` keeps an in-process Map keyed by project ID with 10-minute positive TTL and 30-second negative TTL. On CRM 5xx within a 5-minute window past expiry, a previously-confirmed positive is served stale so a transient CRM outage doesn't pause prod access; negatives are never served stale. CRM 403/404 collapse to "not allowed" — if the engineer's ADC can't see the project, the gate refuses to broker access either. Concurrent lookups for the same project coalesce via the same single-flight Map pattern used by PAM grant rotation.
+
+**Confirmation displays the resolved project.** zenity, osascript, and terminal prompts all carry a `Project:` line so operators see which tenant they're authorizing on each elevation. The string is sanitized through the same `stripControlChars` path as `email` and `command`. Audit log entries record the resolved `project_id` field.
+
+**`with-prod --project` resolution ladder.** In folder mode `with-prod` resolves the target project from (1) the `--project` CLI flag, (2) `CLOUDSDK_CORE_PROJECT`, (3) `gcloud config get-value project` (one-shot subprocess). In project mode `--project` is optional and must match the configured value. The resolved project flows into the gate as `?project=` and into the wrapped subprocess as `CLOUDSDK_CORE_PROJECT`.
+
+**What folder mode does not protect against.** The engineer's standing ADC permission set is the floor — folder mode does not constrain what the engineer can do via tokens issued under it. The folder-level PAM entitlement is the ceiling; anything the entitlement grants applies to every descendant project. The per-request project is a routing/audit/UX dimension, not an authorization boundary on top of PAM. Tenants needing independent governance still require project-scoped entitlements (and therefore project-mode gates per tenant).
+
 ## Components
 
 All components are sub-commands of a single `gcp-authcalator` binary, distributed as a compiled Bun executable.
-Configuration (project ID, service account, socket path, port) can be provided via CLI flags or a TOML config file (CLI takes precedence).
+Configuration (project ID **or** folder ID, service account, socket path, port) can be provided via CLI flags or a TOML config file (CLI takes precedence). `project_id` and `folder_id` are mutually exclusive — see [Folder mode](#6-folder-mode-per-request-project-selection-and-dynamic-descendant-verification).
 
 ### 1. GCP IAM Setup (prerequisites)
 
@@ -152,17 +174,19 @@ A small HTTP server using the `google-auth-library` library. Runs on the host ma
 
 **API (over Unix socket or TCP+mTLS):**
 
-| Endpoint                | Behavior                                                                 |
-| ----------------------- | ------------------------------------------------------------------------ |
-| `GET /token`            | Impersonates the default SA, returns access token immediately            |
-| `GET /token?level=prod` | Shows host-side confirmation, then returns token for engineer's identity |
-| `GET /identity`         | Returns the authenticated user's email                                   |
-| `GET /project-number`   | Returns the numeric project ID (resolved via Cloud Resource Manager API) |
-| `GET /universe-domain`  | Returns the GCP universe domain (resolved via GoogleAuth)                |
-| `POST /session`         | Create a prod session (confirmation + PAM), returns session ID + token   |
-| `DELETE /session?id=..` | Revoke a prod session                                                    |
-| `GET /token?session=..` | Refresh token within a pre-approved session (no confirmation)            |
-| `GET /health`           | Health check                                                             |
+| Endpoint                | Behavior                                                                                                                                   |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `GET /token`            | Impersonates the default SA, returns access token immediately (project mode only — 501 in folder mode)                                     |
+| `GET /token?level=prod` | Shows host-side confirmation, then returns token for engineer's identity                                                                   |
+| `GET /identity`         | Returns the authenticated user's email                                                                                                     |
+| `GET /project-number`   | Returns the numeric project ID (resolved via Cloud Resource Manager API)                                                                   |
+| `GET /universe-domain`  | Returns the GCP universe domain (resolved via GoogleAuth)                                                                                  |
+| `POST /session`         | Create a prod session (confirmation + PAM), returns session ID + token                                                                     |
+| `DELETE /session?id=..` | Revoke a prod session                                                                                                                      |
+| `GET /token?session=..` | Refresh token within a pre-approved session (no confirmation; `?project=` is rejected — sessions are bound to their creation-time project) |
+| `GET /health`           | Health check                                                                                                                               |
+
+In **folder mode** every prod-path endpoint (`/token?level=prod`, `POST /session`, `GET /project-number`) accepts a `?project=<id>` query parameter naming a tenant project. The gate verifies the project is a descendant of the configured folder via Cloud Resource Manager v3 before honoring the request. See [Folder mode](#6-folder-mode-per-request-project-selection-and-dynamic-descendant-verification).
 
 **Admin socket API** (separate Unix socket, not mounted into containers):
 
@@ -185,7 +209,7 @@ Both token endpoints accept an optional `scopes` query parameter (comma-separate
 
 **Rate limiting:** Single-flight lock (one dialog at a time), 1-second cooldown after denial, maximum 10 attempts per minute. This prevents automated brute-forcing of the confirmation flow.
 
-**PAM grant lifecycle and the drain margin:** When a `pam_policy` is in scope, the gate requests a PAM grant before minting prod tokens and caches it per-entitlement. The cache fast-path serves tokens directly until the cached grant's remaining lifetime drops below `DRAIN_MARGIN_MS` (5 minutes, defined in `src/gate/pam.ts`); below that threshold, `ensureGrant` rotates the grant. Minted prod tokens are clamped to `grant_expiry - DRAIN_MARGIN_MS`, not to `grant_expiry`: PAM enforces "one open Grant per (entitlement, requester)" so rotation has no overlap window, and clamping the token short of the grant's actual end keeps concurrent clients from holding still-valid tokens when the rotation revokes the old grant. Rotation is single-flight per entitlement (in-process), so multiple simultaneous token requests coalesce onto one revoke + create cycle. `grants.revoke` is a long-running Operation and the gate polls it to `done:true` (best-effort, 30-s deadline) before retrying create, eliminating the race where PAM would still see the old grant as open. See `src/gate/pam.ts` for the full API-quirks table.
+**PAM grant lifecycle and the drain margin:** When a `pam_policy` is in scope, the gate requests a PAM grant before minting prod tokens and caches it per-entitlement. Entitlement paths are scoped to the gate's resource at startup — `projects/{id}/locations/{loc}/entitlements/{id}` in project mode, `folders/{id}/locations/{loc}/entitlements/{id}` in folder mode (folder-level grants cover every descendant project, so one grant set is shared across tenants). The cache fast-path serves tokens directly until the cached grant's remaining lifetime drops below `DRAIN_MARGIN_MS` (5 minutes, defined in `src/gate/pam.ts`); below that threshold, `ensureGrant` rotates the grant. Minted prod tokens are clamped to `grant_expiry - DRAIN_MARGIN_MS`, not to `grant_expiry`: PAM enforces "one open Grant per (entitlement, requester)" so rotation has no overlap window, and clamping the token short of the grant's actual end keeps concurrent clients from holding still-valid tokens when the rotation revokes the old grant. Rotation is single-flight per entitlement (in-process), so multiple simultaneous token requests coalesce onto one revoke + create cycle. `grants.revoke` is a long-running Operation and the gate polls it to `done:true` (best-effort, 30-s deadline) before retrying create, eliminating the race where PAM would still see the old grant as open. See `src/gate/pam.ts` for the full API-quirks table.
 
 **Error responses** are JSON `{ "error": "...", "code"?: "..." }`. The optional `code` field is reserved for conditions clients want to handle programmatically. Currently defined codes:
 
@@ -193,6 +217,8 @@ Both token endpoints accept an optional `scopes` query parameter (comma-separate
 | ------------------------------------------ | ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `credentials_expired`                      | 500  | The gate's gcloud Application Default Credentials need re-authentication. The `error` field contains the action-oriented recovery instruction, including the gate machine's hostname (from `os.hostname()`) so engineers in remote dev environments know which physical machine to run `gcloud auth application-default login` on. The gate clears its cached source client on this error so the next request after re-authentication succeeds without restarting the daemon. |
 | `session_not_permitted_on_operator_socket` | 403  | Sessions are disabled on the operator socket. `with-prod` falls back to per-request token mode automatically.                                                                                                                                                                                                                                                                                                                                                                 |
+
+Folder mode adds two condition-less HTTP statuses on the prod path: **400** when `?project=` is missing, mismatches `project_id` in project mode, or names a non-descendant in folder mode (typed as `ProjectNotInScopeError` internally); **503** when Cloud Resource Manager is unreachable and no usable stale cache entry exists (the gate refuses to assert descendant membership without authoritative confirmation). Audit entries on the prod path carry a `project_id` field in both modes — in folder mode the per-request value (after verification); in project mode the configured value.
 
 **Socket security:** The main Unix socket is created with `0660` permissions in a `0750` directory; the privileged operator socket (when configured) is `0600` in the same directory. The gate UID's primary group owns the directory and main socket — on UPG distros this is effectively `0600` end-to-end, but the gate UID's primary group can be deliberately extended (e.g. add a `the-robot` user) to grant a different-UID agent access to the main socket while still kernel-blocking it from the operator socket. The `$XDG_RUNTIME_DIR` directory itself is left at the system-managed `0700` per the XDG spec — group access to the main socket therefore requires placing `socket_path` in a gate-managed directory like `~/.gcp-authcalator/`. Stale sockets are cleaned up only after verifying ownership, refusing to follow symlinks, and checking that no other instance is running.
 
@@ -234,6 +260,8 @@ GET /  (metadata server detection ping)
 
 Validates the `Metadata-Flavor: Google` request header (standard metadata server security). Fetches dev-scoped tokens from `gcp-gate` via the socket, caches until 5 minutes before expiry.
 
+**Project mode only.** The proxy serves one project's tokens to a long-running container and cannot represent a folder; `MetadataProxyConfigSchema` rejects folder-mode configs at parse time with a pointer to `with-prod`.
+
 **Started by** the devcontainer post start script as a background process.
 
 ### 4. `with-prod` -- Elevation Wrapper
@@ -271,8 +299,9 @@ The actual implementation adds several security hardening measures beyond this p
 - **Environment stripping** — all credential-related env vars (`GOOGLE_APPLICATION_CREDENTIALS`, `CLOUDSDK_AUTH_ACCESS_TOKEN`, `CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE`, etc.) are removed from the child's environment to prevent bypass
 - **Temp directory in user-private runtime dir** — not `/tmp`, preventing other users from observing or racing the temp directory
 - **Extra environment variables** — configurable via `[env]` TOML table or `--env` CLI flag. Values support `${VAR}` and `${VAR:-default}` substitution resolved after the elevated environment is built, allowing tools like GDAL to reference `GCE_METADATA_HOST` without tool-specific code in gcp-authcalator
+- **`--project <id>`** — per-invocation target project, forwarded to the gate as `?project=`. Required in folder mode (with the ladder `--project` → `CLOUDSDK_CORE_PROJECT` → `gcloud config get-value project`). In project mode optional; if passed must match the configured `project_id`. The resolved project is also set as `CLOUDSDK_CORE_PROJECT` in the wrapped child's environment so `gcloud` and other libraries see a consistent active project.
 
-Usage: `with-prod -- python some/script.py`, `with-prod -- gcloud sql instances list`, `with-prod -- alembic upgrade head`
+Usage: `with-prod -- python some/script.py`, `with-prod -- gcloud sql instances list`, `with-prod --project tenant-a -- alembic upgrade head`
 
 ### 5. `approve` / `deny` -- CLI Approval of Pending Requests
 

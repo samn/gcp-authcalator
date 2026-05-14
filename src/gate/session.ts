@@ -6,6 +6,13 @@ export interface ProdSession {
   id: string;
   /** Engineer's email captured at session creation. */
   email: string;
+  /**
+   * Project the session is bound to. In folder mode this is the per-request
+   * project resolved at session creation; in project mode it is the
+   * configured project. Refreshes mint for this project regardless of any
+   * later `?project=` value (which is rejected outright).
+   */
+  projectId: string;
   /** OAuth scopes for tokens minted within this session. */
   scopes?: string[];
   /** Resolved PAM policy (if any). */
@@ -26,6 +33,7 @@ export interface ProdSession {
 
 export interface CreateSessionParams {
   email: string;
+  projectId: string;
   scopes?: string[];
   pamPolicy?: string;
   commandSummary?: string;
@@ -61,6 +69,7 @@ export function createSessionManager(options: SessionManagerOptions = {}): Sessi
     const session: ProdSession = {
       id,
       email: params.email,
+      projectId: params.projectId,
       scopes: params.scopes,
       pamPolicy: params.pamPolicy,
       commandSummary: params.commandSummary,

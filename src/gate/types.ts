@@ -2,6 +2,7 @@
 // Shared interfaces for the gcp-gate token daemon
 // ---------------------------------------------------------------------------
 
+import type { Scope } from "../config.ts";
 import type { ProdRateLimiter } from "./rate-limit.ts";
 import type { PamGrantResult } from "./pam.ts";
 import type { SessionManager } from "./session.ts";
@@ -83,6 +84,13 @@ export interface AuditEntry {
    * the gate is uniquely positioned to record.
    */
   command?: string;
+  /**
+   * Target project for the request. In folder mode this is the per-request
+   * `?project=` value (after folder-membership verification); in project
+   * mode it is the configured project. Logged on every prod-path entry for
+   * cross-mode grep symmetry.
+   */
+  project_id?: string;
 }
 
 /** Per-request metadata threaded through the handler chain. */
@@ -93,17 +101,44 @@ export interface RequestContext {
 }
 
 /**
+ * Thrown by `resolveProject` when the requested project is not in scope:
+ * in project mode when the param mismatches the configured project, or in
+ * folder mode when the param is missing or not a descendant of the folder.
+ * Handlers map this to a 400 response.
+ */
+export class ProjectNotInScopeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ProjectNotInScopeError";
+  }
+}
+
+/**
  * Dependency injection interface for request handlers.
  * Allows handlers to be tested without real GCP calls.
  */
 export interface GateDeps {
+  /** Resource the gate is bound to: a single project, or a folder (per-request project). */
+  scope: Scope;
   mintDevToken: (scopes?: string[], ttlSeconds?: number) => Promise<CachedToken>;
   mintProdToken: (scopes?: string[], ttlSeconds?: number) => Promise<CachedToken>;
   getIdentityEmail: () => Promise<string>;
-  getProjectNumber: () => Promise<string>;
+  getProjectNumber: (projectId: string) => Promise<string>;
   getUniverseDomain: () => Promise<string>;
+  /**
+   * Resolve and validate the project for a request. In project mode an
+   * undefined or matching param returns the configured project; a mismatch
+   * throws `ProjectNotInScopeError`. In folder mode the param is required
+   * and must be a descendant of the configured folder (verified via CRM,
+   * with caching); otherwise throws.
+   *
+   * CRM 5xx (no usable stale cache) bubbles up as a generic Error — handlers
+   * surface it as 503.
+   */
+  resolveProject: (requestedProjectId: string | undefined) => Promise<string>;
   confirmProdAccess: (
     email: string,
+    projectId: string,
     command?: string,
     pamPolicy?: string,
     pendingId?: string,

@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- **Folder mode.** The gate can be configured with `--folder-id <numeric-id>`
+  (or `folder_id` in TOML / `GCP_AUTHCALATOR_FOLDER_ID` env) instead of
+  `--project-id`. In folder mode the gate brokers PAM entitlements at the
+  folder level (`folders/{id}/locations/{loc}/entitlements/{id}`) and
+  accepts a per-request `?project=<id>` query parameter naming a
+  descendant project, verified via Cloud Resource Manager v3 (cached:
+  10-min positive / 30-sec negative TTL, with a 5-minute stale-OK window
+  on transient CRM 5xx). `service_account` is rejected in folder mode
+  (no dev tier — engineer's standing ADC is the non-elevated path; PAM
+  is the only elevation route). `pam_policy` is required. The
+  long-running `metadata-proxy` command is rejected in folder mode —
+  folder-mode users go through `with-prod` exclusively.
+- `with-prod` gains `--project <id>` (per-invocation target project).
+  Resolution ladder in folder mode: `--project` flag →
+  `CLOUDSDK_CORE_PROJECT` → `gcloud config get-value project` → error.
+  In project mode `--project` is accepted only when it matches the
+  configured `--project-id`.
+- Confirmation prompts (zenity / osascript / terminal) now display the
+  target project on every elevation, so operators see which tenant they
+  are authorising.
+- Audit log entries carry `project_id` in both modes for cross-mode grep
+  symmetry.
+
+### Changed
+
+- `auth.getProjectNumber` now takes a `projectId` argument with a
+  per-project in-memory cache (was: single cached value for the
+  configured project). Required for folder mode where the gate may
+  resolve many descendant projects over its lifetime.
+- Session refresh (`GET /token?session=<id>`) rejects `?project=`
+  overrides — sessions are bound to the project chosen at creation.
+- PAM entitlement resolution now takes a discriminated `Scope` object
+  (`{ kind: "project", projectId } | { kind: "folder", folderId }`).
+  Cross-scope paths (e.g. a `projects/...` path on a folder-mode gate)
+  are rejected.
+
 ## [0.10.0] - 2026-05-14
 
 This release corrects issues that prevented PAM grants from getting reliably refreshed, upgrades the runtime, and includes a handful of security fixes.

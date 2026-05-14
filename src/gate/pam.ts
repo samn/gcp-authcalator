@@ -48,6 +48,8 @@
 //   coalesce onto one rotation rather than racing.
 // ---------------------------------------------------------------------------
 
+import type { Scope } from "../config.ts";
+
 const PAM_API_BASE = "https://privilegedaccessmanager.googleapis.com/v1";
 
 /** Fallback grant duration when not configured (1 hour). */
@@ -116,8 +118,11 @@ function isTerminalState(state: string | undefined): boolean {
   return state !== undefined && TERMINAL_GRANT_STATES.has(state);
 }
 
-/** Expected full resource path pattern. */
-const ENTITLEMENT_PATH_PATTERN = /^projects\/([^/]+)\/locations\/([^/]+)\/entitlements\/([^/]+)$/;
+/** Expected full resource path patterns (project- and folder-scoped). */
+const PROJECT_ENTITLEMENT_PATH_PATTERN =
+  /^projects\/([^/]+)\/locations\/([^/]+)\/entitlements\/([^/]+)$/;
+const FOLDER_ENTITLEMENT_PATH_PATTERN =
+  /^folders\/([^/]+)\/locations\/([^/]+)\/entitlements\/([^/]+)$/;
 
 /** Parse a GCP duration string (e.g. "3600s") to seconds. Returns 0 on failure. */
 function parseDurationSeconds(duration?: string): number {
@@ -218,28 +223,46 @@ interface CachedGrant {
 /**
  * Resolve a PAM policy value to a full entitlement resource path.
  *
- * - Short-form (e.g. "prod-db-admin") is expanded using project_id and location.
- * - Full paths are validated against the expected pattern and project_id.
+ * - Short-form (e.g. "prod-db-admin") is expanded using the gate's scope
+ *   (project mode → projects/{id}/...; folder mode → folders/{id}/...).
+ * - Full paths are validated against the expected pattern and must match
+ *   the configured scope's resource type and ID. Cross-scope paths
+ *   (e.g. a projects/... path on a folder-mode gate, or vice versa) are
+ *   rejected — they would silently bypass the configured boundary.
  *
- * Throws on invalid input to prevent path traversal or cross-project escalation.
+ * Throws on invalid input to prevent path traversal or cross-scope escalation.
  */
 export function resolveEntitlementPath(
   policy: string,
-  projectId: string,
+  scope: Scope,
   location: string = "global",
 ): string {
   if (policy.includes("/")) {
-    // Full resource path — validate format and project
-    const match = ENTITLEMENT_PATH_PATTERN.exec(policy);
+    if (scope.kind === "project") {
+      const match = PROJECT_ENTITLEMENT_PATH_PATTERN.exec(policy);
+      if (!match) {
+        throw new Error(
+          `Invalid PAM entitlement path: "${policy}". ` +
+            `In project mode, expected: projects/{project}/locations/{location}/entitlements/{id}`,
+        );
+      }
+      if (match[1] !== scope.projectId) {
+        throw new Error(
+          `PAM entitlement path references project "${match[1]}" but gate is configured for "${scope.projectId}"`,
+        );
+      }
+      return policy;
+    }
+    const match = FOLDER_ENTITLEMENT_PATH_PATTERN.exec(policy);
     if (!match) {
       throw new Error(
         `Invalid PAM entitlement path: "${policy}". ` +
-          `Expected format: projects/{project}/locations/{location}/entitlements/{id}`,
+          `In folder mode, expected: folders/{folder}/locations/{location}/entitlements/{id}`,
       );
     }
-    if (match[1] !== projectId) {
+    if (match[1] !== scope.folderId) {
       throw new Error(
-        `PAM entitlement path references project "${match[1]}" but gate is configured for "${projectId}"`,
+        `PAM entitlement path references folder "${match[1]}" but gate is configured for "${scope.folderId}"`,
       );
     }
     return policy;
@@ -253,7 +276,9 @@ export function resolveEntitlementPath(
     );
   }
 
-  return `projects/${projectId}/locations/${location}/entitlements/${policy}`;
+  const base =
+    scope.kind === "project" ? `projects/${scope.projectId}` : `folders/${scope.folderId}`;
+  return `${base}/locations/${location}/entitlements/${policy}`;
 }
 
 // ---------------------------------------------------------------------------

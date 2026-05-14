@@ -34,7 +34,7 @@ describe("approve command (admin socket)", () => {
 
   test("approves a pending request via admin socket", async () => {
     const { adminSocketPath, queue } = setup();
-    const promise = queue.enqueue("user@example.com");
+    const promise = queue.enqueue("user@example.com", "test-project");
     const [req] = queue.list();
 
     const res = await fetch(`http://localhost/pending/${req!.id}/approve`, {
@@ -50,7 +50,7 @@ describe("approve command (admin socket)", () => {
 
   test("denies a pending request via admin socket", async () => {
     const { adminSocketPath, queue } = setup();
-    const promise = queue.enqueue("user@example.com");
+    const promise = queue.enqueue("user@example.com", "test-project");
     const [req] = queue.list();
 
     const res = await fetch(`http://localhost/pending/${req!.id}/deny`, {

@@ -52,7 +52,13 @@ export interface AuthModule {
   mintDevToken: (scopes?: string[], ttlSeconds?: number) => Promise<CachedToken>;
   mintProdToken: (scopes?: string[], ttlSeconds?: number) => Promise<CachedToken>;
   getIdentityEmail: () => Promise<string>;
-  getProjectNumber: () => Promise<string>;
+  /**
+   * Resolve the numeric project ID for a project. Cached per project. The
+   * gate calls this lazily — in project mode with the configured project,
+   * in folder mode with the per-request `?project=` value (after the
+   * folder-membership check passes).
+   */
+  getProjectNumber: (projectId: string) => Promise<string>;
   getUniverseDomain: () => Promise<string>;
   /** Expose the ADC source client (needed for PAM API calls). */
   getSourceClient: () => Promise<AuthClient>;
@@ -89,7 +95,9 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
 
   // Other caches
   let emailCache: string | null = null;
-  let projectNumberCache: string | null = null;
+  // Numeric project IDs are immutable once a project exists. Cache for the
+  // gate's lifetime — in folder mode the gate may resolve many projects.
+  const projectNumberCache = new Map<string, string>();
   let universeDomainCache: string | null = null;
 
   /**
@@ -141,6 +149,15 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
 
     let client = impersonatedClients.get(key);
     if (!client) {
+      // service_account is required for dev tokens. The schema guarantees it
+      // is set whenever mintDevToken is reachable (project mode with
+      // service_account configured); folder mode has no dev tier and rejects
+      // service_account at config-validation time.
+      if (!config.service_account) {
+        throw new Error(
+          "Internal error: getImpersonatedClient requires a configured service_account",
+        );
+      }
       const source = await getSourceClient();
       client = new Impersonated({
         sourceClient: source,
@@ -268,8 +285,9 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
     });
   }
 
-  async function getProjectNumber(): Promise<string> {
-    if (projectNumberCache) return projectNumberCache;
+  async function getProjectNumber(projectId: string): Promise<string> {
+    const cached = projectNumberCache.get(projectId);
+    if (cached) return cached;
 
     return withAdcMapping(async () => {
       const client = await getSourceClient();
@@ -280,7 +298,7 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
       }
 
       const resp = await fetchFn(
-        `https://cloudresourcemanager.googleapis.com/v3/projects/${encodeURIComponent(config.project_id)}`,
+        `https://cloudresourcemanager.googleapis.com/v3/projects/${encodeURIComponent(projectId)}`,
         { headers: { Authorization: `Bearer ${token}` } },
       );
 
@@ -302,8 +320,8 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
         throw new Error(`Failed to get project number: unexpected name format "${data.name}"`);
       }
 
-      projectNumberCache = number;
-      return projectNumberCache;
+      projectNumberCache.set(projectId, number);
+      return number;
     });
   }
 

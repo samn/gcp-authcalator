@@ -181,7 +181,7 @@ describe("main socket — unaffected by auto_approve_pam_policies", () => {
 
   test("X-Pending-Id is allowed on main socket", async () => {
     const deps = makeOpDeps({
-      confirmProdAccess: async (_email, _cmd, _policy, pendingId) => {
+      confirmProdAccess: async (_email, _project, _cmd, _policy, pendingId) => {
         // The pending id should be passed through to confirm
         expect(pendingId).toBe("b".repeat(32));
         return true;

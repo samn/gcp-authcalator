@@ -4,6 +4,7 @@ import { createSessionManager } from "../../gate/session.ts";
 describe("createSessionManager", () => {
   const baseParams = {
     email: "eng@example.com",
+    projectId: "test-project",
     ttlSeconds: 3600,
     sessionLifetimeSeconds: 28800,
   };

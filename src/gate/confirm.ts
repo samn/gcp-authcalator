@@ -25,6 +25,7 @@ export interface ConfirmOptions {
 export function createConfirmModule(options: ConfirmOptions = {}): {
   confirmProdAccess: (
     email: string,
+    projectId: string,
     command?: string,
     pamPolicy?: string,
     pendingId?: string,
@@ -37,19 +38,21 @@ export function createConfirmModule(options: ConfirmOptions = {}): {
 
   async function confirmProdAccess(
     email: string,
+    projectId: string,
     command?: string,
     pamPolicy?: string,
     pendingId?: string,
   ): Promise<boolean> {
     // Sanitise every operator-visible string before it reaches a dialog.
     const safeEmail = stripControlChars(email);
+    const safeProject = stripControlChars(projectId);
     const safeCommand = command !== undefined ? stripControlChars(command) : undefined;
     const safePamPolicy = pamPolicy !== undefined ? stripControlChars(pamPolicy) : undefined;
 
     const tryGui = platform === "darwin" ? tryOsascript : tryZenity;
 
     try {
-      const result = await tryGui(safeEmail, spawnFn, safeCommand, safePamPolicy);
+      const result = await tryGui(safeEmail, safeProject, spawnFn, safeCommand, safePamPolicy);
       if (result !== null) return result;
     } catch {
       // GUI not available, fall through to terminal
@@ -57,13 +60,13 @@ export function createConfirmModule(options: ConfirmOptions = {}): {
 
     // Fallback to terminal prompt if TTY is available
     if (isTTY) {
-      return tryTerminalPrompt(safeEmail, safeCommand, safePamPolicy);
+      return tryTerminalPrompt(safeEmail, safeProject, safeCommand, safePamPolicy);
     }
 
     // Fallback to pending queue for CLI-based approval
     if (pendingQueue) {
       console.error("confirm: no interactive method available, queuing for CLI approval");
-      return pendingQueue.enqueue(safeEmail, safeCommand, safePamPolicy, pendingId);
+      return pendingQueue.enqueue(safeEmail, safeProject, safeCommand, safePamPolicy, pendingId);
     }
 
     console.error("confirm: no interactive method available, denying prod access");
@@ -75,6 +78,7 @@ export function createConfirmModule(options: ConfirmOptions = {}): {
 
 async function tryZenity(
   email: string,
+  projectId: string,
   spawnFn: SpawnFn,
   command?: string,
   pamPolicy?: string,
@@ -82,8 +86,9 @@ async function tryZenity(
   let text = pamPolicy
     ? `Grant prod-level GCP access to ${email} via PAM entitlement '${pamPolicy}'?`
     : `Grant prod-level GCP access to ${email}?`;
+  text += `\n\nProject: ${projectId}`;
   if (command) {
-    text += `\n\nReported command: ${command}`;
+    text += `\nReported command: ${command}`;
   }
 
   const proc = spawnFn([
@@ -109,22 +114,31 @@ async function tryZenity(
   return false;
 }
 
+/** Escape backslashes and double quotes to prevent AppleScript injection. */
+function escapeForAppleScript(s: string): string;
+function escapeForAppleScript(s: string | undefined): string | undefined;
+function escapeForAppleScript(s: string | undefined): string | undefined {
+  return s?.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
 async function tryOsascript(
   email: string,
+  projectId: string,
   spawnFn: SpawnFn,
   command?: string,
   pamPolicy?: string,
 ): Promise<boolean | null> {
-  // Escape backslashes and double quotes to prevent AppleScript injection
-  const escaped = email.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-  const escapedCommand = command?.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-  const escapedPam = pamPolicy?.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  const escaped = escapeForAppleScript(email);
+  const escapedProject = escapeForAppleScript(projectId);
+  const escapedCommand = escapeForAppleScript(command);
+  const escapedPam = escapeForAppleScript(pamPolicy);
 
   let message = escapedPam
     ? `Grant prod-level GCP access to ${escaped} via PAM entitlement '${escapedPam}'?`
     : `Grant prod-level GCP access to ${escaped}?`;
+  message += `\\n\\nProject: ${escapedProject}`;
   if (escapedCommand) {
-    message += `\\n\\nReported command: ${escapedCommand}`;
+    message += `\\nReported command: ${escapedCommand}`;
   }
 
   const proc = spawnFn([
@@ -146,9 +160,11 @@ async function tryOsascript(
 
 async function tryTerminalPrompt(
   email: string,
+  projectId: string,
   command?: string,
   pamPolicy?: string,
 ): Promise<boolean> {
+  process.stdout.write(`gcp-gate: Project: ${projectId}\n`);
   if (command) {
     process.stdout.write(`gcp-gate: Reported command: ${command}\n`);
   }

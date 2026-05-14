@@ -1,4 +1,4 @@
-import type { GateDeps, CachedToken } from "../../gate/types.ts";
+import { ProjectNotInScopeError, type GateDeps, type CachedToken } from "../../gate/types.ts";
 import { createProdRateLimiter } from "../../gate/rate-limit.ts";
 import { createSessionManager } from "../../gate/session.ts";
 
@@ -34,14 +34,21 @@ export function makeGateDeps(overrides: Partial<GateDeps> = {}): GateDeps {
   };
 
   return {
+    scope: { kind: "project", projectId: "test-project" },
     mintDevToken: async () => token,
     mintProdToken: async () => ({
       access_token: "prod-access-token",
       expires_at: new Date(Date.now() + 3600 * 1000),
     }),
     getIdentityEmail: async () => "user@example.com",
-    getProjectNumber: async () => "123456789012",
+    getProjectNumber: async (_projectId: string) => "123456789012",
     getUniverseDomain: async () => "googleapis.com",
+    resolveProject: async (requested: string | undefined) => {
+      if (requested && requested !== "test-project") {
+        throw new ProjectNotInScopeError(`Project "${requested}" not permitted`);
+      }
+      return "test-project";
+    },
     confirmProdAccess: async () => true,
     writeAuditLog: () => {},
     prodRateLimiter: createProdRateLimiter(),

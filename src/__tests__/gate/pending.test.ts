@@ -6,7 +6,11 @@ describe("createPendingQueue", () => {
 
   test("enqueue returns a promise that resolves to true when approved", async () => {
     const queue = createPendingQueue(baseOpts);
-    const promise = queue.enqueue("user@example.com", "gcloud compute instances list");
+    const promise = queue.enqueue(
+      "user@example.com",
+      "test-project",
+      "gcloud compute instances list",
+    );
     const pending = queue.list();
 
     expect(pending).toHaveLength(1);
@@ -19,7 +23,7 @@ describe("createPendingQueue", () => {
 
   test("enqueue returns a promise that resolves to false when denied", async () => {
     const queue = createPendingQueue(baseOpts);
-    const promise = queue.enqueue("user@example.com");
+    const promise = queue.enqueue("user@example.com", "test-project");
     const [req] = queue.list();
 
     queue.deny(req!.id);
@@ -28,7 +32,7 @@ describe("createPendingQueue", () => {
 
   test("enqueue auto-denies after timeout", async () => {
     const queue = createPendingQueue({ timeoutMs: 50 });
-    const promise = queue.enqueue("user@example.com");
+    const promise = queue.enqueue("user@example.com", "test-project");
 
     expect(await promise).toBe(false);
     expect(queue.list()).toHaveLength(0);
@@ -36,8 +40,8 @@ describe("createPendingQueue", () => {
 
   test("list returns all pending requests", () => {
     const queue = createPendingQueue(baseOpts);
-    queue.enqueue("a@example.com", "cmd1");
-    queue.enqueue("b@example.com", "cmd2", "pam-policy");
+    queue.enqueue("a@example.com", "test-project", "cmd1");
+    queue.enqueue("b@example.com", "test-project", "cmd2", "pam-policy");
 
     const pending = queue.list();
     expect(pending).toHaveLength(2);
@@ -50,7 +54,7 @@ describe("createPendingQueue", () => {
     let time = 1_000_000;
     const queue = createPendingQueue({ timeoutMs: 5000, now: () => time });
 
-    queue.enqueue("user@example.com");
+    queue.enqueue("user@example.com", "test-project");
     expect(queue.list()).toHaveLength(1);
 
     // Advance past expiry
@@ -72,7 +76,7 @@ describe("createPendingQueue", () => {
     let time = 1_000_000;
     const queue = createPendingQueue({ timeoutMs: 5000, now: () => time });
 
-    queue.enqueue("user@example.com");
+    queue.enqueue("user@example.com", "test-project");
     const [req] = queue.list();
 
     // Advance past expiry
@@ -82,7 +86,7 @@ describe("createPendingQueue", () => {
 
   test("approve returns false for already-resolved request", async () => {
     const queue = createPendingQueue(baseOpts);
-    const promise = queue.enqueue("user@example.com");
+    const promise = queue.enqueue("user@example.com", "test-project");
     const [req] = queue.list();
 
     expect(queue.approve(req!.id)).toBe(true);
@@ -92,8 +96,8 @@ describe("createPendingQueue", () => {
 
   test("denyAll resolves all pending promises with false", async () => {
     const queue = createPendingQueue(baseOpts);
-    const p1 = queue.enqueue("a@example.com");
-    const p2 = queue.enqueue("b@example.com");
+    const p1 = queue.enqueue("a@example.com", "test-project");
+    const p2 = queue.enqueue("b@example.com", "test-project");
 
     expect(queue.list()).toHaveLength(2);
     queue.denyAll();
@@ -105,7 +109,7 @@ describe("createPendingQueue", () => {
 
   test("auto-generated IDs are 32-char hex strings", () => {
     const queue = createPendingQueue(baseOpts);
-    queue.enqueue("user@example.com");
+    queue.enqueue("user@example.com", "test-project");
     const [req] = queue.list();
     expect(req!.id).toHaveLength(32);
     expect(req!.id).toMatch(/^[0-9a-f]{32}$/);
@@ -115,7 +119,7 @@ describe("createPendingQueue", () => {
     const queue = createPendingQueue(baseOpts);
     const ids = new Set<string>();
     for (let i = 0; i < 50; i++) {
-      queue.enqueue(`user${i}@example.com`);
+      queue.enqueue(`user${i}@example.com`, "test-project");
     }
     for (const req of queue.list()) {
       ids.add(req.id);
@@ -126,7 +130,7 @@ describe("createPendingQueue", () => {
   test("accepts a valid client-provided ID", async () => {
     const queue = createPendingQueue(baseOpts);
     const clientId = "a".repeat(32);
-    const promise = queue.enqueue("user@example.com", "cmd", undefined, clientId);
+    const promise = queue.enqueue("user@example.com", "test-project", "cmd", undefined, clientId);
     const [req] = queue.list();
 
     expect(req!.id).toBe(clientId);
@@ -136,31 +140,31 @@ describe("createPendingQueue", () => {
 
   test("rejects client-provided ID with wrong length", () => {
     const queue = createPendingQueue(baseOpts);
-    expect(() => queue.enqueue("user@example.com", undefined, undefined, "tooshort")).toThrow(
-      "Invalid pending ID format",
-    );
+    expect(() =>
+      queue.enqueue("user@example.com", "test-project", undefined, undefined, "tooshort"),
+    ).toThrow("Invalid pending ID format");
   });
 
   test("rejects client-provided ID with uppercase chars", () => {
     const queue = createPendingQueue(baseOpts);
-    expect(() => queue.enqueue("user@example.com", undefined, undefined, "A".repeat(32))).toThrow(
-      "Invalid pending ID format",
-    );
+    expect(() =>
+      queue.enqueue("user@example.com", "test-project", undefined, undefined, "A".repeat(32)),
+    ).toThrow("Invalid pending ID format");
   });
 
   test("rejects duplicate client-provided ID", () => {
     const queue = createPendingQueue(baseOpts);
     const clientId = "b".repeat(32);
-    queue.enqueue("a@example.com", undefined, undefined, clientId);
+    queue.enqueue("a@example.com", "test-project", undefined, undefined, clientId);
 
-    expect(() => queue.enqueue("b@example.com", undefined, undefined, clientId)).toThrow(
-      "Pending ID already in use",
-    );
+    expect(() =>
+      queue.enqueue("b@example.com", "test-project", undefined, undefined, clientId),
+    ).toThrow("Pending ID already in use");
   });
 
   test("createdAt and expiresAt are set correctly", () => {
     const queue = createPendingQueue({ timeoutMs: 5000, now: () => 1_000_000 });
-    queue.enqueue("user@example.com");
+    queue.enqueue("user@example.com", "test-project");
     const [req] = queue.list();
 
     expect(req!.createdAt.getTime()).toBe(1_000_000);
@@ -169,7 +173,7 @@ describe("createPendingQueue", () => {
 
   test("enqueue preserves optional fields", () => {
     const queue = createPendingQueue(baseOpts);
-    queue.enqueue("user@example.com", "terraform apply", "prod-db-admin");
+    queue.enqueue("user@example.com", "test-project", "terraform apply", "prod-db-admin");
     const [req] = queue.list();
 
     expect(req!.email).toBe("user@example.com");
@@ -179,7 +183,7 @@ describe("createPendingQueue", () => {
 
   test("enqueue with no optional fields leaves them undefined", () => {
     const queue = createPendingQueue(baseOpts);
-    queue.enqueue("user@example.com");
+    queue.enqueue("user@example.com", "test-project");
     const [req] = queue.list();
 
     expect(req!.command).toBeUndefined();
@@ -188,8 +192,8 @@ describe("createPendingQueue", () => {
 
   test("multiple concurrent requests are independent", async () => {
     const queue = createPendingQueue(baseOpts);
-    const p1 = queue.enqueue("a@example.com");
-    const p2 = queue.enqueue("b@example.com");
+    const p1 = queue.enqueue("a@example.com", "test-project");
+    const p2 = queue.enqueue("b@example.com", "test-project");
     const pending = queue.list();
 
     // Approve first, deny second

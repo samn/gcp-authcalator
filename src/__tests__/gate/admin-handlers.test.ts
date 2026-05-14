@@ -7,7 +7,7 @@ import { makeGateDeps as makeDeps, makeRequest } from "./test-helpers.ts";
 describe("admin socket: POST /pending/:id/approve", () => {
   test("approves a pending request", async () => {
     const pendingQueue = createPendingQueue({ timeoutMs: 5000, now: () => 1_000_000 });
-    const promise = pendingQueue.enqueue("user@example.com");
+    const promise = pendingQueue.enqueue("user@example.com", "test-project");
     const [req] = pendingQueue.list();
 
     const auditLog: AuditEntry[] = [];
@@ -54,7 +54,7 @@ describe("admin socket: POST /pending/:id/approve", () => {
 describe("admin socket: POST /pending/:id/deny", () => {
   test("denies a pending request", async () => {
     const pendingQueue = createPendingQueue({ timeoutMs: 5000, now: () => 1_000_000 });
-    const promise = pendingQueue.enqueue("user@example.com");
+    const promise = pendingQueue.enqueue("user@example.com", "test-project");
     const [req] = pendingQueue.list();
 
     const auditLog: AuditEntry[] = [];

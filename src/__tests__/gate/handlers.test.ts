@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { handleRequest } from "../../gate/handlers.ts";
 import { CredentialsExpiredError } from "../../gate/credentials-error.ts";
-import type { AuditEntry, CachedToken } from "../../gate/types.ts";
+import { ProjectNotInScopeError, type AuditEntry, type CachedToken } from "../../gate/types.ts";
 import type { ProdRateLimiter } from "../../gate/rate-limit.ts";
 import { createSessionManager } from "../../gate/session.ts";
 import { createPendingQueue } from "../../gate/pending.ts";
@@ -71,7 +71,7 @@ describe("GET /identity", () => {
 
 describe("GET /project-number", () => {
   test("returns project number from provider", async () => {
-    const deps = makeDeps({ getProjectNumber: async () => "987654321098" });
+    const deps = makeDeps({ getProjectNumber: async (_projectId: string) => "987654321098" });
     const res = await handleRequest(makeRequest("/project-number"), deps);
 
     expect(res.status).toBe(200);
@@ -86,7 +86,7 @@ describe("GET /project-number", () => {
 
   test("returns 500 when project number lookup fails", async () => {
     const deps = makeDeps({
-      getProjectNumber: async () => {
+      getProjectNumber: async (_projectId: string) => {
         throw new Error("CRM API unreachable");
       },
     });
@@ -413,7 +413,7 @@ describe("GET /token?level=prod", () => {
   test("passes command summary to confirmProdAccess when header is present", async () => {
     let capturedCommand: string | undefined;
     const deps = makeDeps({
-      confirmProdAccess: async (_email, command) => {
+      confirmProdAccess: async (_email, _project, command) => {
         capturedCommand = command;
         return true;
       },
@@ -430,7 +430,7 @@ describe("GET /token?level=prod", () => {
   test("passes undefined command when header is missing", async () => {
     let capturedCommand: string | undefined = "should-be-replaced";
     const deps = makeDeps({
-      confirmProdAccess: async (_email, command) => {
+      confirmProdAccess: async (_email, _project, command) => {
         capturedCommand = command;
         return true;
       },
@@ -444,7 +444,7 @@ describe("GET /token?level=prod", () => {
   test("passes undefined command when header contains invalid JSON", async () => {
     let capturedCommand: string | undefined = "should-be-replaced";
     const deps = makeDeps({
-      confirmProdAccess: async (_email, command) => {
+      confirmProdAccess: async (_email, _project, command) => {
         capturedCommand = command;
         return true;
       },
@@ -459,7 +459,7 @@ describe("GET /token?level=prod", () => {
   test("summarizes long commands with truncation", async () => {
     let capturedCommand: string | undefined;
     const deps = makeDeps({
-      confirmProdAccess: async (_email, command) => {
+      confirmProdAccess: async (_email, _project, command) => {
         capturedCommand = command;
         return true;
       },
@@ -511,7 +511,7 @@ describe("GET /token?level=prod", () => {
   test("redacts sensitive-looking values in command", async () => {
     let capturedCommand: string | undefined;
     const deps = makeDeps({
-      confirmProdAccess: async (_email, command) => {
+      confirmProdAccess: async (_email, _project, command) => {
         capturedCommand = command;
         return true;
       },
@@ -687,7 +687,7 @@ describe("GET /token?level=prod with PAM", () => {
         expiresAt: new Date(Date.now() + 3600 * 1000),
         cached: false,
       }),
-      confirmProdAccess: async (_email, _command, pamPolicy) => {
+      confirmProdAccess: async (_email, _project, _command, pamPolicy) => {
         capturedPam = pamPolicy;
         return true;
       },
@@ -1385,6 +1385,7 @@ describe("DELETE /session", () => {
     const sessionManager = createSessionManager();
     const session = sessionManager.create({
       email: "eng@example.com",
+      projectId: "test-project",
       ttlSeconds: 3600,
       sessionLifetimeSeconds: 28800,
     });
@@ -1416,6 +1417,7 @@ describe("DELETE /session", () => {
     const sessionManager = createSessionManager();
     const session = sessionManager.create({
       email: "eng@example.com",
+      projectId: "test-project",
       ttlSeconds: 3600,
       sessionLifetimeSeconds: 28800,
     });
@@ -1438,6 +1440,7 @@ describe("GET /token?session=<id>", () => {
     const sessionManager = createSessionManager();
     const session = sessionManager.create({
       email: "eng@example.com",
+      projectId: "test-project",
       ttlSeconds: 3600,
       sessionLifetimeSeconds: 28800,
     });
@@ -1457,6 +1460,7 @@ describe("GET /token?session=<id>", () => {
     const sessionManager = createSessionManager({ now: () => time });
     const session = sessionManager.create({
       email: "eng@example.com",
+      projectId: "test-project",
       ttlSeconds: 3600,
       sessionLifetimeSeconds: 60,
     });
@@ -1481,6 +1485,7 @@ describe("GET /token?session=<id>", () => {
     const sessionManager = createSessionManager();
     const session = sessionManager.create({
       email: "eng@example.com",
+      projectId: "test-project",
       scopes: ["scope1", "scope2"],
       ttlSeconds: 900,
       sessionLifetimeSeconds: 28800,
@@ -1506,6 +1511,7 @@ describe("GET /token?session=<id>", () => {
     const sessionManager = createSessionManager();
     const session = sessionManager.create({
       email: "eng@example.com",
+      projectId: "test-project",
       ttlSeconds: 3600,
       sessionLifetimeSeconds: 28800,
     });
@@ -1530,6 +1536,7 @@ describe("GET /token?session=<id>", () => {
     const sessionManager = createSessionManager();
     const session = sessionManager.create({
       email: "eng@example.com",
+      projectId: "test-project",
       ttlSeconds: 3600,
       sessionLifetimeSeconds: 28800,
     });
@@ -1548,6 +1555,7 @@ describe("GET /token?session=<id>", () => {
     const sessionManager = createSessionManager();
     const session = sessionManager.create({
       email: "eng@example.com",
+      projectId: "test-project",
       ttlSeconds: 3600,
       sessionLifetimeSeconds: 28800,
     });
@@ -1565,6 +1573,7 @@ describe("GET /token?session=<id>", () => {
     const sessionManager = createSessionManager();
     const session = sessionManager.create({
       email: "eng@example.com",
+      projectId: "test-project",
       ttlSeconds: 3600,
       sessionLifetimeSeconds: 28800,
     });
@@ -1588,6 +1597,7 @@ describe("GET /token?session=<id>", () => {
     const sessionManager = createSessionManager();
     const session = sessionManager.create({
       email: "eng@example.com",
+      projectId: "test-project",
       ttlSeconds: 3600,
       sessionLifetimeSeconds: 28800,
       pamPolicy: "projects/p/locations/global/entitlements/e",
@@ -1619,6 +1629,7 @@ describe("GET /token?session=<id>", () => {
     const sessionManager = createSessionManager();
     const session = sessionManager.create({
       email: "eng@example.com",
+      projectId: "test-project",
       ttlSeconds: 3600,
       sessionLifetimeSeconds: 28800,
     });
@@ -1647,6 +1658,7 @@ describe("GET /token?session=<id>", () => {
     const sessionManager = createSessionManager();
     const session = sessionManager.create({
       email: "eng@example.com",
+      projectId: "test-project",
       ttlSeconds: 3600,
       sessionLifetimeSeconds: 28800,
       pamPolicy: "projects/p/locations/global/entitlements/e",
@@ -1679,6 +1691,7 @@ describe("GET /token?session=<id>", () => {
     const sessionManager = createSessionManager();
     const session = sessionManager.create({
       email: "eng@example.com",
+      projectId: "test-project",
       ttlSeconds: 3600,
       sessionLifetimeSeconds: 28800,
       pamPolicy: "projects/p/locations/global/entitlements/e",
@@ -1718,6 +1731,7 @@ describe("GET /token?session=<id>", () => {
     const sessionManager = createSessionManager();
     const session = sessionManager.create({
       email: "eng@example.com",
+      projectId: "test-project",
       ttlSeconds: 3600,
       sessionLifetimeSeconds: 28800,
       pamPolicy: "projects/p/locations/global/entitlements/e",
@@ -1759,6 +1773,7 @@ describe("GET /token?session=<id>", () => {
     const sessionManager = createSessionManager();
     const session = sessionManager.create({
       email: "eng@example.com",
+      projectId: "test-project",
       ttlSeconds: 600,
       sessionLifetimeSeconds: 28800,
       pamPolicy: "projects/p/locations/global/entitlements/e",
@@ -1789,6 +1804,7 @@ describe("GET /token?session=<id>", () => {
     const sessionManager = createSessionManager();
     const session = sessionManager.create({
       email: "eng@example.com",
+      projectId: "test-project",
       ttlSeconds: 3600,
       sessionLifetimeSeconds: 28800,
       pamPolicy: "projects/p/locations/global/entitlements/e",
@@ -1812,6 +1828,7 @@ describe("GET /token?session=<id>", () => {
     const sessionManager = createSessionManager();
     const session = sessionManager.create({
       email: "eng@example.com",
+      projectId: "test-project",
       ttlSeconds: 3600,
       sessionLifetimeSeconds: 28800,
       pamPolicy: "projects/p/locations/global/entitlements/e",
@@ -1842,6 +1859,7 @@ describe("GET /token?session=<id>", () => {
     const sessionManager = createSessionManager();
     const session = sessionManager.create({
       email: "eng@example.com",
+      projectId: "test-project",
       ttlSeconds: 3600,
       sessionLifetimeSeconds: 28800,
       pamPolicy: "projects/p/locations/global/entitlements/e",
@@ -1901,7 +1919,7 @@ describe("X-Pending-Id header", () => {
   test("passes X-Pending-Id to confirmProdAccess", async () => {
     let capturedPendingId: string | undefined;
     const deps = makeDeps({
-      confirmProdAccess: async (_email, _cmd, _pam, pendingId) => {
+      confirmProdAccess: async (_email, _project, _cmd, _pam, pendingId) => {
         capturedPendingId = pendingId;
         return true;
       },
@@ -1916,7 +1934,7 @@ describe("X-Pending-Id header", () => {
   test("passes undefined when X-Pending-Id header is missing", async () => {
     let capturedPendingId: string | undefined = "should-be-replaced";
     const deps = makeDeps({
-      confirmProdAccess: async (_email, _cmd, _pam, pendingId) => {
+      confirmProdAccess: async (_email, _project, _cmd, _pam, pendingId) => {
         capturedPendingId = pendingId;
         return true;
       },
@@ -1930,7 +1948,7 @@ describe("X-Pending-Id header", () => {
   test("passes X-Pending-Id to confirmProdAccess on POST /session", async () => {
     let capturedPendingId: string | undefined;
     const deps = makeDeps({
-      confirmProdAccess: async (_email, _cmd, _pam, pendingId) => {
+      confirmProdAccess: async (_email, _project, _cmd, _pam, pendingId) => {
         capturedPendingId = pendingId;
         return true;
       },
@@ -1979,6 +1997,7 @@ describe("credentials_expired error code", () => {
     const sessionManager = createSessionManager();
     const session = sessionManager.create({
       email: "eng@example.com",
+      projectId: "test-project",
       ttlSeconds: 3600,
       sessionLifetimeSeconds: 28800,
     });
@@ -2034,5 +2053,146 @@ describe("credentials_expired error code", () => {
     const body = (await res.json()) as Record<string, unknown>;
     expect(body.code).toBeUndefined();
     expect(body.error).toBe("network unreachable");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Folder mode
+// ---------------------------------------------------------------------------
+
+describe("folder mode", () => {
+  /** Build deps for a folder-mode gate accepting "tenant-a" and "tenant-b". */
+  function folderModeDeps(overrides: Partial<Parameters<typeof makeDeps>[0]> = {}) {
+    const allowed = new Set(["tenant-a", "tenant-b"]);
+    return makeDeps({
+      scope: { kind: "folder", folderId: "123456789012" },
+      resolveProject: async (requested: string | undefined) => {
+        if (!requested) {
+          throw new ProjectNotInScopeError("project parameter required");
+        }
+        if (!allowed.has(requested)) {
+          throw new ProjectNotInScopeError(`Project "${requested}" not a descendant`);
+        }
+        return requested;
+      },
+      ...overrides,
+    });
+  }
+
+  test("dev token request returns 501 in folder mode", async () => {
+    const logs: AuditEntry[] = [];
+    const deps = folderModeDeps({ writeAuditLog: (e) => logs.push(e) });
+    const res = await handleRequest(makeRequest("/token"), deps);
+    expect(res.status).toBe(501);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toMatch(/not available in folder mode/);
+    expect(logs[0]!.result).toBe("error");
+    expect(logs[0]!.level).toBe("dev");
+  });
+
+  test("prod token with missing ?project= returns 400", async () => {
+    const deps = folderModeDeps();
+    const res = await handleRequest(makeRequest("/token?level=prod"), deps);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toMatch(/project parameter required/);
+  });
+
+  test("prod token with out-of-scope project returns 400", async () => {
+    const deps = folderModeDeps();
+    const res = await handleRequest(
+      makeRequest("/token?level=prod&project=tenant-not-in-folder"),
+      deps,
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toMatch(/not a descendant/);
+  });
+
+  test("prod token with in-scope ?project= mints and audits with project_id", async () => {
+    const logs: AuditEntry[] = [];
+    const deps = folderModeDeps({ writeAuditLog: (e) => logs.push(e) });
+    const res = await handleRequest(makeRequest("/token?level=prod&project=tenant-a"), deps);
+    expect(res.status).toBe(200);
+    expect(logs[0]!.result).toBe("granted");
+    expect(logs[0]!.project_id).toBe("tenant-a");
+  });
+
+  test("CRM 5xx (generic Error from resolveProject) surfaces as 503", async () => {
+    const deps = folderModeDeps({
+      resolveProject: async () => {
+        throw new Error("CRM projects/x returned 503: outage");
+      },
+    });
+    const res = await handleRequest(makeRequest("/token?level=prod&project=tenant-a"), deps);
+    expect(res.status).toBe(503);
+  });
+
+  test("session creation records projectId; refresh uses it", async () => {
+    const deps = folderModeDeps();
+    const create = await handleRequest(makeRequest("/session?project=tenant-a", "POST"), deps);
+    expect(create.status).toBe(200);
+    const created = (await create.json()) as { session_id: string };
+
+    // Direct inspection: the session manager retains the projectId
+    const session = deps.sessionManager.validate(created.session_id);
+    expect(session?.projectId).toBe("tenant-a");
+
+    // Refresh works without re-passing ?project=
+    const refresh = await handleRequest(makeRequest(`/token?session=${created.session_id}`), deps);
+    expect(refresh.status).toBe(200);
+  });
+
+  test("session refresh rejects ?project= override", async () => {
+    const deps = folderModeDeps();
+    const create = await handleRequest(makeRequest("/session?project=tenant-a", "POST"), deps);
+    const { session_id } = (await create.json()) as { session_id: string };
+
+    const res = await handleRequest(
+      makeRequest(`/token?session=${session_id}&project=tenant-b`),
+      deps,
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toMatch(/not allowed on session refresh/);
+  });
+
+  test("/project-number requires ?project= in folder mode", async () => {
+    const deps = folderModeDeps();
+    const res = await handleRequest(makeRequest("/project-number"), deps);
+    expect(res.status).toBe(400);
+  });
+
+  test("/project-number resolves project and forwards to getProjectNumber", async () => {
+    let calledFor: string | undefined;
+    const deps = folderModeDeps({
+      getProjectNumber: async (projectId: string) => {
+        calledFor = projectId;
+        return "9999";
+      },
+    });
+    const res = await handleRequest(makeRequest("/project-number?project=tenant-a"), deps);
+    expect(res.status).toBe(200);
+    expect(calledFor).toBe("tenant-a");
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.project_number).toBe("9999");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Project mode: ?project= mismatch
+// ---------------------------------------------------------------------------
+
+describe("project-mode ?project= handling", () => {
+  test("matching ?project= is accepted", async () => {
+    const deps = makeDeps();
+    const res = await handleRequest(makeRequest("/token?level=prod&project=test-project"), deps);
+    expect(res.status).toBe(200);
+  });
+
+  test("mismatched ?project= is rejected with 400", async () => {
+    const deps = makeDeps();
+    const res = await handleRequest(makeRequest("/token?level=prod&project=other-project"), deps);
+    expect(res.status).toBe(400);
   });
 });

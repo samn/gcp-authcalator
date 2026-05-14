@@ -3,10 +3,24 @@
 # Pass this file with: gcp-authcalator <command> --config config.toml
 # CLI flags take precedence over values in this file.
 
-# GCP project ID (required for all commands)
+# GCP project ID (project mode). Mutually exclusive with folder_id.
 project_id = "my-gcp-project"
 
-# Service account email to impersonate for dev tokens (required for `gate`)
+# GCP folder ID (folder mode). Mutually exclusive with project_id. In folder
+# mode the gate brokers tokens for any descendant project under this folder.
+# - PAM entitlements live at the folder level
+#   (folders/{id}/locations/{loc}/entitlements/{id}).
+# - Each token request must carry a `project` query param naming a
+#   descendant. The gate verifies via Cloud Resource Manager.
+# - service_account is NOT allowed in folder mode (no dev tier; ADC
+#   pass-through only). pam_policy is required.
+# - The long-running `metadata-proxy` command is unsupported in folder
+#   mode — use `with-prod --project <id>` per invocation.
+# folder_id = "123456789012"
+
+# Service account email to impersonate for dev tokens (project mode only).
+# In folder mode the engineer's downscoped ADC is the non-elevated path;
+# PAM is the sole elevation route.
 service_account = "dev-runner@my-gcp-project.iam.gserviceaccount.com"
 
 # Path to the Unix domain socket shared between host and container.

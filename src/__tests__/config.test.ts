@@ -12,6 +12,7 @@ import {
   expandTilde,
   getDefaultSocketPath,
   getDefaultWithProdRuntimeDir,
+  getScope,
   loadConfig,
   loadEnvVars,
   loadTOML,
@@ -267,6 +268,29 @@ describe("ConfigSchema", () => {
   test("rejects non-integer token_ttl_seconds", () => {
     expect(() => ConfigSchema.parse({ token_ttl_seconds: 3.5 })).toThrow(z.ZodError);
   });
+
+  test("accepts numeric folder_id", () => {
+    const config = ConfigSchema.parse({ folder_id: "123456789012" });
+    expect(config.folder_id).toBe("123456789012");
+  });
+
+  test("folder_id is optional", () => {
+    const config = ConfigSchema.parse({});
+    expect(config.folder_id).toBeUndefined();
+  });
+
+  test("rejects empty folder_id", () => {
+    expect(() => ConfigSchema.parse({ folder_id: "" })).toThrow(z.ZodError);
+  });
+
+  test("rejects non-numeric folder_id (alphabetic)", () => {
+    expect(() => ConfigSchema.parse({ folder_id: "my-folder" })).toThrow(z.ZodError);
+  });
+
+  test("rejects folder_id with full resource path prefix", () => {
+    // Catches the common typo of passing `folders/123` instead of `123`.
+    expect(() => ConfigSchema.parse({ folder_id: "folders/123" })).toThrow(z.ZodError);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -370,6 +394,46 @@ describe("GateConfigSchema", () => {
     });
     expect(config.agent_uid).toBe("claude");
   });
+
+  // ---- Folder mode -------------------------------------------------------
+
+  test("accepts folder mode (folder_id + pam_policy)", () => {
+    const config = GateConfigSchema.parse({
+      folder_id: "123456789012",
+      pam_policy: "prod-readonly",
+    });
+    expect(config.folder_id).toBe("123456789012");
+    expect(config.project_id).toBeUndefined();
+    expect(config.service_account).toBeUndefined();
+  });
+
+  test("rejects folder mode without pam_policy", () => {
+    expect(() => GateConfigSchema.parse({ folder_id: "123456789012" })).toThrow(z.ZodError);
+  });
+
+  test("rejects folder mode with service_account (no dev tier)", () => {
+    expect(() =>
+      GateConfigSchema.parse({
+        folder_id: "123456789012",
+        service_account: "sa@proj.iam.gserviceaccount.com",
+        pam_policy: "prod-readonly",
+      }),
+    ).toThrow(z.ZodError);
+  });
+
+  test("rejects both project_id and folder_id (XOR)", () => {
+    expect(() =>
+      GateConfigSchema.parse({
+        project_id: "my-proj",
+        folder_id: "123456789012",
+        pam_policy: "prod-readonly",
+      }),
+    ).toThrow(z.ZodError);
+  });
+
+  test("rejects neither project_id nor folder_id", () => {
+    expect(() => GateConfigSchema.parse({ pam_policy: "prod-readonly" })).toThrow(z.ZodError);
+  });
 });
 
 describe("MetadataProxyConfigSchema", () => {
@@ -382,16 +446,65 @@ describe("MetadataProxyConfigSchema", () => {
     expect(config.project_id).toBe("my-proj");
     expect(config.port).toBe(8173);
   });
+
+  test("rejects folder_id (folder mode uses with-prod, not metadata-proxy)", () => {
+    expect(() =>
+      MetadataProxyConfigSchema.parse({ project_id: "my-proj", folder_id: "123456789012" }),
+    ).toThrow(/with-prod/);
+  });
 });
 
 describe("WithProdConfigSchema", () => {
-  test("requires project_id", () => {
+  test("rejects empty config (must have project_id or folder_id)", () => {
     expect(() => WithProdConfigSchema.parse({})).toThrow(z.ZodError);
   });
 
   test("accepts valid config with project_id", () => {
     const config = WithProdConfigSchema.parse({ project_id: "my-proj" });
     expect(config.project_id).toBe("my-proj");
+  });
+
+  test("accepts valid config with folder_id alone", () => {
+    const config = WithProdConfigSchema.parse({ folder_id: "123456789012" });
+    expect(config.folder_id).toBe("123456789012");
+    expect(config.project_id).toBeUndefined();
+  });
+
+  test("rejects both project_id and folder_id (XOR)", () => {
+    expect(() =>
+      WithProdConfigSchema.parse({ project_id: "my-proj", folder_id: "123456789012" }),
+    ).toThrow(z.ZodError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getScope
+// ---------------------------------------------------------------------------
+
+describe("getScope", () => {
+  test("returns project scope when project_id is set", () => {
+    expect(getScope({ project_id: "my-proj" })).toEqual({
+      kind: "project",
+      projectId: "my-proj",
+    });
+  });
+
+  test("returns folder scope when folder_id is set", () => {
+    expect(getScope({ folder_id: "123456789012" })).toEqual({
+      kind: "folder",
+      folderId: "123456789012",
+    });
+  });
+
+  test("prefers folder when both are set (defensive — schema rejects this)", () => {
+    expect(getScope({ project_id: "my-proj", folder_id: "123456789012" })).toEqual({
+      kind: "folder",
+      folderId: "123456789012",
+    });
+  });
+
+  test("throws when neither is set", () => {
+    expect(() => getScope({})).toThrow(/must have project_id or folder_id/);
   });
 });
 
@@ -469,6 +582,11 @@ describe("mapCliArgs", () => {
     const result = mapCliArgs({ "token-ttl-seconds": "1800" });
     expect(result).toEqual({ token_ttl_seconds: "1800" });
   });
+
+  test("maps folder-id to folder_id", () => {
+    const result = mapCliArgs({ "folder-id": "123456789012" });
+    expect(result).toEqual({ folder_id: "123456789012" });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -523,6 +641,7 @@ describe("loadEnvVars", () => {
     withEnv(
       {
         GCP_AUTHCALATOR_PROJECT_ID: "env-project",
+        GCP_AUTHCALATOR_FOLDER_ID: "123456789012",
         GCP_AUTHCALATOR_SERVICE_ACCOUNT: "sa@env.iam.gserviceaccount.com",
         GCP_AUTHCALATOR_SOCKET_PATH: "/env/path.sock",
         GCP_AUTHCALATOR_PORT: "9999",
@@ -536,6 +655,7 @@ describe("loadEnvVars", () => {
         const result = loadEnvVars();
         expect(result).toEqual({
           project_id: "env-project",
+          folder_id: "123456789012",
           service_account: "sa@env.iam.gserviceaccount.com",
           socket_path: "/env/path.sock",
           port: "9999",

@@ -1,7 +1,7 @@
 import { unlinkSync, existsSync, chmodSync, chownSync, lstatSync } from "node:fs";
 import { dirname } from "node:path";
-import type { GateConfig } from "../config.ts";
-import type { GateDeps } from "./types.ts";
+import { getScope, type GateConfig } from "../config.ts";
+import { ProjectNotInScopeError, type GateDeps } from "./types.ts";
 import { createAuthModule, type AuthModuleOptions } from "./auth.ts";
 import { createConfirmModule, type ConfirmOptions } from "./confirm.ts";
 import { createAuditModule } from "./audit.ts";
@@ -12,6 +12,7 @@ import { handleAdminRequest } from "./admin-handlers.ts";
 import { loadAndValidateTlsFiles } from "../tls/store.ts";
 import type { BunRequestInit } from "./connection.ts";
 import { createPamModule, resolveEntitlementPath, type PamModule } from "./pam.ts";
+import { createFolderMembershipChecker, type FolderMembershipChecker } from "./crm.ts";
 import { createPendingQueue } from "./pending.ts";
 import {
   lookupGroup,
@@ -168,7 +169,13 @@ export async function startGateServer(
   const sessionTtlSeconds = config.session_ttl_seconds ?? 28800;
   const sessionManager = createSessionManager();
 
-  // PAM setup: resolve entitlement paths and build allowlist
+  const scope = getScope(config);
+
+  let folderChecker: FolderMembershipChecker | undefined;
+  if (scope.kind === "folder") {
+    folderChecker = createFolderMembershipChecker(scope.folderId, auth.getSourceAccessToken);
+  }
+
   let pam: PamModule | undefined;
   let pamDefaultPolicy: string | undefined;
   let pamAllowedPolicies: Set<string> | undefined;
@@ -180,13 +187,13 @@ export async function startGateServer(
       grantDurationSeconds: defaultTokenTtlSeconds,
     });
 
-    pamDefaultPolicy = resolveEntitlementPath(config.pam_policy, config.project_id, pamLocation);
+    pamDefaultPolicy = resolveEntitlementPath(config.pam_policy, scope, pamLocation);
 
     // Build allowlist: default policy + any additional allowed policies
     const allowed = new Set<string>([pamDefaultPolicy]);
     if (config.pam_allowed_policies) {
       for (const p of config.pam_allowed_policies) {
-        allowed.add(resolveEntitlementPath(p, config.project_id, pamLocation));
+        allowed.add(resolveEntitlementPath(p, scope, pamLocation));
       }
     }
     pamAllowedPolicies = allowed;
@@ -200,18 +207,52 @@ export async function startGateServer(
   if (config.auto_approve_pam_policies?.length) {
     const pamLocation = config.pam_location ?? "global";
     autoApprovePamPolicies = new Set<string>(
-      config.auto_approve_pam_policies.map((p) =>
-        resolveEntitlementPath(p, config.project_id, pamLocation),
-      ),
+      config.auto_approve_pam_policies.map((p) => resolveEntitlementPath(p, scope, pamLocation)),
     );
   }
 
+  // Folder mode has no dev tier — mintDevToken should never be reached
+  // (handlers short-circuit with 501). The throwing stub is defense-in-depth
+  // for any leaked code path.
+  const mintDevToken: typeof auth.mintDevToken =
+    scope.kind === "folder"
+      ? async () => {
+          throw new Error("Dev tokens are not available in folder mode");
+        }
+      : auth.mintDevToken;
+
+  async function resolveProject(requestedProjectId: string | undefined): Promise<string> {
+    if (scope.kind === "project") {
+      if (!requestedProjectId || requestedProjectId === scope.projectId) {
+        return scope.projectId;
+      }
+      throw new ProjectNotInScopeError(
+        `Project "${requestedProjectId}" not permitted: gate is configured for project "${scope.projectId}"`,
+      );
+    }
+    // Folder mode
+    if (!requestedProjectId) {
+      throw new ProjectNotInScopeError(
+        "Folder-mode gate requires a 'project' query parameter naming a descendant of the configured folder",
+      );
+    }
+    const ok = await folderChecker!.isProjectInFolder(requestedProjectId);
+    if (!ok) {
+      throw new ProjectNotInScopeError(
+        `Project "${requestedProjectId}" is not a descendant of folder "${scope.folderId}"`,
+      );
+    }
+    return requestedProjectId;
+  }
+
   const deps: GateDeps = {
-    mintDevToken: auth.mintDevToken,
+    scope,
+    mintDevToken,
     mintProdToken: auth.mintProdToken,
     getIdentityEmail: auth.getIdentityEmail,
     getProjectNumber: auth.getProjectNumber,
     getUniverseDomain: auth.getUniverseDomain,
+    resolveProject,
     confirmProdAccess: confirm.confirmProdAccess,
     writeAuditLog: audit.writeAuditLog,
     prodRateLimiter,
@@ -221,8 +262,7 @@ export async function startGateServer(
     autoApprovePamPolicies,
     pamDefaultPolicy,
     resolvePamPolicy: config.pam_policy
-      ? (policy: string) =>
-          resolveEntitlementPath(policy, config.project_id, config.pam_location ?? "global")
+      ? (policy: string) => resolveEntitlementPath(policy, scope, config.pam_location ?? "global")
       : undefined,
     defaultTokenTtlSeconds,
     sessionManager,
@@ -392,8 +432,19 @@ export async function startGateServer(
   process.on("SIGINT", () => void onSignal());
 
   console.log("gate: starting gcp-gate token daemon");
-  console.log(`  project:         ${config.project_id}`);
-  console.log(`  service account: ${config.service_account ?? "(none — dev tokens disabled)"}`);
+  if (scope.kind === "project") {
+    console.log(`  project:         ${scope.projectId}`);
+  } else {
+    console.log(`  folder:          ${scope.folderId} (folder mode — per-request project)`);
+  }
+  console.log(
+    `  service account: ${
+      config.service_account ??
+      (scope.kind === "folder"
+        ? "(none — folder mode, ADC pass-through)"
+        : "(none — dev tokens disabled)")
+    }`,
+  );
   console.log(`  token TTL:       ${defaultTokenTtlSeconds}s`);
   console.log(`  session TTL:     ${sessionTtlSeconds}s`);
   console.log(`  socket path:     ${config.socket_path}`);

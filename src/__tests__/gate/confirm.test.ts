@@ -29,7 +29,7 @@ describe("createConfirmModule", () => {
         spawn: mockSpawn(0),
         platform: "linux",
       });
-      const result = await confirmProdAccess("user@example.com");
+      const result = await confirmProdAccess("user@example.com", "test-project");
       expect(result).toBe(true);
     });
 
@@ -38,7 +38,7 @@ describe("createConfirmModule", () => {
         spawn: mockSpawn(1),
         platform: "linux",
       });
-      const result = await confirmProdAccess("user@example.com");
+      const result = await confirmProdAccess("user@example.com", "test-project");
       expect(result).toBe(false);
     });
 
@@ -47,7 +47,7 @@ describe("createConfirmModule", () => {
         spawn: mockSpawn(5),
         platform: "linux",
       });
-      const result = await confirmProdAccess("user@example.com");
+      const result = await confirmProdAccess("user@example.com", "test-project");
       expect(result).toBe(false);
     });
   });
@@ -60,7 +60,7 @@ describe("createConfirmModule", () => {
         platform: "linux",
         isTTY: false,
       });
-      const result = await confirmProdAccess("user@example.com");
+      const result = await confirmProdAccess("user@example.com", "test-project");
       expect(result).toBe(false);
     });
   });
@@ -90,13 +90,14 @@ describe("createConfirmModule", () => {
         spawn: spawnFn,
         platform: "linux",
       });
-      await confirmProdAccess("user@example.com");
+      await confirmProdAccess("user@example.com", "test-project");
 
       expect(capturedCmd[0]).toBe("zenity");
       expect(capturedCmd).toContain("--question");
       expect(capturedCmd).toContain("--no-markup");
       expect(capturedCmd).toContain("--title=gcp-gate: Prod Access");
       expect(capturedCmd.some((arg) => arg.includes("user@example.com"))).toBe(true);
+      expect(capturedCmd.some((arg) => arg.includes("Project: test-project"))).toBe(true);
       expect(capturedCmd).toContain("--width=500");
       expect(capturedCmd).toContain("--timeout=60");
     });
@@ -108,7 +109,7 @@ describe("createConfirmModule", () => {
         spawn: mockSpawn(0),
         platform: "darwin",
       });
-      const result = await confirmProdAccess("user@example.com");
+      const result = await confirmProdAccess("user@example.com", "test-project");
       expect(result).toBe(true);
     });
 
@@ -117,7 +118,7 @@ describe("createConfirmModule", () => {
         spawn: mockSpawn(1),
         platform: "darwin",
       });
-      const result = await confirmProdAccess("user@example.com");
+      const result = await confirmProdAccess("user@example.com", "test-project");
       expect(result).toBe(false);
     });
   });
@@ -129,7 +130,7 @@ describe("createConfirmModule", () => {
         platform: "darwin",
         isTTY: false,
       });
-      const result = await confirmProdAccess("user@example.com");
+      const result = await confirmProdAccess("user@example.com", "test-project");
       expect(result).toBe(false);
     });
   });
@@ -159,7 +160,7 @@ describe("createConfirmModule", () => {
         spawn: spawnFn,
         platform: "darwin",
       });
-      await confirmProdAccess("user@example.com");
+      await confirmProdAccess("user@example.com", "test-project");
 
       expect(capturedCmd[0]).toBe("osascript");
       expect(capturedCmd).toContain("-e");
@@ -191,7 +192,7 @@ describe("createConfirmModule", () => {
         spawn: spawnFn,
         platform: "darwin",
       });
-      await confirmProdAccess('user"@example.com');
+      await confirmProdAccess('user"@example.com', "test-project");
 
       const scriptArg = capturedCmd.find((arg) => arg.includes("display dialog"));
       expect(scriptArg).toBeDefined();
@@ -222,7 +223,7 @@ describe("createConfirmModule", () => {
         spawn: spawnFn,
         platform: "darwin",
       });
-      await confirmProdAccess("user\\@example.com");
+      await confirmProdAccess("user\\@example.com", "test-project");
 
       const scriptArg = capturedCmd.find((arg) => arg.includes("display dialog"));
       expect(scriptArg).toBeDefined();
@@ -255,7 +256,7 @@ describe("createConfirmModule", () => {
         spawn: spawnFn,
         platform: "linux",
       });
-      await confirmProdAccess("user@example.com", "gcloud compute instances list");
+      await confirmProdAccess("user@example.com", "test-project", "gcloud compute instances list");
 
       const textArg = capturedCmd.find((arg) => arg.startsWith("--text="));
       expect(textArg).toBeDefined();
@@ -287,7 +288,7 @@ describe("createConfirmModule", () => {
         spawn: spawnFn,
         platform: "linux",
       });
-      await confirmProdAccess("user@example.com");
+      await confirmProdAccess("user@example.com", "test-project");
 
       const textArg = capturedCmd.find((arg) => arg.startsWith("--text="));
       expect(textArg).toBeDefined();
@@ -320,7 +321,7 @@ describe("createConfirmModule", () => {
         spawn: spawnFn,
         platform: "darwin",
       });
-      await confirmProdAccess("user@example.com", "terraform apply");
+      await confirmProdAccess("user@example.com", "test-project", "terraform apply");
 
       const scriptArg = capturedCmd.find((arg) => arg.includes("display dialog"));
       expect(scriptArg).toBeDefined();
@@ -352,7 +353,7 @@ describe("createConfirmModule", () => {
         spawn: spawnFn,
         platform: "darwin",
       });
-      await confirmProdAccess("user@example.com", 'cmd "with quotes"');
+      await confirmProdAccess("user@example.com", "test-project", 'cmd "with quotes"');
 
       const scriptArg = capturedCmd.find((arg) => arg.includes("display dialog"));
       expect(scriptArg).toBeDefined();
@@ -384,7 +385,7 @@ describe("createConfirmModule", () => {
         spawn: spawnFn,
         platform: "darwin",
       });
-      await confirmProdAccess("user@example.com");
+      await confirmProdAccess("user@example.com", "test-project");
 
       const scriptArg = capturedCmd.find((arg) => arg.includes("display dialog"));
       expect(scriptArg).toBeDefined();
@@ -399,7 +400,7 @@ describe("createConfirmModule", () => {
         platform: "linux",
         isTTY: false,
       });
-      const result = await confirmProdAccess("user@example.com");
+      const result = await confirmProdAccess("user@example.com", "test-project");
       expect(result).toBe(false);
     });
   });
@@ -411,7 +412,7 @@ describe("createConfirmModule", () => {
         platform: "darwin",
         isTTY: false,
       });
-      const result = await confirmProdAccess("user@example.com");
+      const result = await confirmProdAccess("user@example.com", "test-project");
       expect(result).toBe(false);
     });
   });
@@ -427,7 +428,7 @@ describe("createConfirmModule", () => {
         platform: "linux",
         isTTY: false,
       });
-      const result = await confirmProdAccess("user@example.com");
+      const result = await confirmProdAccess("user@example.com", "test-project");
       expect(result).toBe(false);
     });
 
@@ -441,7 +442,7 @@ describe("createConfirmModule", () => {
         platform: "darwin",
         isTTY: false,
       });
-      const result = await confirmProdAccess("user@example.com");
+      const result = await confirmProdAccess("user@example.com", "test-project");
       expect(result).toBe(false);
     });
   });
@@ -471,7 +472,7 @@ describe("createConfirmModule", () => {
         spawn: spawnFn,
         platform: "darwin",
       });
-      await confirmProdAccess("user@example.com");
+      await confirmProdAccess("user@example.com", "test-project");
       expect(capturedCmd[0]).toBe("osascript");
     });
 
@@ -499,7 +500,7 @@ describe("createConfirmModule", () => {
         spawn: spawnFn,
         platform: "linux",
       });
-      await confirmProdAccess("user@example.com");
+      await confirmProdAccess("user@example.com", "test-project");
       expect(capturedCmd[0]).toBe("zenity");
     });
   });
@@ -514,7 +515,7 @@ describe("createConfirmModule", () => {
         pendingQueue,
       });
 
-      const promise = confirmProdAccess("user@example.com", "gcloud compute list");
+      const promise = confirmProdAccess("user@example.com", "test-project", "gcloud compute list");
 
       // Yield to let the async GUI check resolve before inspecting the queue
       await new Promise((r) => setTimeout(r, 10));
@@ -541,7 +542,7 @@ describe("createConfirmModule", () => {
         pendingQueue,
       });
 
-      const promise = confirmProdAccess("user@example.com");
+      const promise = confirmProdAccess("user@example.com", "test-project");
 
       // Yield to let the async spawn error resolve before inspecting the queue
       await new Promise((r) => setTimeout(r, 10));
@@ -559,7 +560,7 @@ describe("createConfirmModule", () => {
         platform: "linux",
         isTTY: false,
       });
-      const result = await confirmProdAccess("user@example.com");
+      const result = await confirmProdAccess("user@example.com", "test-project");
       expect(result).toBe(false);
     });
 
@@ -572,7 +573,7 @@ describe("createConfirmModule", () => {
         pendingQueue,
       });
 
-      const result = await confirmProdAccess("user@example.com");
+      const result = await confirmProdAccess("user@example.com", "test-project");
       expect(result).toBe(true);
       expect(pendingQueue.list()).toHaveLength(0);
     });
@@ -587,7 +588,13 @@ describe("createConfirmModule", () => {
         pendingQueue,
       });
 
-      const promise = confirmProdAccess("user@example.com", "cmd", undefined, clientId);
+      const promise = confirmProdAccess(
+        "user@example.com",
+        "test-project",
+        "cmd",
+        undefined,
+        clientId,
+      );
 
       await new Promise((r) => setTimeout(r, 10));
 
@@ -613,7 +620,7 @@ describe("createConfirmModule", () => {
 
       const { confirmProdAccess } = createConfirmModule({ spawn: spawnFn, platform: "linux" });
       // Email with embedded ANSI escape and newline.
-      await confirmProdAccess("user\u001b[31m@example.com\nspoofed");
+      await confirmProdAccess("user\u001b[31m@example.com\nspoofed", "test-project");
 
       const text = capturedCmd.find((a) => a.startsWith("--text=")) ?? "";
       expect(text).not.toContain("\u001b");
@@ -632,7 +639,12 @@ describe("createConfirmModule", () => {
       };
 
       const { confirmProdAccess } = createConfirmModule({ spawn: spawnFn, platform: "linux" });
-      await confirmProdAccess("user@example.com", undefined, "policy\u0007with-bell");
+      await confirmProdAccess(
+        "user@example.com",
+        "test-project",
+        undefined,
+        "policy\u0007with-bell",
+      );
 
       const text = capturedCmd.find((a) => a.startsWith("--text=")) ?? "";
       expect(text).not.toContain("\u0007");
@@ -647,7 +659,12 @@ describe("createConfirmModule", () => {
         pendingQueue,
       });
 
-      const promise = confirmProdAccess("user\u001b[31m@example.com", "cmdarg", "policy\nspoof");
+      const promise = confirmProdAccess(
+        "user\u001b[31m@example.com",
+        "test-project",
+        "cmdarg",
+        "policy\nspoof",
+      );
       await new Promise((r) => setTimeout(r, 10));
 
       const pending = pendingQueue.list();

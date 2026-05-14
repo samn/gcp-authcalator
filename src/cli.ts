@@ -58,7 +58,10 @@ Commands:
   version           Show version
 
 Options:
-  --project-id <id>        GCP project ID
+  --project-id <id>        GCP project ID (project mode; mutually exclusive with --folder-id)
+  --folder-id <id>         GCP folder ID (folder mode; PAM-only, per-request project)
+  --project <id>           Per-invocation target project for with-prod (folder mode required;
+                           in project mode must match --project-id)
   --service-account <email> Service account email to impersonate
   --socket-path <path>     Unix socket path (default: $XDG_RUNTIME_DIR/gcp-authcalator.sock)
   --admin-socket-path <path>  Admin socket path for approve/deny (default: $XDG_RUNTIME_DIR/gcp-authcalator-admin/admin.sock)
@@ -129,6 +132,8 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     allowPositionals: true,
     options: {
       "project-id": { type: "string" },
+      "folder-id": { type: "string" },
+      project: { type: "string" },
       "service-account": { type: "string" },
       "socket-path": { type: "string" },
       "admin-socket-path": { type: "string" },
@@ -271,7 +276,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
         break;
       case "with-prod": {
         const wrappedCommand = positionals.slice(1);
-        await runWithProd(config, wrappedCommand);
+        await runWithProd(config, wrappedCommand, { project: values.project });
         break;
       }
     }

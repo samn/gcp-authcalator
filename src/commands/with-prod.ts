@@ -35,6 +35,84 @@ export interface WithProdOptions {
   fetchOptions?: FetchProdTokenOptions;
   /** Override Bun.spawn for testing. */
   spawnFn?: SpawnFn;
+  /**
+   * Per-invocation project override (CLI --project flag). In folder mode
+   * this is the primary input; in project mode it must match the
+   * configured project_id or the gate will reject the request.
+   */
+  project?: string;
+  /**
+   * Test seam: resolver used for the last rung of the project ladder
+   * (folder mode, no --project flag, no CLOUDSDK_CORE_PROJECT). Defaults
+   * to spawning `gcloud config get project`. Returning undefined means
+   * gcloud had no active project.
+   */
+  resolveGcloudProject?: () => string | undefined;
+}
+
+/**
+ * Resolve the target project for this with-prod invocation.
+ *
+ * Project mode: configured project_id is authoritative. `--project` is
+ * accepted if it matches, rejected if it differs (so the same caller
+ * code works against both modes).
+ *
+ * Folder mode: ladder is `--project` → `CLOUDSDK_CORE_PROJECT` →
+ * `gcloud config get project` (spawned once at startup). The result is
+ * sent to the gate as `?project=` and the gate verifies folder membership.
+ */
+function resolveProjectForWithProd(config: Config, options: WithProdOptions): string {
+  const inFolderMode = Boolean(config.folder_id);
+
+  if (config.project_id) {
+    if (options.project && options.project !== config.project_id) {
+      console.error(
+        `with-prod: --project=${options.project} does not match configured project_id=${config.project_id}`,
+      );
+      process.exit(1);
+    }
+    return config.project_id;
+  }
+
+  if (!inFolderMode) {
+    // Neither folder_id nor project_id — schema should have rejected this,
+    // but guard defensively to give a clear error rather than crashing on
+    // an undefined later.
+    console.error(
+      "with-prod: config has neither project_id nor folder_id (both modes require one)",
+    );
+    process.exit(1);
+  }
+
+  if (options.project) return options.project;
+  const fromEnv = process.env.CLOUDSDK_CORE_PROJECT;
+  if (fromEnv) return fromEnv;
+  const fromGcloud = (options.resolveGcloudProject ?? defaultGcloudProjectResolver)();
+  if (fromGcloud) return fromGcloud;
+
+  console.error(
+    "with-prod: folder mode requires a project. Pass --project=<id>, set CLOUDSDK_CORE_PROJECT, or 'gcloud config set project <id>'.",
+  );
+  process.exit(1);
+}
+
+function defaultGcloudProjectResolver(): string | undefined {
+  try {
+    const proc = Bun.spawnSync({
+      cmd: ["gcloud", "config", "get-value", "project"],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    if (proc.exitCode !== 0) return undefined;
+    const out = proc.stdout?.toString().trim();
+    // `gcloud config get-value project` returns "(unset)" when no project is
+    // active; treat that as "no value" rather than passing "(unset)" to the
+    // gate.
+    if (!out || out === "(unset)") return undefined;
+    return out;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Resolve ${VAR} and ${VAR:-default} patterns against an env record. */
@@ -134,11 +212,13 @@ export async function runWithProd(
   const nestedSession = await detectNestedSession(process.env, options.fetchOptions?.fetchFn);
 
   if (nestedSession) {
-    // If the caller explicitly requested a different project, fall through to
-    // a new session so the confirmation dialog reflects the correct project.
-    if (config.project_id && config.project_id !== nestedSession.projectId) {
+    // If the caller explicitly requested a different project (via flag or
+    // configured project_id), fall through to a new session so the
+    // confirmation dialog reflects the correct project.
+    const requestedProject = options.project ?? config.project_id;
+    if (requestedProject && requestedProject !== nestedSession.projectId) {
       console.log(
-        `with-prod: requested project ${config.project_id} differs from active session (${nestedSession.projectId}), starting new session`,
+        `with-prod: requested project ${requestedProject} differs from active session (${nestedSession.projectId}), starting new session`,
       );
     } else {
       console.log(
@@ -166,6 +246,7 @@ export async function runWithProd(
 
   // Normal flow: create a prod session and start a fresh proxy.
   const wpConfig = WithProdConfigSchema.parse(config);
+  const resolvedProject = resolveProjectForWithProd(wpConfig, options);
 
   // Step 1: Create prod session at gcp-gate (triggers confirmation dialog).
   // If the gate is the operator socket, session creation returns 403 and we
@@ -189,6 +270,7 @@ export async function runWithProd(
         command: wrappedCommand,
         scopes: wpConfig.scopes,
         pamPolicy: wpConfig.pam_policy,
+        project: resolvedProject,
         tokenTtlSeconds: wpConfig.token_ttl_seconds,
         sessionTtlSeconds: wpConfig.session_ttl_seconds,
         pendingId,
@@ -209,6 +291,7 @@ export async function runWithProd(
           command: wrappedCommand,
           scopes: wpConfig.scopes,
           pamPolicy: wpConfig.pam_policy,
+          project: resolvedProject,
           tokenTtlSeconds: wpConfig.token_ttl_seconds,
         });
         initialEmail = tokenResult.email;
@@ -280,6 +363,7 @@ export async function runWithProd(
         command: wrappedCommand,
         scopes: wpConfig.scopes,
         pamPolicy: wpConfig.pam_policy,
+        project: resolvedProject,
         tokenTtlSeconds: wpConfig.token_ttl_seconds,
         onRefresh,
       });
@@ -288,7 +372,7 @@ export async function runWithProd(
   // gcloud can discover the account (it ignores the "default" alias).
   const { server, stop } = startMetadataProxyServer(
     {
-      project_id: wpConfig.project_id,
+      project_id: resolvedProject,
       service_account: initialEmail,
       socket_path: wpConfig.socket_path,
       admin_socket_path: wpConfig.admin_socket_path,
@@ -321,7 +405,7 @@ export async function runWithProd(
         // GCE_METADATA_HOST, falling back to the original metadata proxy.
         // Tokens still flow through the PID-validated metadata proxy.
         CLOUDSDK_CORE_ACCOUNT: initialEmail,
-        CLOUDSDK_CORE_PROJECT: wpConfig.project_id,
+        CLOUDSDK_CORE_PROJECT: resolvedProject,
         [PROD_SESSION_ENV_VAR]: metadataHost,
       },
       wpConfig.env,

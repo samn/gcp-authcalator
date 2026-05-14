@@ -78,6 +78,14 @@ export const DEFAULT_SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
 
 export const ConfigSchema = z.object({
   project_id: z.string().min(1).optional(),
+  // GCP Folder ID (numeric string, e.g. "123456789012"). Mutually exclusive
+  // with project_id. In folder mode the gate brokers PAM entitlements at the
+  // folder level and accepts a per-request `project` parameter naming any
+  // descendant project (verified via Cloud Resource Manager).
+  folder_id: z
+    .string()
+    .regex(/^\d+$/, "folder_id must be a numeric string (e.g. 123456789012)")
+    .optional(),
   service_account: z.email().optional(),
   socket_path: z.string().min(1).default(getDefaultSocketPath).transform(expandTilde),
   admin_socket_path: z.string().min(1).default(getDefaultAdminSocketPath).transform(expandTilde),
@@ -115,10 +123,38 @@ export const ConfigSchema = z.object({
 export type Config = z.infer<typeof ConfigSchema>;
 
 /**
- * gate requires project_id and at least one of service_account or pam_policy.
+ * Discriminated union identifying which GCP resource the gate is bound to.
+ * Project mode preserves the original behavior (one project, service-account
+ * impersonation for dev). Folder mode brokers PAM at the folder level and
+ * accepts a per-request `project` parameter (verified as a descendant).
+ */
+export type Scope = { kind: "project"; projectId: string } | { kind: "folder"; folderId: string };
+
+/**
+ * Extract the gate's operational scope from a validated config. The XOR
+ * refinement on Gate/WithProd schemas guarantees exactly one of project_id /
+ * folder_id is set, so the throw is an invariant assertion (never reached
+ * for schema-validated configs).
+ */
+export function getScope(config: Pick<Config, "project_id" | "folder_id">): Scope {
+  if (config.folder_id) return { kind: "folder", folderId: config.folder_id };
+  if (config.project_id) return { kind: "project", projectId: config.project_id };
+  throw new Error("invariant: config must have project_id or folder_id (schema XOR violation)");
+}
+
+/**
+ * Gate requires exactly one of project_id / folder_id.
+ *
+ * Project mode (project_id set):
  * - service_account alone: dev tokens via impersonation, prod tokens via ADC
  * - pam_policy alone: prod tokens only (dev tokens disabled)
  * - both: dev tokens via impersonation, prod tokens with PAM escalation
+ *
+ * Folder mode (folder_id set):
+ * - service_account is not allowed (no dev tier; ADC pass-through)
+ * - pam_policy is required (PAM is the only elevation path)
+ * - Entitlements resolve to folders/{id}/... and each token request must
+ *   carry a `project` parameter naming a descendant project.
  *
  * If operator_socket_path is set, agent_uid MUST also be set so the gate can
  * verify at startup that the agent UID is not the gate UID (and, in group
@@ -130,9 +166,21 @@ export type Config = z.infer<typeof ConfigSchema>;
  * pam_policy) — prevents a narrowing of the broader allowlist from leaving
  * a stale auto-approve entry.
  */
-export const GateConfigSchema = ConfigSchema.required({
-  project_id: true,
-})
+export const GateConfigSchema = ConfigSchema.refine(
+  (c) => Boolean(c.project_id) !== Boolean(c.folder_id),
+  {
+    message: "exactly one of project_id or folder_id is required",
+    path: ["project_id"],
+  },
+)
+  .refine((c) => !c.folder_id || !c.service_account, {
+    message: "service_account is not supported in folder mode (no dev tier; ADC pass-through only)",
+    path: ["service_account"],
+  })
+  .refine((c) => !c.folder_id || c.pam_policy, {
+    message: "pam_policy is required in folder mode (PAM is the only elevation path)",
+    path: ["pam_policy"],
+  })
   .refine((c) => c.service_account || c.pam_policy, {
     message: "gate requires at least one of service_account or pam_policy",
   })
@@ -158,17 +206,28 @@ export const GateConfigSchema = ConfigSchema.required({
 
 export type GateConfig = z.infer<typeof GateConfigSchema>;
 
-/** metadata-proxy requires project_id. */
+/**
+ * metadata-proxy serves a single project's tokens to a long-running
+ * container; it cannot represent a folder. Folder-mode users go through
+ * `with-prod` exclusively.
+ */
 export const MetadataProxyConfigSchema = ConfigSchema.required({
   project_id: true,
+}).refine((c) => !c.folder_id, {
+  message: "metadata-proxy is not supported in folder mode; use 'with-prod' for prod access",
+  path: ["folder_id"],
 });
 
 export type MetadataProxyConfig = z.infer<typeof MetadataProxyConfigSchema>;
 
-/** with-prod requires project_id. */
-export const WithProdConfigSchema = ConfigSchema.required({
-  project_id: true,
-});
+/** with-prod requires exactly one of project_id / folder_id. */
+export const WithProdConfigSchema = ConfigSchema.refine(
+  (c) => Boolean(c.project_id) !== Boolean(c.folder_id),
+  {
+    message: "exactly one of project_id or folder_id is required",
+    path: ["project_id"],
+  },
+);
 
 export type WithProdConfig = z.infer<typeof WithProdConfigSchema>;
 
@@ -178,6 +237,7 @@ export type WithProdConfig = z.infer<typeof WithProdConfigSchema>;
 
 const cliToConfigKey: Record<string, keyof Config> = {
   "project-id": "project_id",
+  "folder-id": "folder_id",
   "service-account": "service_account",
   "socket-path": "socket_path",
   "admin-socket-path": "admin_socket_path",
@@ -230,6 +290,7 @@ export function mapCliArgs(
 /** All config keys that can be set via environment variables. */
 const configKeys: readonly (keyof Config)[] = [
   "project_id",
+  "folder_id",
   "service_account",
   "socket_path",
   "admin_socket_path",

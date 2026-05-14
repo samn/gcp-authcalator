@@ -1,4 +1,5 @@
 import {
+  ProjectNotInScopeError,
   SESSION_NOT_PERMITTED_CODE,
   type CachedToken,
   type GateDeps,
@@ -38,6 +39,26 @@ function errorBodyFromException(err: unknown): ErrorResponse {
 }
 
 /**
+ * Resolve the project for a request, returning either the resolved project
+ * ID or an HTTP error Response. `ProjectNotInScopeError` (mismatch / not a
+ * descendant / missing param) maps to 400; other errors (CRM 5xx with no
+ * usable stale cache) to 503.
+ */
+async function resolveProjectOrResponse(
+  deps: GateDeps,
+  projectParam: string | undefined,
+): Promise<string | Response> {
+  try {
+    return await deps.resolveProject(projectParam);
+  } catch (err) {
+    if (err instanceof ProjectNotInScopeError) {
+      return jsonResponse({ error: err.message }, 400);
+    }
+    return jsonResponse(errorBodyFromException(err), 503);
+  }
+}
+
+/**
  * Pure request handler — routes incoming requests and delegates to deps.
  * All responses are JSON. Audit entries are written for token requests.
  *
@@ -69,7 +90,7 @@ export async function handleRequest(
     case "/identity":
       return handleIdentity(deps);
     case "/project-number":
-      return handleProjectNumber(deps);
+      return handleProjectNumber(url, deps);
     case "/universe-domain":
       return handleUniverseDomain(deps);
     case "/health":
@@ -113,13 +134,14 @@ async function handleToken(
   // Session-based token refresh: bypass confirmation and rate limiting
   const sessionId = url.searchParams.get("session");
   if (sessionId) {
-    return handleSessionTokenRefresh(req, sessionId, deps, ctx);
+    return handleSessionTokenRefresh(req, url, sessionId, deps, ctx);
   }
 
   const level = url.searchParams.get("level") === "prod" ? "prod" : "dev";
   const scopesParam = url.searchParams.get("scopes");
   const scopes = scopesParam ? scopesParam.split(",") : undefined;
   const pamPolicyParam = url.searchParams.get("pam_policy") ?? undefined;
+  const projectParam = url.searchParams.get("project") ?? undefined;
 
   const ttlResult = parseTtlParam(
     url.searchParams.get("token_ttl_seconds"),
@@ -128,7 +150,15 @@ async function handleToken(
   if ("error" in ttlResult) return ttlResult.error;
 
   if (level === "prod") {
-    return handleProdToken(req, deps, ctx, scopes, pamPolicyParam, ttlResult.ttlSeconds);
+    return handleProdToken(
+      req,
+      deps,
+      ctx,
+      scopes,
+      pamPolicyParam,
+      projectParam,
+      ttlResult.ttlSeconds,
+    );
   }
 
   return handleDevToken(deps, ctx, scopes, ttlResult.ttlSeconds);
@@ -137,6 +167,7 @@ async function handleToken(
 /** Mint a fresh prod token using a pre-approved session (no confirmation). */
 async function handleSessionTokenRefresh(
   req: Request,
+  url: URL,
   sessionId: string,
   deps: GateDeps,
   ctx: RequestContext,
@@ -154,6 +185,20 @@ async function handleSessionTokenRefresh(
     );
   }
 
+  // Sessions are bound to the project chosen at creation time. A `?project=`
+  // on refresh is almost always a client bug; reject explicitly so the
+  // mistake surfaces immediately rather than silently routing to the wrong
+  // project.
+  if (url.searchParams.has("project")) {
+    return jsonResponse(
+      {
+        error:
+          "?project= is not allowed on session refresh — sessions are bound to their creation project",
+      },
+      400,
+    );
+  }
+
   const session = deps.sessionManager.validate(sessionId);
   if (!session) {
     return jsonResponse({ error: "Session expired or invalid" }, 401);
@@ -164,7 +209,7 @@ async function handleSessionTokenRefresh(
 
   const auditBase: Pick<
     AuditEntry,
-    "endpoint" | "level" | "session_id" | "pam_policy" | "socket" | "command"
+    "endpoint" | "level" | "session_id" | "pam_policy" | "socket" | "command" | "project_id"
   > = {
     endpoint: "/token?session=...",
     level: "prod",
@@ -172,6 +217,7 @@ async function handleSessionTokenRefresh(
     pam_policy: session.pamPolicy,
     socket: ctx.socket,
     command: commandSummary,
+    project_id: session.projectId,
   };
 
   try {
@@ -237,6 +283,24 @@ async function handleDevToken(
     socket: ctx.socket,
   };
 
+  // Folder mode has no dev tier. Short-circuit so callers see a clear status,
+  // and the throwing stub in server.ts becomes defense-in-depth.
+  if (deps.scope.kind === "folder") {
+    deps.writeAuditLog({
+      ...auditBase,
+      timestamp: new Date().toISOString(),
+      result: "error",
+      error: "Dev tokens are not available in folder mode",
+    });
+    return jsonResponse(
+      {
+        error:
+          "Dev tokens are not available in folder mode. Folder-mode gates broker prod tokens only (via with-prod).",
+      },
+      501,
+    );
+  }
+
   try {
     const cached = await deps.mintDevToken(scopes, ttlSeconds);
     const expiresIn = Math.max(0, Math.floor((cached.expires_at.getTime() - Date.now()) / 1000));
@@ -271,6 +335,7 @@ async function handleDevToken(
 /** Result of a successful acquireProdAccess call. */
 interface ProdAccessGrant {
   email: string;
+  projectId: string;
   effectivePamPolicy?: string;
   /** Redacted, length-bounded summary of the wrapped command, if any. */
   commandSummary?: string;
@@ -290,6 +355,7 @@ interface ProdAccessGrant {
     | "socket"
     | "auto_approved"
     | "command"
+    | "project_id"
   >;
 }
 
@@ -325,10 +391,16 @@ async function acquireProdAccess(
   ctx: RequestContext,
   opts: {
     pamPolicyParam?: string;
+    projectParam?: string;
     auditEndpoint: string;
     ttlSeconds?: number;
   },
 ): Promise<ProdAccessGrant | Response> {
+  // Resolve target project first — short-circuits scope mismatches before we
+  // touch ADC or the rate limiter.
+  const projectId = await resolveProjectOrResponse(deps, opts.projectParam);
+  if (projectId instanceof Response) return projectId;
+
   // Resolve effective PAM policy: query param > config default > none
   let effectivePamPolicy: string | undefined;
   if (opts.pamPolicyParam && deps.resolvePamPolicy) {
@@ -349,7 +421,7 @@ async function acquireProdAccess(
 
   const auditBase: Pick<
     AuditEntry,
-    "endpoint" | "level" | "pam_policy" | "token_ttl_seconds" | "socket" | "command"
+    "endpoint" | "level" | "pam_policy" | "token_ttl_seconds" | "socket" | "command" | "project_id"
   > = {
     endpoint: opts.auditEndpoint,
     level: "prod",
@@ -357,6 +429,7 @@ async function acquireProdAccess(
     token_ttl_seconds: opts.ttlSeconds,
     socket: ctx.socket,
     command: commandSummary,
+    project_id: projectId,
   };
 
   // Allowlist check
@@ -418,7 +491,13 @@ async function acquireProdAccess(
     if (autoApprove) {
       approved = true;
     } else {
-      approved = await deps.confirmProdAccess(email, commandSummary, effectivePamPolicy, pendingId);
+      approved = await deps.confirmProdAccess(
+        email,
+        projectId,
+        commandSummary,
+        effectivePamPolicy,
+        pendingId,
+      );
     }
     if (!approved) {
       deps.prodRateLimiter.release("denied");
@@ -446,6 +525,7 @@ async function acquireProdAccess(
     const grantedAuditBase = autoApprove ? { ...auditBase, auto_approved: true } : auditBase;
     return {
       email,
+      projectId,
       effectivePamPolicy,
       commandSummary,
       pamAuditFields,
@@ -474,10 +554,12 @@ async function handleProdToken(
   ctx: RequestContext,
   scopes?: string[],
   pamPolicyParam?: string,
+  projectParam?: string,
   ttlSeconds?: number,
 ): Promise<Response> {
   const grant = await acquireProdAccess(req, deps, ctx, {
     pamPolicyParam,
+    projectParam,
     auditEndpoint: "/token?level=prod",
     ttlSeconds,
   });
@@ -576,6 +658,7 @@ async function handleCreateSession(
   const scopesParam = url.searchParams.get("scopes");
   const scopes = scopesParam ? scopesParam.split(",") : undefined;
   const pamPolicyParam = url.searchParams.get("pam_policy") ?? undefined;
+  const projectParam = url.searchParams.get("project") ?? undefined;
 
   const ttlResult = parseTtlParam(
     url.searchParams.get("token_ttl_seconds"),
@@ -591,6 +674,7 @@ async function handleCreateSession(
 
   const grant = await acquireProdAccess(req, deps, ctx, {
     pamPolicyParam,
+    projectParam,
     auditEndpoint: "/session",
     ttlSeconds: ttlResult.ttlSeconds,
   });
@@ -606,6 +690,7 @@ async function handleCreateSession(
     const effectiveSessionTtl = sessionTtlResult.sessionTtlSeconds ?? deps.sessionTtlSeconds;
     const session = deps.sessionManager.create({
       email: grant.email,
+      projectId: grant.projectId,
       scopes,
       pamPolicy: grant.effectivePamPolicy,
       commandSummary: grant.commandSummary,
@@ -701,9 +786,15 @@ export function handleResolvePending(
   return jsonResponse({ status: action === "approve" ? "approved" : "denied" });
 }
 
-async function handleProjectNumber(deps: GateDeps): Promise<Response> {
+async function handleProjectNumber(url: URL, deps: GateDeps): Promise<Response> {
+  const projectId = await resolveProjectOrResponse(
+    deps,
+    url.searchParams.get("project") ?? undefined,
+  );
+  if (projectId instanceof Response) return projectId;
+
   try {
-    const projectNumber = await deps.getProjectNumber();
+    const projectNumber = await deps.getProjectNumber(projectId);
     const body: ProjectNumberResponse = { project_number: projectNumber };
     return jsonResponse(body);
   } catch (err) {

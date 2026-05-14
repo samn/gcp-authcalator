@@ -388,7 +388,7 @@ describe("createAuthModule", () => {
         fetchFn: mockCrmFetch("123456789012"),
       });
 
-      const number = await getProjectNumber();
+      const number = await getProjectNumber("test-project");
       expect(number).toBe("123456789012");
     });
 
@@ -408,10 +408,38 @@ describe("createAuthModule", () => {
         fetchFn,
       });
 
-      await getProjectNumber();
-      await getProjectNumber();
+      await getProjectNumber("test-project");
+      await getProjectNumber("test-project");
 
       expect(fetchCount).toBe(1);
+    });
+
+    test("cache is keyed by project (different projects each hit CRM)", async () => {
+      let fetchCount = 0;
+      const seenUrls: string[] = [];
+      const fetchFn = (async (url: string | URL) => {
+        fetchCount++;
+        seenUrls.push(typeof url === "string" ? url : url.toString());
+        return new Response(JSON.stringify({ name: `projects/${fetchCount}00000` }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }) as unknown as typeof globalThis.fetch;
+
+      const { getProjectNumber } = createAuthModule(TEST_CONFIG, {
+        sourceClient: mockClient("source"),
+        impersonatedClient: mockClient("dev"),
+        fetchFn,
+      });
+
+      expect(await getProjectNumber("tenant-a")).toBe("100000");
+      expect(await getProjectNumber("tenant-b")).toBe("200000");
+      // Re-request tenant-a — cache hit, no additional CRM call.
+      expect(await getProjectNumber("tenant-a")).toBe("100000");
+
+      expect(fetchCount).toBe(2);
+      expect(seenUrls[0]).toContain("/projects/tenant-a");
+      expect(seenUrls[1]).toContain("/projects/tenant-b");
     });
 
     test("throws when CRM API returns error", async () => {
@@ -424,7 +452,7 @@ describe("createAuthModule", () => {
         fetchFn,
       });
 
-      await expect(getProjectNumber()).rejects.toThrow("CRM API returned 403");
+      await expect(getProjectNumber("test-project")).rejects.toThrow("CRM API returned 403");
     });
 
     test("throws when CRM API response has no name", async () => {
@@ -440,7 +468,7 @@ describe("createAuthModule", () => {
         fetchFn,
       });
 
-      await expect(getProjectNumber()).rejects.toThrow("no name in CRM API response");
+      await expect(getProjectNumber("test-project")).rejects.toThrow("no name in CRM API response");
     });
 
     test("throws when CRM API response has unexpected name format", async () => {
@@ -456,7 +484,7 @@ describe("createAuthModule", () => {
         fetchFn,
       });
 
-      await expect(getProjectNumber()).rejects.toThrow("unexpected name format");
+      await expect(getProjectNumber("test-project")).rejects.toThrow("unexpected name format");
     });
 
     test("throws when source client has no token", async () => {
@@ -466,7 +494,7 @@ describe("createAuthModule", () => {
         fetchFn: mockCrmFetch("123"),
       });
 
-      await expect(getProjectNumber()).rejects.toThrow("no access token available");
+      await expect(getProjectNumber("test-project")).rejects.toThrow("no access token available");
     });
   });
 
