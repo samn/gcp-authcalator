@@ -7,8 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [0.10.0] - 2026-05-14
+
+This release corrects issues that prevented PAM grants from getting reliably refreshed, upgrades the runtime, and includes a handful of security fixes.
+
 ### Changed
 
+- **Config precedence change (BREAKING for callers that relied on env
+  vars overriding `--flag`).** Was `env > CLI > TOML > defaults`;
+  is now `CLI > env > TOML > defaults`, matching universal CLI
+  convention. Operators who explicitly pass `--gate-url ...` (or any
+  other flag) now get the value they typed, regardless of inherited
+  env vars.
 - **Prod tokens are now clamped to PAM grant expiry minus a 5-minute
   drain margin (was: clamped to grant expiry).** PAM allows only one
   active grant per `(entitlement, requester)`, so grant renewal has
@@ -21,100 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   earlier than before; concurrent clients no longer see auth flake
   during grant rotation. Three handler paths share the same clamp
   (`/token?level=prod`, `/session`, `/token?session=...`).
-
-### Fixed
-
-- **PAM `grants.revoke` is now correctly awaited as a long-running
-  Operation.** Revoke returns a `google.longrunning.Operation` with
-  `done:false` initially; we previously treated it as fire-and-forget,
-  so the follow-up `createGrant` would race the revoke and 409 with
-  "open Grant" because PAM still considered the old grant alive. The
-  gate now polls the returned Operation to `done:true` (best-effort,
-  30-s deadline, tolerant of `error` field — e.g. already-terminal
-  grants) before retrying create. Verified end-to-end against a real
-  entitlement: the Operation typically settles within ~3 seconds, and
-  an immediate create succeeds without conflict. This collapses the
-  multi-round retry logic that previously papered over the race.
-- **PAM grant rotation is now single-flight per entitlement.**
-  Concurrent `ensureGrant` callers that miss the cache fast-path
-  coalesce onto a single rotation Promise, eliminating redundant
-  `createGrant` / revoke API calls when multiple clients request a
-  token at the same moment a cached grant enters its drain window.
-- **`pollGrant` now treats EXPIRED, ACTIVATION_FAILED,
-  EXTERNALLY_MODIFIED, and WITHDRAWN as terminal states** alongside
-  the existing DENIED, REVOKED, ENDED. A grant that transitioned into
-  any of these during polling would previously silently retry until
-  the 120-second polling deadline; the gate now surfaces the terminal
-  state immediately with a clear error.
-
-### Security
-
-- **Default `admin_socket_path` moved to `$XDG_RUNTIME_DIR/gcp-authcalator-admin/admin.sock`.**
-  The previous default (`/tmp/gcp-authcalator-admin-<uid>/admin.sock`)
-  lived in a world-writable directory: on a multi-user host another
-  local user could pre-create the parent directory mode `0o777` before
-  the gate started and intercept or DoS the admin socket. The new
-  default sits in the user-private runtime dir (already `0o700` owned
-  by the user, kernel-enforced). Deployments that pin the admin
-  socket explicitly via config or `--admin-socket-path` are
-  unaffected. (F1)
-- Gate, with-prod, audit log, and TLS dirs now reject pre-existing
-  directories that are symlinks, owned by another uid, or have
-  permission bits looser than the requested mode. The previous code
-  silently used such a directory because `mkdirSync({recursive:true})`
-  ignores its `mode` argument when the directory already exists, which
-  would have allowed an attacker who pre-created an inherited dir
-  with weak perms to survive across daemon restarts. (F2/F6)
-- The gate sets `process.umask(0o077)` at startup so the AF_UNIX
-  socket file created by `Bun.serve` is bound at `0o700` instead of
-  `0o755`, closing the brief window between bind and `chmodSync(...,
-0o600)` during which the socket file mode was looser than intended.
-  `with-prod` does the same around the token-bearing files it
-  creates and restores the operator's original umask before spawning
-  the wrapped command. (F5)
-- `GCP_AUTHCALATOR_TLS_BUNDLE_B64` is now captured into a
-  module-private slot and deleted from `process.env` at CLI module
-  load — before `formatVersion()` runs `git rev-parse` — so child
-  processes spawned during version reporting do not inherit the
-  bundle via `/proc/<pid>/environ`. The bundle is still resolvable
-  from the captured slot for the lifetime of the process. (F4)
-- `GCP_AUTHCALATOR_PROD_SESSION` (the nested-session sentinel
-  `with-prod` reads to short-circuit reuse) is now restricted to
-  loopback hosts (`127.0.0.1`, `::1`, `localhost`). A same-UID
-  attacker who plants a non-loopback value in the env can no longer
-  redirect the wrapped command's metadata traffic to a remote
-  attacker-controlled server. (F10)
-- The metadata-proxy PID validator now filters
-  `/proc/net/tcp[6]` rows by `ESTABLISHED` state. LISTEN /
-  TIME_WAIT / CLOSE_WAIT rows that share a local-address tuple with
-  the connection of interest are no longer matched, removing an
-  inode-collision class of misattribution. (F7)
-- In **group mode** (`operator_socket_group` set), the gate refuses to
-  start when the resolved `agent_uid` is not present in `/etc/passwd`.
-  NSS-managed (LDAP/SSSD) users were silently invisible to the
-  "agent UID is not in operator group" guardrail; the new error
-  surfaces the misconfiguration instead of letting it slip through.
-  UID mode is unaffected: its trust boundary is the kernel-enforced
-  `0600` socket owned by the gate UID, which does not need to
-  enumerate the agent's group memberships, so containerized agents
-  whose UID exists only inside the container continue to work. (F3)
-- Email and PAM-policy strings displayed in the confirmation dialog
-  are now run through the same control-character stripper as command
-  summaries before reaching zenity / osascript / the terminal prompt
-  / the pending queue. Defense-in-depth against ANSI escape and
-  newline injection if either upstream validator is ever
-  relaxed. (F8)
-- `getUniverseDomain` now flows through `withAdcMapping` so an
-  expired/revoked refresh token surfaces `CredentialsExpiredError`
-  with the actionable reauth instruction (and clears the cached
-  source client) instead of returning a generic 500 and leaving the
-  daemon in a degraded state. (F11)
-
-### Changed
-
-- Upgraded toolchain and dependencies: `bun` 1.3.13 → 1.3.14,
-  `@types/bun` 1.3.13 → 1.3.14, `oxlint` 1.63.0 → 1.64.0,
-  `oxfmt` 0.48.0 → 0.49.0.
+- Upgraded `bun` 1.3.13 → 1.3.14
 - **`with-prod` now resolves its sandbox parent directory separately
   from the gate's runtime dir** (`$XDG_RUNTIME_DIR` →
   `$XDG_CACHE_HOME/gcp-authcalator` → `~/.cache/gcp-authcalator`).
@@ -128,7 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   lands inside the caller's own private space, regardless of how
   the gate's socket dir is shared. `with-prod` also no longer
   applies the strict `ensurePrivateDir` mode check to this parent —
-  it lives in the caller's own home (where the F2 attacker-pre-create
+  it lives in the caller's own home (where an attacker-pre-create
   threat does not apply), and the actual security boundary is the
   `mkdtempSync` sandbox inside (`0o700` owned by the caller, with
   `0o600` token files). This lets `with-prod` tolerate the parent
@@ -148,12 +65,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (system-managed, shared with other apps) is left at `0700` per the
   XDG spec — group access requires placing `socket_path` in a
   gate-managed directory like `~/.gcp-authcalator/`.
-- **Config precedence change (BREAKING for callers that relied on env
-  vars overriding `--flag`).** Was `env > CLI > TOML > defaults`;
-  is now `CLI > env > TOML > defaults`, matching universal CLI
-  convention. Operators who explicitly pass `--gate-url ...` (or any
-  other flag) now get the value they typed, regardless of inherited
-  env vars. (F9)
+
+### Fixed
+
+- **PAM `grants.revoke` is now correctly awaited as a long-running
+  Operation.** Revoke returns a `google.longrunning.Operation` with
+  `done:false` initially; we previously treated it as fire-and-forget,
+  so the follow-up `createGrant` would race the revoke and 409 with
+  "open Grant" because PAM still considered the old grant alive. The
+  gate now polls the returned Operation to `done:true` (best-effort,
+  30-s deadline, tolerant of `error` field — e.g. already-terminal
+  grants) before retrying create. Verified end-to-end against a real
+  entitlement: the Operation typically settles within ~3 seconds, and
+  an immediate create succeeds without conflict. This collapses the
+  multi-round retry logic that previously papered over the race.
+- **PAM grant rotation is now single-flight per entitlement.**
+  Concurrent `ensureGrant` callers that miss the cache fast-path
+  coalesce onto a single rotation Promise, eliminating redundant
+  `createGrant` / revoke API calls when multiple clients request a
+  token at the same moment a cached grant enters its drain window.
+
+### Security
+
+- **Default `admin_socket_path` moved to `$XDG_RUNTIME_DIR/gcp-authcalator-admin/admin.sock`.**
+  The previous default (`/tmp/gcp-authcalator-admin-<uid>/admin.sock`)
+  lived in a world-writable directory: on a multi-user host another
+  local user could pre-create the parent directory mode `0o777` before
+  the gate started and intercept or DoS the admin socket. The new
+  default sits in the user-private runtime dir (already `0o700` owned
+  by the user, kernel-enforced). Deployments that pin the admin
+  socket explicitly via config or `--admin-socket-path` are
+  unaffected.
+- Gate, with-prod, audit log, and TLS dirs now reject pre-existing
+  directories that are symlinks, owned by another uid, or have
+  permission bits looser than the requested mode. The previous code
+  silently used such a directory because `mkdirSync({recursive:true})`
+  ignores its `mode` argument when the directory already exists, which
+  would have allowed an attacker who pre-created an inherited dir
+  with weak perms to survive across daemon restarts.
+- The gate sets `process.umask(0o077)` at startup so the AF_UNIX
+  socket file created by `Bun.serve` is bound at `0o700` instead of
+  `0o755`, closing the brief window between bind and `chmodSync(...,
+0o600)` during which the socket file mode was looser than intended.
+  `with-prod` does the same around the token-bearing files it
+  creates and restores the operator's original umask before spawning
+  the wrapped command.
+- `GCP_AUTHCALATOR_TLS_BUNDLE_B64` is now captured into a
+  module-private slot and deleted from `process.env` at CLI module
+  load — before `formatVersion()` runs `git rev-parse` — so child
+  processes spawned during version reporting do not inherit the
+  bundle via `/proc/<pid>/environ`. The bundle is still resolvable
+  from the captured slot for the lifetime of the process.
+- `GCP_AUTHCALATOR_PROD_SESSION` (the nested-session sentinel
+  `with-prod` reads to short-circuit reuse) is now restricted to
+  loopback hosts (`127.0.0.1`, `::1`, `localhost`). A same-UID
+  attacker who plants a non-loopback value in the env can no longer
+  redirect the wrapped command's metadata traffic to a remote
+  attacker-controlled server.
+- The metadata-proxy PID validator now filters
+  `/proc/net/tcp[6]` rows by `ESTABLISHED` state. LISTEN /
+  TIME_WAIT / CLOSE_WAIT rows that share a local-address tuple with
+  the connection of interest are no longer matched, removing an
+  inode-collision class of misattribution.
+- In **group mode** (`operator_socket_group` set), the gate refuses to
+  start when the resolved `agent_uid` is not present in `/etc/passwd`.
+  NSS-managed (LDAP/SSSD) users were silently invisible to the
+  "agent UID is not in operator group" guardrail; the new error
+  surfaces the misconfiguration instead of letting it slip through.
+  UID mode is unaffected: its trust boundary is the kernel-enforced
+  `0600` socket owned by the gate UID, which does not need to
+  enumerate the agent's group memberships, so containerized agents
+  whose UID exists only inside the container continue to work.
+- Email and PAM-policy strings displayed in the confirmation dialog
+  are now run through the same control-character stripper as command
+  summaries before reaching zenity / osascript / the terminal prompt
+  / the pending queue. Defense-in-depth against ANSI escape and
+  newline injection if either upstream validator is ever
+  relaxed.
+- `getUniverseDomain` now flows through `withAdcMapping` so an
+  expired/revoked refresh token surfaces `CredentialsExpiredError`
+  with the actionable reauth instruction (and clears the cached
+  source client) instead of returning a generic 500 and leaving the
+  daemon in a degraded state.
 
 ## [0.9.3] - 2026-05-07
 
