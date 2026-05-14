@@ -112,6 +112,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Upgraded toolchain and dependencies: `bun` 1.3.13 → 1.3.14,
+  `@types/bun` 1.3.13 → 1.3.14, `oxlint` 1.63.0 → 1.64.0,
+  `oxfmt` 0.48.0 → 0.49.0.
 - **`with-prod` now resolves its sandbox parent directory separately
   from the gate's runtime dir** (`$XDG_RUNTIME_DIR` →
   `$XDG_CACHE_HOME/gcp-authcalator` → `~/.cache/gcp-authcalator`).
