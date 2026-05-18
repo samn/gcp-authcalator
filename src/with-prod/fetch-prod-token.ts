@@ -1,6 +1,6 @@
 import { type GateConnection, connectionFetchOpts } from "../gate/connection.ts";
 import { CREDENTIALS_EXPIRED_CODE, CredentialsExpiredError } from "../gate/credentials-error.ts";
-import { SESSION_NOT_PERMITTED_CODE } from "../gate/types.ts";
+import { SESSION_NOT_PERMITTED_CODE, TARGET_PROJECT_HEADER } from "../gate/types.ts";
 
 /** Raised when the gate signals that sessions are disabled on this socket. */
 export class SessionNotPermittedError extends Error {
@@ -55,6 +55,12 @@ export interface FetchProdTokenOptions {
   sessionTtlSeconds?: number;
   /** Client-generated pending ID for CLI approval flow (32 hex chars). */
   pendingId?: string;
+  /**
+   * Target GCP project for this request. Sent to the gate via the
+   * `X-Target-Project` header and recorded in the audit log; not used for
+   * any enforcement on the gate side. Empty / unset omits the header.
+   */
+  targetProject?: string;
 }
 
 export interface ProdTokenResult {
@@ -82,6 +88,9 @@ export async function fetchProdAccessToken(
   }
   if (options.pendingId) {
     headers["X-Pending-Id"] = options.pendingId;
+  }
+  if (options.targetProject) {
+    headers[TARGET_PROJECT_HEADER] = options.targetProject;
   }
 
   let tokenUrl = `${baseUrl}/token?level=prod`;
@@ -177,6 +186,9 @@ export async function createProdSession(
   }
   if (options.pendingId) {
     headers["X-Pending-Id"] = options.pendingId;
+  }
+  if (options.targetProject) {
+    headers[TARGET_PROJECT_HEADER] = options.targetProject;
   }
 
   let sessionUrl = `${baseUrl}/session`;

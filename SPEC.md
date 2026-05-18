@@ -174,6 +174,16 @@ A small HTTP server using the `google-auth-library` library. Runs on the host ma
 
 Both token endpoints accept an optional `scopes` query parameter (comma-separated) to request tokens with specific OAuth scopes (e.g., `GET /token?scopes=https://www.googleapis.com/auth/sqlservice.login`). Defaults to `cloud-platform`.
 
+**Request headers** consumed by the prod-path endpoints (`POST /session`, `GET /token?level=prod`, `GET /token?session=...`):
+
+| Header              | Purpose                                                                                                                                                                                                                      |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `X-Wrapped-Command` | JSON-array of the command being wrapped; surfaced in the confirmation dialog and audit log. Length-bounded and redacted before display.                                                                                      |
+| `X-Pending-Id`      | 32-hex client-generated ID for the CLI approval fallback (`gcp-authcalator approve <id>`). Rejected on the operator socket's auto-approve path.                                                                              |
+| `X-Target-Project`  | Caller-supplied GCP project this request is targeting (sent by `with-prod --project=...`). Audit-only: echoed into the audit entry's `target_project` field, never validated against an allowlist. Empty values are ignored. |
+
+**PAM entitlement scoping.** `pam_policy` accepts three forms: a short ID (expanded against the gate's `project_id` + `pam_location`), a full project-scoped path (`projects/{project}/locations/{loc}/entitlements/{id}` — must match `project_id`), or a full folder-scoped path (`folders/{folder}/locations/{loc}/entitlements/{id}` — accepted verbatim, the `project_id` config field plays no role). Folder-scoped paths are the multi-project setup: one PAM grant covers every project beneath the folder, and `with-prod --project=...` selects which project a given invocation acts against without changing the entitlement.
+
 **Token generation** uses `[iamcredentials.generateAccessToken](https://cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/generateAccessToken)` for dev tokens (1-hour TTL). For prod tokens, it uses the engineer's own ADC (which stays on the host).
 
 **Confirmation flow** for prod tokens:

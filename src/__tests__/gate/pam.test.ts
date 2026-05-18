@@ -61,6 +61,43 @@ describe("resolveEntitlementPath", () => {
     const result = resolveEntitlementPath(path, "my-project");
     expect(result).toBe(path);
   });
+
+  test("accepts folder-scoped full path verbatim, ignoring projectId", () => {
+    const path = "folders/123456789/locations/global/entitlements/prod-db-admin";
+    expect(resolveEntitlementPath(path, "any-project")).toBe(path);
+    // The whole point of folder paths is that they're project-agnostic;
+    // resolution must not change when the gate's project_id changes.
+    expect(resolveEntitlementPath(path, "different-project")).toBe(path);
+  });
+
+  test("accepts folder-scoped path with non-global location", () => {
+    const path = "folders/42/locations/us-central1/entitlements/reader";
+    expect(resolveEntitlementPath(path, "p")).toBe(path);
+  });
+
+  test("rejects folder-scoped path with non-numeric folder id", () => {
+    expect(() =>
+      resolveEntitlementPath("folders/abc/locations/global/entitlements/reader", "p"),
+    ).toThrow("Invalid PAM folder entitlement path");
+  });
+
+  test("rejects folder-scoped path missing the location segment", () => {
+    expect(() => resolveEntitlementPath("folders/123/entitlements/reader", "p")).toThrow(
+      "Invalid PAM folder entitlement path",
+    );
+  });
+
+  test("rejects folder-scoped path with empty entitlement id", () => {
+    expect(() => resolveEntitlementPath("folders/123/locations/global/entitlements/", "p")).toThrow(
+      "Invalid PAM folder entitlement path",
+    );
+  });
+
+  test("rejects malformed project-scoped path with helpful message mentioning folder form", () => {
+    expect(() => resolveEntitlementPath("projects/p/entitlements/e", "p")).toThrow(
+      "folders/{folder}/locations/{location}/entitlements/{id}",
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------

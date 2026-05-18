@@ -116,8 +116,16 @@ function isTerminalState(state: string | undefined): boolean {
   return state !== undefined && TERMINAL_GRANT_STATES.has(state);
 }
 
-/** Expected full resource path pattern. */
+/** Expected full project-scoped entitlement path. */
 const ENTITLEMENT_PATH_PATTERN = /^projects\/([^/]+)\/locations\/([^/]+)\/entitlements\/([^/]+)$/;
+
+/**
+ * Folder-scoped entitlement path. Folder IDs are numeric in GCP. A folder
+ * grant covers every project inside the folder, so `project_id` is irrelevant
+ * to its resolution — the path is consumed verbatim.
+ */
+const FOLDER_ENTITLEMENT_PATH_PATTERN =
+  /^folders\/([0-9]+)\/locations\/([^/]+)\/entitlements\/([^/]+)$/;
 
 /** Parse a GCP duration string (e.g. "3600s") to seconds. Returns 0 on failure. */
 function parseDurationSeconds(duration?: string): number {
@@ -218,8 +226,12 @@ interface CachedGrant {
 /**
  * Resolve a PAM policy value to a full entitlement resource path.
  *
- * - Short-form (e.g. "prod-db-admin") is expanded using project_id and location.
- * - Full paths are validated against the expected pattern and project_id.
+ * - Short-form (e.g. "prod-db-admin") is expanded against project_id + location.
+ * - Project-scoped full paths are validated and required to match project_id.
+ * - Folder-scoped full paths (`folders/{folder}/locations/{loc}/entitlements/{id}`)
+ *   are returned verbatim: a folder grant covers every project inside the
+ *   folder, so the gate's `project_id` is not part of the resolution. This is
+ *   how multi-project setups manage one entitlement across many projects.
  *
  * Throws on invalid input to prevent path traversal or cross-project escalation.
  */
@@ -229,12 +241,26 @@ export function resolveEntitlementPath(
   location: string = "global",
 ): string {
   if (policy.includes("/")) {
-    // Full resource path — validate format and project
+    // Folder-scoped paths: validate shape, then pass through. We deliberately
+    // do not compare against project_id — a folder grant intentionally spans
+    // every project beneath it.
+    if (policy.startsWith("folders/")) {
+      if (!FOLDER_ENTITLEMENT_PATH_PATTERN.test(policy)) {
+        throw new Error(
+          `Invalid PAM folder entitlement path: "${policy}". ` +
+            `Expected format: folders/{folder}/locations/{location}/entitlements/{id}`,
+        );
+      }
+      return policy;
+    }
+
+    // Project-scoped full path — validate format and project
     const match = ENTITLEMENT_PATH_PATTERN.exec(policy);
     if (!match) {
       throw new Error(
         `Invalid PAM entitlement path: "${policy}". ` +
-          `Expected format: projects/{project}/locations/{location}/entitlements/{id}`,
+          `Expected format: projects/{project}/locations/{location}/entitlements/{id} ` +
+          `or folders/{folder}/locations/{location}/entitlements/{id}`,
       );
     }
     if (match[1] !== projectId) {

@@ -304,6 +304,53 @@ describe("fetchProdToken", () => {
     expect(capturedHeaders!.get("X-Pending-Id")).toBeNull();
   });
 
+  test("sends X-Target-Project header when targetProject is provided", async () => {
+    let capturedHeaders: Headers | undefined;
+    const fetchFn = (async (url: string, init: RequestInit) => {
+      const parsed = new URL(url);
+      if (parsed.pathname === "/token") {
+        capturedHeaders = new Headers(init.headers);
+        return new Response(JSON.stringify({ access_token: "tok", expires_in: 1800 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ email: "eng@example.com" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof globalThis.fetch;
+
+    await fetchProdToken(
+      { mode: "unix" as const, socketPath: "/tmp/gate.sock" },
+      { fetchFn, targetProject: "alt-project" },
+    );
+
+    expect(capturedHeaders!.get("X-Target-Project")).toBe("alt-project");
+  });
+
+  test("does not send X-Target-Project header when targetProject is not provided", async () => {
+    let capturedHeaders: Headers | undefined;
+    const fetchFn = (async (url: string, init: RequestInit) => {
+      const parsed = new URL(url);
+      if (parsed.pathname === "/token") {
+        capturedHeaders = new Headers(init.headers);
+        return new Response(JSON.stringify({ access_token: "tok", expires_in: 1800 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ email: "eng@example.com" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof globalThis.fetch;
+
+    await fetchProdToken({ mode: "unix" as const, socketPath: "/tmp/gate.sock" }, { fetchFn });
+
+    expect(capturedHeaders!.get("X-Target-Project")).toBeNull();
+  });
+
   test("omits scopes from token URL when scopes not provided", async () => {
     let capturedTokenUrl = "";
 
@@ -507,6 +554,44 @@ describe("createProdSession", () => {
 
     await createProdSession(unixConn, { fetchFn });
     expect(capturedHeaders!.get("X-Pending-Id")).toBeNull();
+  });
+
+  test("sends X-Target-Project header when targetProject is provided", async () => {
+    let capturedHeaders: Headers | undefined;
+    const fetchFn = (async (_url: string, init?: RequestInit) => {
+      capturedHeaders = new Headers(init?.headers);
+      return new Response(
+        JSON.stringify({
+          session_id: "s",
+          access_token: "t",
+          expires_in: 3600,
+          email: "e@e.com",
+        }),
+        { status: 200 },
+      );
+    }) as unknown as typeof globalThis.fetch;
+
+    await createProdSession(unixConn, { fetchFn, targetProject: "tenant-acme" });
+    expect(capturedHeaders!.get("X-Target-Project")).toBe("tenant-acme");
+  });
+
+  test("does not send X-Target-Project header when targetProject is not provided", async () => {
+    let capturedHeaders: Headers | undefined;
+    const fetchFn = (async (_url: string, init?: RequestInit) => {
+      capturedHeaders = new Headers(init?.headers);
+      return new Response(
+        JSON.stringify({
+          session_id: "s",
+          access_token: "t",
+          expires_in: 3600,
+          email: "e@e.com",
+        }),
+        { status: 200 },
+      );
+    }) as unknown as typeof globalThis.fetch;
+
+    await createProdSession(unixConn, { fetchFn });
+    expect(capturedHeaders!.get("X-Target-Project")).toBeNull();
   });
 
   test("throws on non-OK response", async () => {

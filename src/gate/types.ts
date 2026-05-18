@@ -50,6 +50,12 @@ export interface ErrorResponse {
 /** Code emitted when sessions are disabled on the operator socket. */
 export const SESSION_NOT_PERMITTED_CODE = "session_not_permitted_on_operator_socket";
 
+/**
+ * Header for the caller-supplied target GCP project. Audit-only on the gate
+ * side; the security boundary is IAM, not gate enforcement.
+ */
+export const TARGET_PROJECT_HEADER = "X-Target-Project";
+
 /** JSON response for session creation. */
 export interface SessionResponse {
   session_id: string;
@@ -83,6 +89,13 @@ export interface AuditEntry {
    * the gate is uniquely positioned to record.
    */
   command?: string;
+  /**
+   * Caller-supplied target GCP project (from `X-Target-Project`). Recorded
+   * verbatim so the audit trail shows which project a multi-project caller
+   * was acting against. Not validated by the gate — the security boundary is
+   * IAM on the project, not gate enforcement.
+   */
+  target_project?: string;
 }
 
 /** Per-request metadata threaded through the handler chain. */
