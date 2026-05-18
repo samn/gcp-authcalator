@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Changed
+
+- Prod token confirmation rate limit raised from 10 to 20 attempts per minute.
+
 ## [0.10.0] - 2026-05-14
 
 This release corrects issues that prevented PAM grants from getting reliably refreshed, upgrades the runtime, and includes a handful of security fixes.

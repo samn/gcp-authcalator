@@ -321,7 +321,7 @@ Both `/token` and `/token?level=prod` accept an optional `scopes` query paramete
 3. Falls back to a pending approval queue for CLI-based approval (see `approve` command)
 4. Denies access if no interactive method is available and the request times out (120 seconds)
 
-Prod token requests are rate-limited: one confirmation dialog at a time, a 1-second cooldown after denial, and a maximum of 10 attempts per minute.
+Prod token requests are rate-limited: one confirmation dialog at a time, a 1-second cooldown after denial, and a maximum of 20 attempts per minute.
 
 **Audit logging:** All token requests are logged as JSON lines to the runtime directory's `audit.log` (`$XDG_RUNTIME_DIR/audit.log` or `~/.gcp-authcalator/audit.log`).
 
@@ -623,7 +623,7 @@ gcp-authcalator is designed for environments where a coding agent (or other untr
 - **Cross-user isolation.** The main Unix socket is set to `0660` (group-readable by the gate UID's primary group) in a `0750` directory; the privileged operator socket is `0600` (owner-only) in the same directory. On modern Linux distros (UPG), the gate UID's primary group contains only the gate UID itself, so this is _effectively_ `0600` end-to-end. To grant a different-UID agent access to the main socket (e.g. a `the-robot` user in a dev container), add that user to the gate UID's primary group; the kernel still blocks access to the operator socket because its file mode is `0600`. The `$XDG_RUNTIME_DIR` directory itself is left at the system-managed `0700` per the XDG spec — group access requires placing `socket_path` in a gate-managed directory like `~/.gcp-authcalator/`. `with-prod`'s per-invocation sandbox dir (where ephemeral gcloud config and token files live) is resolved separately from the gate's runtime dir (`$XDG_RUNTIME_DIR` → `$XDG_CACHE_HOME/gcp-authcalator` → `~/.cache/gcp-authcalator`), so the agent's sandbox stays in its own private, owned space even when the gate's `~/.gcp-authcalator/` is shared via symlink. **For strongest isolation, run coding agents as a separate OS user _not_ in the gate's primary group** — they will be unable to access the main socket at all.
 - **Mutual TLS for remote transport.** When using TCP for remote devcontainers, both gate and the client verify each other's identity via self-signed certificates. The gate only listens on localhost (port forwarding is required for remote access). The `gate_url` config option enforces `https://` — plaintext `http://` connections are rejected at config parse time.
 - **Human-in-the-loop for production access.** Prod tokens require explicit confirmation via a desktop dialog (`osascript` on macOS, `zenity` on Linux), terminal prompt, or CLI approval (`gcp-authcalator approve`) on the host. If no method resolves within 120 seconds, access is denied.
-- **Rate limiting** prevents automated brute-forcing of the confirmation flow: one dialog at a time, a 1-second cooldown after denial, and a maximum of 10 attempts per minute.
+- **Rate limiting** prevents automated brute-forcing of the confirmation flow: one dialog at a time, a 1-second cooldown after denial, and a maximum of 20 attempts per minute.
 
 **Best-effort protections** (defense in depth against same-user attacks):
 
