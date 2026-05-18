@@ -4,13 +4,13 @@
 // Three layers of protection:
 //   1. Single-flight — only one confirmation dialog at a time
 //   2. Cooldown — 5 s pause after a denied request
-//   3. Sliding window — max 10 attempts per 1-minute window
+//   3. Sliding window — max 20 attempts per 1-minute window
 // ---------------------------------------------------------------------------
 
 /** Tunables (intentionally not user-configurable). */
 const DENIAL_COOLDOWN_MS = 1_000;
 const WINDOW_MS = 1 * 60 * 1000;
-const MAX_ATTEMPTS_PER_WINDOW = 10;
+const MAX_ATTEMPTS_PER_WINDOW = 20;
 
 export type AcquireResult = { allowed: true } | { allowed: false; reason: string };
 
