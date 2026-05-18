@@ -127,6 +127,15 @@ const ENTITLEMENT_PATH_PATTERN = /^projects\/([^/]+)\/locations\/([^/]+)\/entitl
 const FOLDER_ENTITLEMENT_PATH_PATTERN =
   /^folders\/([0-9]+)\/locations\/([^/]+)\/entitlements\/([^/]+)$/;
 
+/**
+ * Organization-scoped entitlement path. Organization IDs are numeric in GCP.
+ * An org grant covers every project beneath the org (across all folders), so
+ * `project_id` is irrelevant — the path is consumed verbatim. Same shape and
+ * rationale as the folder variant, one level up the resource hierarchy.
+ */
+const ORG_ENTITLEMENT_PATH_PATTERN =
+  /^organizations\/([0-9]+)\/locations\/([^/]+)\/entitlements\/([^/]+)$/;
+
 /** Parse a GCP duration string (e.g. "3600s") to seconds. Returns 0 on failure. */
 function parseDurationSeconds(duration?: string): number {
   if (!duration) return 0;
@@ -228,10 +237,12 @@ interface CachedGrant {
  *
  * - Short-form (e.g. "prod-db-admin") is expanded against project_id + location.
  * - Project-scoped full paths are validated and required to match project_id.
- * - Folder-scoped full paths (`folders/{folder}/locations/{loc}/entitlements/{id}`)
- *   are returned verbatim: a folder grant covers every project inside the
- *   folder, so the gate's `project_id` is not part of the resolution. This is
- *   how multi-project setups manage one entitlement across many projects.
+ * - Folder- and organization-scoped full paths
+ *   (`folders/{folder}/locations/{loc}/entitlements/{id}`,
+ *   `organizations/{org}/locations/{loc}/entitlements/{id}`) are returned
+ *   verbatim: a folder or org grant covers every project beneath it, so the
+ *   gate's `project_id` is not part of the resolution. This is how multi-
+ *   project setups manage one entitlement across many projects.
  *
  * Throws on invalid input to prevent path traversal or cross-project escalation.
  */
@@ -241,14 +252,23 @@ export function resolveEntitlementPath(
   location: string = "global",
 ): string {
   if (policy.includes("/")) {
-    // Folder-scoped paths: validate shape, then pass through. We deliberately
-    // do not compare against project_id — a folder grant intentionally spans
-    // every project beneath it.
+    // Folder- and org-scoped paths: validate shape, then pass through. We
+    // deliberately do not compare against project_id — these grants
+    // intentionally span every project beneath the resource.
     if (policy.startsWith("folders/")) {
       if (!FOLDER_ENTITLEMENT_PATH_PATTERN.test(policy)) {
         throw new Error(
           `Invalid PAM folder entitlement path: "${policy}". ` +
             `Expected format: folders/{folder}/locations/{location}/entitlements/{id}`,
+        );
+      }
+      return policy;
+    }
+    if (policy.startsWith("organizations/")) {
+      if (!ORG_ENTITLEMENT_PATH_PATTERN.test(policy)) {
+        throw new Error(
+          `Invalid PAM organization entitlement path: "${policy}". ` +
+            `Expected format: organizations/{org}/locations/{location}/entitlements/{id}`,
         );
       }
       return policy;
@@ -259,8 +279,9 @@ export function resolveEntitlementPath(
     if (!match) {
       throw new Error(
         `Invalid PAM entitlement path: "${policy}". ` +
-          `Expected format: projects/{project}/locations/{location}/entitlements/{id} ` +
-          `or folders/{folder}/locations/{location}/entitlements/{id}`,
+          `Expected format: projects/{project}/locations/{location}/entitlements/{id}, ` +
+          `folders/{folder}/locations/{location}/entitlements/{id}, ` +
+          `or organizations/{org}/locations/{location}/entitlements/{id}`,
       );
     }
     if (match[1] !== projectId) {

@@ -247,10 +247,12 @@ port = 8173
 # pam_allowed_policies = ["prod-readonly", "prod-migration"]
 # pam_location = "global"
 #
-# Multi-project setups: a folder-scoped entitlement covers every project
-# in the folder, so one PAM policy backs every with-prod --project target.
-# Folder-scoped paths must be provided in full form (project_id is ignored):
+# Multi-project setups: a folder- or organization-scoped entitlement covers
+# every project beneath it, so one PAM policy backs every with-prod --project
+# target. Folder/org-scoped paths must be provided in full form (project_id
+# is ignored):
 # pam_policy = "folders/123456789/locations/global/entitlements/prod-db-admin"
+# pam_policy = "organizations/987654321/locations/global/entitlements/prod-db-admin"
 
 # Extra environment variables for with-prod subprocess (optional).
 # Values support ${VAR} and ${VAR:-default} substitution resolved within
@@ -387,7 +389,7 @@ gcp-authcalator with-prod \
 
 **Required options:** `--project-id` (or `--project` for the target this invocation acts against)
 
-**Multi-project setups.** `--project` lets one gate serve many GCP projects without re-running for each. Common pattern: organise projects under a GCP folder; configure `pam_policy` as a folder-scoped entitlement (`folders/{id}/locations/{loc}/entitlements/{name}`) so a single PAM grant covers every project in the folder; grant the impersonation service account the IAM it needs across the folder. The gate does not enforce a project allowlist — the security boundary is folder/PAM scope + IAM bindings on the service account. The effective project flows through to the metadata proxy (`/computeMetadata/v1/project/project-id`), the wrapped child's `CLOUDSDK_CORE_PROJECT`, and the gate's audit log via the `X-Target-Project` header / `target_project` audit field.
+**Multi-project setups.** `--project` lets one gate serve many GCP projects without re-running for each. Common pattern: organise projects under a GCP folder (or attach an org-wide entitlement); configure `pam_policy` as a folder- or organization-scoped entitlement (`folders/{id}/locations/{loc}/entitlements/{name}` or `organizations/{id}/locations/{loc}/entitlements/{name}`) so a single PAM grant covers every project beneath; grant the impersonation service account the IAM it needs across that scope. The gate does not enforce a project allowlist — the security boundary is folder/org/PAM scope + IAM bindings on the service account. The effective project flows through to the metadata proxy (`/computeMetadata/v1/project/project-id`), the wrapped child's `CLOUDSDK_CORE_PROJECT`, and the gate's audit log via the `X-Target-Project` header / `target_project` audit field.
 
 This command:
 

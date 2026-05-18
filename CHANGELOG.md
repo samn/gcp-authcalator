@@ -16,10 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `CLOUDSDK_CORE_PROJECT`, and the nested-session compatibility check.
   Enables a single gate to front a folder of projects without separate
   daemons per project.
-- Folder-scoped PAM entitlement paths
-  (`folders/{folder}/locations/{loc}/entitlements/{id}`) accepted in
-  `pam_policy` and `pam_allowed_policies`. A folder grant covers every
-  project beneath the folder, so one entitlement backs every
+- Folder- and organization-scoped PAM entitlement paths
+  (`folders/{folder}/locations/{loc}/entitlements/{id}` and
+  `organizations/{org}/locations/{loc}/entitlements/{id}`) accepted in
+  `pam_policy` and `pam_allowed_policies`. A folder/org grant covers every
+  project beneath the resource, so one entitlement backs every
   `with-prod --project=...` target without per-project PAM config.
 - `X-Target-Project` request header on `POST /session`,
   `GET /token?level=prod`, and `GET /token?session=...`. `with-prod` sends

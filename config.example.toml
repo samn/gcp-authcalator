@@ -43,7 +43,7 @@ service_account = "dev-runner@my-gcp-project.iam.gserviceaccount.com"
 # PAM (Privileged Access Manager) — just-in-time prod escalation
 # When set, prod token requests trigger a PAM grant before minting the token.
 #
-# Three accepted forms:
+# Four accepted forms:
 #   * Short ID (e.g. "prod-db-admin") — expanded against `project_id` and
 #     `pam_location` into projects/<project>/locations/<loc>/entitlements/<id>.
 #   * Project-scoped full path — must match this gate's project_id.
@@ -53,11 +53,14 @@ service_account = "dev-runner@my-gcp-project.iam.gserviceaccount.com"
 #     setup: configure one entitlement here, then use `with-prod --project=...`
 #     per invocation. `project_id` is not consulted for folder paths.
 #     "folders/123456789/locations/global/entitlements/prod-db-admin"
+#   * Organization-scoped full path — same shape as folder, one level up.
+#     Covers every project in the org.
+#     "organizations/987654321/locations/global/entitlements/prod-db-admin"
 # pam_policy = "prod-db-admin"
 
 # Additional PAM entitlements that callers may request via query param.
 # The default pam_policy is always allowed; these are extras.
-# Each entry follows the same three-form rule as pam_policy.
+# Each entry follows the same four-form rule as pam_policy.
 # pam_allowed_policies = ["prod-readonly", "prod-migration"]
 
 # PAM entitlement location for short-form IDs (default: global).
