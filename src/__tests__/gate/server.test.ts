@@ -138,12 +138,6 @@ describe("startGateServer", () => {
   });
 
   test("accepts pam_grant_ttl_seconds with pam_policy", async () => {
-    // Smoke test for the new configurable PAM grant TTL flag: the gate must
-    // accept a grant TTL longer than the token TTL (the 4h-grant / 1h-token
-    // case that amortises PAM/IAM propagation latency across refreshes) and
-    // start cleanly. Wiring into the PAM module is exercised by pam.test.ts;
-    // here we just verify the config flows through GateConfig validation and
-    // server startup without affecting dev-token paths.
     const tempDir = mkdtempSync(join(tmpdir(), "gate-srv-"));
     const socketPath = join(tempDir, "gate.sock");
     const config: GateConfig = {

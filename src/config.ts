@@ -76,6 +76,10 @@ export const DEFAULT_SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
 // Schemas
 // ---------------------------------------------------------------------------
 
+/** Coerced, optional seconds field with shared bounds — keeps `token_ttl_seconds`
+ *  and `pam_grant_ttl_seconds` (and any future TTL sharing this range) in lockstep. */
+const ttlSecondsSchema = z.coerce.number().int().min(60).max(43200).optional();
+
 export const ConfigSchema = z.object({
   project_id: z.string().min(1).optional(),
   service_account: z.email().optional(),
@@ -94,7 +98,7 @@ export const ConfigSchema = z.object({
   pam_policy: z.string().min(1).optional(),
   pam_allowed_policies: z.array(z.string().min(1)).optional(),
   pam_location: z.string().min(1).optional(),
-  token_ttl_seconds: z.coerce.number().int().min(60).max(43200).optional(),
+  token_ttl_seconds: ttlSecondsSchema,
   // PAM grant lifetime. When unset, the PAM grant duration matches
   // `token_ttl_seconds` (the historical behavior). Setting this longer than
   // the token TTL lets cached grants serve many token refreshes before the
@@ -102,7 +106,7 @@ export const ConfigSchema = z.object({
   // per-rotation pauses visible. Minted tokens stay clamped to
   // `grant_expiry - DRAIN_MARGIN_MS`, so a longer grant only changes how
   // often the gate calls PAM, not how long any individual token is valid.
-  pam_grant_ttl_seconds: z.coerce.number().int().min(60).max(43200).optional(),
+  pam_grant_ttl_seconds: ttlSecondsSchema,
   session_ttl_seconds: z.coerce.number().int().min(300).max(86400).optional(),
   // ---- Operator socket (auto-approve for human-initiated escalation) ----
   operator_socket_path: z.string().min(1).transform(expandTilde).optional(),

@@ -165,12 +165,7 @@ export async function startGateServer(
   const prodRateLimiter = createProdRateLimiter();
 
   const defaultTokenTtlSeconds = config.token_ttl_seconds ?? 3600;
-  // PAM grant duration defaults to the token TTL — the historical coupling.
-  // Setting `pam_grant_ttl_seconds` longer than the token TTL lets a cached
-  // grant serve many token refreshes before the gate rotates the grant, which
-  // hides PAM/IAM propagation latency from callers. Minted tokens are still
-  // clamped to `grant_expiry - DRAIN_MARGIN_MS` (see handlers.ts), so the
-  // longer grant only affects rotation cadence, not per-token TTL.
+  // Defaults to the token TTL; see `pam_grant_ttl_seconds` in config.ts for rationale.
   const pamGrantTtlSeconds = config.pam_grant_ttl_seconds ?? defaultTokenTtlSeconds;
   const sessionTtlSeconds = config.session_ttl_seconds ?? 28800;
   const sessionManager = createSessionManager();

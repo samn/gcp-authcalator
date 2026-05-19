@@ -302,8 +302,6 @@ describe("ConfigSchema", () => {
   });
 
   test("allows pam_grant_ttl_seconds longer than token_ttl_seconds", () => {
-    // The point of the new field: a 4h grant with a 1h token TTL so PAM/IAM
-    // propagation latency doesn't reach callers on every refresh.
     const config = ConfigSchema.parse({
       token_ttl_seconds: 3600,
       pam_grant_ttl_seconds: 14400,
