@@ -58,7 +58,8 @@ Commands:
   version           Show version
 
 Options:
-  --project-id <id>        GCP project ID
+  --project-id <id>        GCP project ID (default project for with-prod)
+  --project <id>           with-prod only: per-invocation target project (overrides --project-id)
   --service-account <email> Service account email to impersonate
   --socket-path <path>     Unix socket path (default: $XDG_RUNTIME_DIR/gcp-authcalator.sock)
   --admin-socket-path <path>  Admin socket path for approve/deny (default: $XDG_RUNTIME_DIR/gcp-authcalator-admin/admin.sock)
@@ -101,6 +102,7 @@ Examples:
   gcp-authcalator gate --project-id my-project --service-account sa@my-project.iam.gserviceaccount.com
   gcp-authcalator metadata-proxy --config config.toml
   gcp-authcalator with-prod -- python some/script.py
+  gcp-authcalator with-prod --project alt-project -- python some/script.py
   gcp-authcalator approve <id>
   gcp-authcalator deny <id>
   gcp-authcalator kube-setup`;
@@ -129,6 +131,10 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     allowPositionals: true,
     options: {
       "project-id": { type: "string" },
+      // `--project` is a with-prod-only per-invocation override. Kept distinct
+      // from `--project-id` (which sets the config default) so it can't leak
+      // into the gate/metadata-proxy commands via shared config merge.
+      project: { type: "string" },
       "service-account": { type: "string" },
       "socket-path": { type: "string" },
       "admin-socket-path": { type: "string" },
@@ -230,7 +236,8 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     return;
   }
 
-  const { env: envPairs, ...scalarValues } = values;
+  // `project` is a with-prod-only override and never enters the shared config.
+  const { env: envPairs, project: projectOverride, ...scalarValues } = values;
   const cliValues = mapCliArgs(scalarValues);
 
   // Parse --env KEY=VALUE pairs into a record
@@ -271,7 +278,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
         break;
       case "with-prod": {
         const wrappedCommand = positionals.slice(1);
-        await runWithProd(config, wrappedCommand);
+        await runWithProd(config, wrappedCommand, { projectOverride });
         break;
       }
     }

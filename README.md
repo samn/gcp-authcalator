@@ -174,7 +174,8 @@ Precedence: CLI flags > environment variables > TOML file > defaults.
 ### CLI flags
 
 ```
---project-id <id>          GCP project ID
+--project-id <id>          GCP project ID (default project for with-prod)
+--project <id>             with-prod only: per-invocation target project (overrides --project-id)
 --service-account <email>  Service account email to impersonate
 --socket-path <path>       Unix socket path (default: $XDG_RUNTIME_DIR/gcp-authcalator.sock)
 --admin-socket-path <path> Admin socket path for approve/deny (default: $XDG_RUNTIME_DIR/gcp-authcalator-admin/admin.sock)
@@ -240,10 +241,18 @@ port = 8173
 # re-confirmation (optional, default: 28800 / 8 hours):
 # session_ttl_seconds = 28800
 
-# PAM integration for just-in-time prod escalation (optional):
+# PAM integration for just-in-time prod escalation (optional).
+# Short-form entitlement IDs expand against project_id + pam_location:
 # pam_policy = "prod-db-admin"
 # pam_allowed_policies = ["prod-readonly", "prod-migration"]
 # pam_location = "global"
+#
+# Multi-project setups: a folder- or organization-scoped entitlement covers
+# every project beneath it, so one PAM policy backs every with-prod --project
+# target. Folder/org-scoped paths must be provided in full form (project_id
+# is ignored):
+# pam_policy = "folders/123456789/locations/global/entitlements/prod-db-admin"
+# pam_policy = "organizations/987654321/locations/global/entitlements/prod-db-admin"
 
 # Extra environment variables for with-prod subprocess (optional).
 # Values support ${VAR} and ${VAR:-default} substitution resolved within
@@ -368,6 +377,9 @@ gcp-authcalator with-prod -- gcloud sql instances list
 gcp-authcalator with-prod -- alembic upgrade head
 gcp-authcalator with-prod --scopes="https://www.googleapis.com/auth/sqlservice.login" -- cloud-sql-proxy my-project:us-central1:my-instance
 
+# Target a specific project (overrides the configured default for this invocation):
+gcp-authcalator with-prod --project alt-project -- gcloud sql instances list
+
 # Pass extra env vars (e.g. for GDAL/OGR):
 gcp-authcalator with-prod \
   --env CPL_MACHINE_IS_GCE=YES \
@@ -375,7 +387,9 @@ gcp-authcalator with-prod \
   -- ogr2ogr ...
 ```
 
-**Required options:** `--project-id`
+**Required options:** `--project-id` (or `--project` for the target this invocation acts against)
+
+**Multi-project setups.** `--project` lets one gate serve many GCP projects without re-running for each. Common pattern: organise projects under a GCP folder (or attach an org-wide entitlement); configure `pam_policy` as a folder- or organization-scoped entitlement (`folders/{id}/locations/{loc}/entitlements/{name}` or `organizations/{id}/locations/{loc}/entitlements/{name}`) so a single PAM grant covers every project beneath; grant the impersonation service account the IAM it needs across that scope. The gate does not enforce a project allowlist — the security boundary is folder/org/PAM scope + IAM bindings on the service account. The effective project flows through to the metadata proxy (`/computeMetadata/v1/project/project-id`), the wrapped child's `CLOUDSDK_CORE_PROJECT`, and the gate's audit log via the `X-Target-Project` header / `target_project` audit field.
 
 This command:
 

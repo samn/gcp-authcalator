@@ -35,6 +35,16 @@ export interface WithProdOptions {
   fetchOptions?: FetchProdTokenOptions;
   /** Override Bun.spawn for testing. */
   spawnFn?: SpawnFn;
+  /**
+   * Per-invocation GCP project that this `with-prod` should target, overriding
+   * `config.project_id`. Wired in by the CLI's `--project` flag. The override
+   * threads through to the metadata-proxy (so `gcloud config get-value
+   * project` and `/computeMetadata/v1/project/project-id` reflect the target),
+   * the wrapped child's `CLOUDSDK_CORE_PROJECT`, the nested-session
+   * compatibility check, and the `X-Target-Project` header sent to the gate
+   * (audit-only).
+   */
+  projectOverride?: string;
 }
 
 /** Resolve ${VAR} and ${VAR:-default} patterns against an env record. */
@@ -129,16 +139,19 @@ export async function runWithProd(
 
   const spawnFn = options.spawnFn ?? (Bun.spawn as unknown as SpawnFn);
 
-  // Check for nested session before parsing config (project_id is not required
-  // when reusing an existing session, since we inherit it from the parent proxy).
+  // Target project for this invocation. CLI --project beats config.project_id.
+  // May be undefined before the schema parse below — that's fine for the
+  // nested-session reuse path, which inherits the project from the parent.
+  let effectiveProjectId = options.projectOverride ?? config.project_id;
+
   const nestedSession = await detectNestedSession(process.env, options.fetchOptions?.fetchFn);
 
   if (nestedSession) {
     // If the caller explicitly requested a different project, fall through to
     // a new session so the confirmation dialog reflects the correct project.
-    if (config.project_id && config.project_id !== nestedSession.projectId) {
+    if (effectiveProjectId && effectiveProjectId !== nestedSession.projectId) {
       console.log(
-        `with-prod: requested project ${config.project_id} differs from active session (${nestedSession.projectId}), starting new session`,
+        `with-prod: requested project ${effectiveProjectId} differs from active session (${nestedSession.projectId}), starting new session`,
       );
     } else {
       console.log(
@@ -164,8 +177,11 @@ export async function runWithProd(
     }
   }
 
-  // Normal flow: create a prod session and start a fresh proxy.
+  // Normal flow: create a prod session and start a fresh proxy. The schema
+  // requires project_id, so the reassign below narrows effectiveProjectId
+  // to a definite string for the rest of the function.
   const wpConfig = WithProdConfigSchema.parse(config);
+  effectiveProjectId = options.projectOverride ?? wpConfig.project_id;
 
   // Step 1: Create prod session at gcp-gate (triggers confirmation dialog).
   // If the gate is the operator socket, session creation returns 403 and we
@@ -192,6 +208,7 @@ export async function runWithProd(
         tokenTtlSeconds: wpConfig.token_ttl_seconds,
         sessionTtlSeconds: wpConfig.session_ttl_seconds,
         pendingId,
+        targetProject: effectiveProjectId,
       });
       sessionId = sessionResult.session_id;
       initialEmail = sessionResult.email;
@@ -210,6 +227,7 @@ export async function runWithProd(
           scopes: wpConfig.scopes,
           pamPolicy: wpConfig.pam_policy,
           tokenTtlSeconds: wpConfig.token_ttl_seconds,
+          targetProject: effectiveProjectId,
         });
         initialEmail = tokenResult.email;
         initialAccessToken = tokenResult.access_token;
@@ -274,6 +292,7 @@ export async function runWithProd(
     ? createSessionTokenProvider(conn, sessionId, initialToken, {
         fetchFn: options.fetchOptions?.fetchFn,
         onRefresh,
+        targetProject: effectiveProjectId,
       })
     : createPerRequestTokenProvider(conn, initialToken, {
         fetchFn: options.fetchOptions?.fetchFn,
@@ -281,6 +300,7 @@ export async function runWithProd(
         scopes: wpConfig.scopes,
         pamPolicy: wpConfig.pam_policy,
         tokenTtlSeconds: wpConfig.token_ttl_seconds,
+        targetProject: effectiveProjectId,
         onRefresh,
       });
 
@@ -288,7 +308,7 @@ export async function runWithProd(
   // gcloud can discover the account (it ignores the "default" alias).
   const { server, stop } = startMetadataProxyServer(
     {
-      project_id: wpConfig.project_id,
+      project_id: effectiveProjectId,
       service_account: initialEmail,
       socket_path: wpConfig.socket_path,
       admin_socket_path: wpConfig.admin_socket_path,
@@ -321,7 +341,7 @@ export async function runWithProd(
         // GCE_METADATA_HOST, falling back to the original metadata proxy.
         // Tokens still flow through the PID-validated metadata proxy.
         CLOUDSDK_CORE_ACCOUNT: initialEmail,
-        CLOUDSDK_CORE_PROJECT: wpConfig.project_id,
+        CLOUDSDK_CORE_PROJECT: effectiveProjectId,
         [PROD_SESSION_ENV_VAR]: metadataHost,
       },
       wpConfig.env,

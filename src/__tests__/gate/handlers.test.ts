@@ -300,6 +300,20 @@ describe("GET /token?level=prod", () => {
     expect(logs[0]!.email).toBe("user@example.com");
   });
 
+  test("records target_project in prod-token audit entry when X-Target-Project header is set", async () => {
+    const logs: AuditEntry[] = [];
+    const deps = makeDeps({
+      confirmProdAccess: async () => true,
+      writeAuditLog: (e) => logs.push(e),
+    });
+    const headers = { "X-Target-Project": "tenant-acme" };
+
+    await handleRequest(makeRequest("/token?level=prod", "GET", headers), deps);
+
+    expect(logs).toHaveLength(1);
+    expect(logs[0]!.target_project).toBe("tenant-acme");
+  });
+
   test("returns 500 when identity lookup fails during prod flow", async () => {
     const logs: AuditEntry[] = [];
     const deps = makeDeps({
@@ -1271,6 +1285,38 @@ describe("POST /session", () => {
     expect(logs[0]!.command).toBe("gcloud sql connect prod");
   });
 
+  test("records target_project in session-creation audit entry when X-Target-Project header is set", async () => {
+    const logs: AuditEntry[] = [];
+    const deps = makeDeps({ writeAuditLog: (e) => logs.push(e) });
+    const headers = { "X-Target-Project": "alt-project-id" };
+
+    await handleRequest(makeRequest("/session", "POST", headers), deps);
+
+    expect(logs).toHaveLength(1);
+    expect(logs[0]!.target_project).toBe("alt-project-id");
+  });
+
+  test("omits target_project from session-creation audit entry when X-Target-Project header is absent", async () => {
+    const logs: AuditEntry[] = [];
+    const deps = makeDeps({ writeAuditLog: (e) => logs.push(e) });
+
+    await handleRequest(makeRequest("/session", "POST"), deps);
+
+    expect(logs).toHaveLength(1);
+    expect(logs[0]!.target_project).toBeUndefined();
+  });
+
+  test("treats blank X-Target-Project header value as absent in audit entry", async () => {
+    const logs: AuditEntry[] = [];
+    const deps = makeDeps({ writeAuditLog: (e) => logs.push(e) });
+    const headers = { "X-Target-Project": "   " };
+
+    await handleRequest(makeRequest("/session", "POST", headers), deps);
+
+    expect(logs).toHaveLength(1);
+    expect(logs[0]!.target_project).toBeUndefined();
+  });
+
   test("returns 405 for GET method", async () => {
     const res = await handleRequest(makeRequest("/session", "GET"), makeDeps());
     expect(res.status).toBe(405);
@@ -1559,6 +1605,23 @@ describe("GET /token?session=<id>", () => {
     expect(logs).toHaveLength(1);
     expect(logs[0]!.session_id).toBe(session.id);
     expect(logs[0]!.command).toBe("kubectl get pods -A");
+  });
+
+  test("records target_project on per-refresh audit entry when X-Target-Project header is set", async () => {
+    const logs: AuditEntry[] = [];
+    const sessionManager = createSessionManager();
+    const session = sessionManager.create({
+      email: "eng@example.com",
+      ttlSeconds: 3600,
+      sessionLifetimeSeconds: 28800,
+    });
+    const deps = makeDeps({ sessionManager, writeAuditLog: (e) => logs.push(e) });
+    const headers = { "X-Target-Project": "tenant-acme" };
+
+    await handleRequest(makeRequest(`/token?session=${session.id}`, "GET", headers), deps);
+
+    expect(logs).toHaveLength(1);
+    expect(logs[0]!.target_project).toBe("tenant-acme");
   });
 
   test("returns 500 when mintProdToken fails", async () => {

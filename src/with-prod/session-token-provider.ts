@@ -1,5 +1,6 @@
 import { type GateConnection, connectionFetchOpts } from "../gate/connection.ts";
 import { CredentialsExpiredError } from "../gate/credentials-error.ts";
+import { TARGET_PROJECT_HEADER } from "../gate/types.ts";
 import type { CachedToken, TokenProvider } from "../metadata-proxy/types.ts";
 import { createCachingTokenProvider } from "./caching-token-provider.ts";
 import { throwTypedGateError } from "./fetch-prod-token.ts";
@@ -9,6 +10,12 @@ export interface SessionTokenProviderOptions {
   fetchFn?: typeof globalThis.fetch;
   /** Called after each successful token refresh (e.g., to update gcloud's token file). */
   onRefresh?: (token: CachedToken) => void;
+  /**
+   * Target GCP project for this session's refresh requests. Sent as
+   * `X-Target-Project` so the audit log on each refresh records the same
+   * target as the original session.
+   */
+  targetProject?: string;
 }
 
 /**
@@ -29,9 +36,16 @@ export function createSessionTokenProvider(
   const fetchFn = options.fetchFn ?? globalThis.fetch;
   const { baseUrl, extraOpts } = connectionFetchOpts(conn);
 
+  const refreshHeaders = options.targetProject
+    ? { [TARGET_PROJECT_HEADER]: options.targetProject }
+    : undefined;
+
   return createCachingTokenProvider(initialToken, options.onRefresh, async () => {
     const url = `${baseUrl}/token?session=${encodeURIComponent(sessionId)}`;
-    const res = await fetchFn(url, extraOpts);
+    const res = await fetchFn(
+      url,
+      refreshHeaders ? { ...extraOpts, headers: refreshHeaders } : extraOpts,
+    );
 
     if (res.status === 401) {
       const text = await res.text().catch(() => "");

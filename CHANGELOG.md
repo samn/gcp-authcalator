@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- `with-prod --project <id>` per-invocation target project override.
+  `project_id` in config remains the default; `--project` overrides it for
+  one invocation. The chosen project threads through to the metadata proxy
+  (`/computeMetadata/v1/project/project-id`), the wrapped child's
+  `CLOUDSDK_CORE_PROJECT`, and the nested-session compatibility check.
+  Enables a single gate to front a folder of projects without separate
+  daemons per project.
+- Folder- and organization-scoped PAM entitlement paths
+  (`folders/{folder}/locations/{loc}/entitlements/{id}` and
+  `organizations/{org}/locations/{loc}/entitlements/{id}`) accepted in
+  `pam_policy` and `pam_allowed_policies`. A folder/org grant covers every
+  project beneath the resource, so one entitlement backs every
+  `with-prod --project=...` target without per-project PAM config.
+- `X-Target-Project` request header on `POST /session`,
+  `GET /token?level=prod`, and `GET /token?session=...`. `with-prod` sends
+  it automatically with the effective `--project` value; the gate records
+  it in the audit log's new `target_project` field. Audit-only — the gate
+  does not enforce against any allowlist (security boundary remains the
+  PAM grant's scope and IAM bindings on the service account).
+
 ### Changed
 
 - Prod token confirmation rate limit raised from 10 to 20 attempts per minute.

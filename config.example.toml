@@ -3,7 +3,12 @@
 # Pass this file with: gcp-authcalator <command> --config config.toml
 # CLI flags take precedence over values in this file.
 
-# GCP project ID (required for all commands)
+# GCP project ID (required for `gate` and `metadata-proxy`).
+# For `with-prod` this is the *default* target project; pass `--project <id>`
+# to target a different project per invocation (e.g. when the gate fronts a
+# folder full of projects via a folder-scoped PAM entitlement). The
+# `--project` value flows through to the metadata proxy and the wrapped
+# child's `CLOUDSDK_CORE_PROJECT`.
 project_id = "my-gcp-project"
 
 # Service account email to impersonate for dev tokens (required for `gate`)
@@ -37,14 +42,29 @@ service_account = "dev-runner@my-gcp-project.iam.gserviceaccount.com"
 
 # PAM (Privileged Access Manager) — just-in-time prod escalation
 # When set, prod token requests trigger a PAM grant before minting the token.
-# Can be an entitlement ID (short form) or full resource path.
+#
+# Four accepted forms:
+#   * Short ID (e.g. "prod-db-admin") — expanded against `project_id` and
+#     `pam_location` into projects/<project>/locations/<loc>/entitlements/<id>.
+#   * Project-scoped full path — must match this gate's project_id.
+#     "projects/my-gcp-project/locations/global/entitlements/prod-db-admin"
+#   * Folder-scoped full path — passed through verbatim. One folder grant
+#     covers every project beneath the folder, which is the multi-project
+#     setup: configure one entitlement here, then use `with-prod --project=...`
+#     per invocation. `project_id` is not consulted for folder paths.
+#     "folders/123456789/locations/global/entitlements/prod-db-admin"
+#   * Organization-scoped full path — same shape as folder, one level up.
+#     Covers every project in the org.
+#     "organizations/987654321/locations/global/entitlements/prod-db-admin"
 # pam_policy = "prod-db-admin"
 
 # Additional PAM entitlements that callers may request via query param.
 # The default pam_policy is always allowed; these are extras.
+# Each entry follows the same four-form rule as pam_policy.
 # pam_allowed_policies = ["prod-readonly", "prod-migration"]
 
-# PAM entitlement location (default: global)
+# PAM entitlement location for short-form IDs (default: global).
+# Folder/project full-path forms carry their own location and ignore this.
 # pam_location = "global"
 
 # Token lifetime in seconds (default: 3600 / 1 hour)

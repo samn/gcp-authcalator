@@ -301,6 +301,106 @@ describe("runWithProd", () => {
     expect(capturedMode).toBe(0o700);
   });
 
+  test("projectOverride takes precedence over config.project_id for CLOUDSDK_CORE_PROJECT", async () => {
+    const mockFetchFn = mockGateFetch();
+    const { mockSpawnFn, getCapturedEnv } = mockSpawnCapture();
+
+    try {
+      await runWithProd(
+        {
+          project_id: "default-proj",
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
+        },
+        ["echo", "hello"],
+        {
+          fetchOptions: { fetchFn: mockFetchFn },
+          spawnFn: mockSpawnFn,
+          projectOverride: "alt-proj",
+        },
+      );
+    } catch {
+      // process.exit mock throws
+    }
+
+    expect(getCapturedEnv().CLOUDSDK_CORE_PROJECT).toBe("alt-proj");
+  });
+
+  test("sends X-Target-Project header with the override project on session creation", async () => {
+    const headersSeen: Record<string, string | null> = {};
+    const fetchFn = (async (url: string, init?: RequestInit) => {
+      const parsed = new URL(url);
+      const method = init?.method ?? "GET";
+      if (parsed.pathname === "/session" && method === "POST") {
+        const h = new Headers(init?.headers);
+        headersSeen["X-Target-Project"] = h.get("X-Target-Project");
+        return new Response(
+          JSON.stringify({
+            session_id: "s",
+            access_token: "t",
+            expires_in: 1800,
+            token_type: "Bearer",
+            email: "eng@example.com",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (parsed.pathname === "/session" && method === "DELETE") {
+        return new Response("{}", { status: 200 });
+      }
+      return new Response("Not found", { status: 404 });
+    }) as unknown as typeof globalThis.fetch;
+
+    const { mockSpawnFn } = mockSpawnCapture();
+
+    try {
+      await runWithProd(
+        {
+          project_id: "default-proj",
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
+        },
+        ["echo", "test"],
+        {
+          fetchOptions: { fetchFn },
+          spawnFn: mockSpawnFn,
+          projectOverride: "alt-proj",
+        },
+      );
+    } catch {
+      // process.exit mock throws
+    }
+
+    expect(headersSeen["X-Target-Project"]).toBe("alt-proj");
+  });
+
+  test("without projectOverride, CLOUDSDK_CORE_PROJECT falls back to config.project_id", async () => {
+    const mockFetchFn = mockGateFetch();
+    const { mockSpawnFn, getCapturedEnv } = mockSpawnCapture();
+
+    try {
+      await runWithProd(
+        {
+          project_id: "default-proj",
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
+        },
+        ["echo", "hello"],
+        {
+          fetchOptions: { fetchFn: mockFetchFn },
+          spawnFn: mockSpawnFn,
+        },
+      );
+    } catch {
+      // process.exit mock throws
+    }
+
+    expect(getCapturedEnv().CLOUDSDK_CORE_PROJECT).toBe("default-proj");
+  });
+
   // Regression: with-prod's sandbox must land in the caller's own private
   // dir, not the gate's runtime dir. In two-user setups the gate's
   // ~/.gcp-authcalator/ is reachable to the agent only via a symlink to
@@ -1112,6 +1212,42 @@ describe("runWithProd nested sessions", () => {
     const env = getCapturedEnv();
     expect(env.GCE_METADATA_HOST).toMatch(/^127\.0\.0\.1:\d+$/);
     expect(env.GCE_METADATA_HOST).not.toBe("127.0.0.1:54321");
+  });
+
+  test("falls back to normal flow when projectOverride differs from parent session", async () => {
+    process.env[PROD_SESSION_ENV_VAR] = "127.0.0.1:54321";
+
+    // Parent proxy matches the config default — only the CLI override differs.
+    const mockFetchFn = mockCombinedFetch({ proxyProjectBody: "default-project" });
+    const { mockSpawnFn, getCapturedEnv } = mockSpawnCapture();
+
+    try {
+      await runWithProd(
+        {
+          project_id: "default-project",
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
+        },
+        ["echo", "test"],
+        {
+          fetchOptions: { fetchFn: mockFetchFn },
+          spawnFn: mockSpawnFn,
+          projectOverride: "alt-project",
+        },
+      );
+    } catch {
+      // process.exit mock throws
+    }
+
+    const logOutput = logSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
+    expect(logOutput).toContain("alt-project differs from active session (default-project)");
+    expect(logOutput).not.toContain("reusing existing prod session");
+
+    const env = getCapturedEnv();
+    expect(env.GCE_METADATA_HOST).toMatch(/^127\.0\.0\.1:\d+$/);
+    expect(env.GCE_METADATA_HOST).not.toBe("127.0.0.1:54321");
+    expect(env.CLOUDSDK_CORE_PROJECT).toBe("alt-project");
   });
 
   test("reuses session when project-id matches parent session", async () => {

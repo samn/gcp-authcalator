@@ -1,5 +1,6 @@
 import {
   SESSION_NOT_PERMITTED_CODE,
+  TARGET_PROJECT_HEADER,
   type CachedToken,
   type GateDeps,
   type TokenResponse,
@@ -18,6 +19,20 @@ const JSON_HEADERS = { "Content-Type": "application/json" };
 
 /** Default context for tests and any production caller that hasn't been updated yet. */
 const DEFAULT_CTX: RequestContext = { trusted: false, socket: "main" };
+
+/**
+ * Read the caller-supplied target project. Audit-only — the gate does not
+ * validate this against any allowlist; the security boundary is IAM on the
+ * project (a request for a project the SA can't reach simply fails downstream).
+ * Empty strings collapse to undefined so the audit field is absent rather
+ * than blank.
+ */
+function readTargetProjectHeader(req: Request): string | undefined {
+  const raw = req.headers.get(TARGET_PROJECT_HEADER);
+  if (!raw) return undefined;
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
 
 export function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
@@ -161,10 +176,11 @@ async function handleSessionTokenRefresh(
 
   const commandArr = parseCommandHeader(req.headers.get("X-Wrapped-Command"));
   const commandSummary = commandArr ? summarizeCommand(commandArr) : undefined;
+  const targetProject = readTargetProjectHeader(req);
 
   const auditBase: Pick<
     AuditEntry,
-    "endpoint" | "level" | "session_id" | "pam_policy" | "socket" | "command"
+    "endpoint" | "level" | "session_id" | "pam_policy" | "socket" | "command" | "target_project"
   > = {
     endpoint: "/token?session=...",
     level: "prod",
@@ -172,6 +188,7 @@ async function handleSessionTokenRefresh(
     pam_policy: session.pamPolicy,
     socket: ctx.socket,
     command: commandSummary,
+    target_project: targetProject,
   };
 
   try {
@@ -290,6 +307,7 @@ interface ProdAccessGrant {
     | "socket"
     | "auto_approved"
     | "command"
+    | "target_project"
   >;
 }
 
@@ -346,10 +364,17 @@ async function acquireProdAccess(
 
   const commandArr = parseCommandHeader(req.headers.get("X-Wrapped-Command"));
   const commandSummary = commandArr ? summarizeCommand(commandArr) : undefined;
+  const targetProject = readTargetProjectHeader(req);
 
   const auditBase: Pick<
     AuditEntry,
-    "endpoint" | "level" | "pam_policy" | "token_ttl_seconds" | "socket" | "command"
+    | "endpoint"
+    | "level"
+    | "pam_policy"
+    | "token_ttl_seconds"
+    | "socket"
+    | "command"
+    | "target_project"
   > = {
     endpoint: opts.auditEndpoint,
     level: "prod",
@@ -357,6 +382,7 @@ async function acquireProdAccess(
     token_ttl_seconds: opts.ttlSeconds,
     socket: ctx.socket,
     command: commandSummary,
+    target_project: targetProject,
   };
 
   // Allowlist check
