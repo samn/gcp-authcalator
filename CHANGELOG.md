@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- Configurable PAM grant TTL via `--pam-grant-ttl-seconds` /
+  `pam_grant_ttl_seconds` / `GCP_AUTHCALATOR_PAM_GRANT_TTL_SECONDS`
+  (range 60–43200 s). Previously the PAM grant duration was hardwired to
+  `token_ttl_seconds`; the new flag lets the grant be set independently —
+  typically longer than the token TTL — so PAM/IAM propagation latency is
+  paid once per grant rotation instead of on every short-lived token
+  refresh. Defaults to `token_ttl_seconds` when unset, preserving prior
+  behaviour. Minted tokens stay clamped to `grant_expiry -
+DRAIN_MARGIN_MS`, so individual token lifetimes are unchanged; only the
+  rotation cadence shifts. Example: `token_ttl_seconds = 3600`,
+  `pam_grant_ttl_seconds = 14400` gives four 1-hour token refreshes per
+  4-hour grant.
+
 ## [0.11.0] - 2026-05-19
 
 ### Added

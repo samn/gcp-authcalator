@@ -137,6 +137,35 @@ describe("startGateServer", () => {
     expect(body.email).toBe("identity@example.com");
   });
 
+  test("accepts pam_grant_ttl_seconds with pam_policy", async () => {
+    // Smoke test for the new configurable PAM grant TTL flag: the gate must
+    // accept a grant TTL longer than the token TTL (the 4h-grant / 1h-token
+    // case that amortises PAM/IAM propagation latency across refreshes) and
+    // start cleanly. Wiring into the PAM module is exercised by pam.test.ts;
+    // here we just verify the config flows through GateConfig validation and
+    // server startup without affecting dev-token paths.
+    const tempDir = mkdtempSync(join(tmpdir(), "gate-srv-"));
+    const socketPath = join(tempDir, "gate.sock");
+    const config: GateConfig = {
+      ...makeConfig(socketPath),
+      pam_policy: "prod-db-admin",
+      token_ttl_seconds: 3600,
+      pam_grant_ttl_seconds: 14400,
+    };
+
+    result = await startGateServer(config, {
+      authOptions: {
+        sourceClient: mockClient("source-tok"),
+        impersonatedClient: mockClient("dev-tok"),
+        fetchFn: mockFetch("test@example.com"),
+      },
+      auditLogDir: join(tempDir, "audit"),
+    });
+
+    const res = await fetchUnix(socketPath, "/health");
+    expect(res.status).toBe(200);
+  });
+
   test("returns 404 for unknown paths", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "gate-srv-"));
     const socketPath = join(tempDir, "gate.sock");

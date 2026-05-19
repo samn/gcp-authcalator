@@ -249,6 +249,35 @@ describe("ensureGrant", () => {
     expect(parsed.requestedDuration).toBe("1800s");
   });
 
+  test("supports grant duration longer than token TTL (4-hour grant)", async () => {
+    // The 4h-grant use case: PAM/IAM propagation latency is amortised across
+    // many short-lived token refreshes because one cached grant survives
+    // several token rotations. The mint side clamps tokens to grant_expiry
+    // - DRAIN_MARGIN_MS, so the per-token TTL is unaffected.
+    const grantName = `${entitlementPath}/grants/grant-1`;
+    let capturedBody: string | undefined;
+
+    const fetchFn = (async (_url: string, init?: RequestInit) => {
+      if (init?.body) {
+        capturedBody = init.body as string;
+      }
+      return new Response(JSON.stringify(makeActivatedGrant(grantName)), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof globalThis.fetch;
+
+    const pam = createPamModule(async () => "test-token", {
+      fetchFn,
+      grantDurationSeconds: 14400,
+    });
+
+    await pam.ensureGrant(entitlementPath);
+    expect(capturedBody).toBeDefined();
+    const parsed = JSON.parse(capturedBody!) as Record<string, unknown>;
+    expect(parsed.requestedDuration).toBe("14400s");
+  });
+
   test("defaults grant duration to 3600s when not configured", async () => {
     const grantName = `${entitlementPath}/grants/grant-1`;
     let capturedBody: string | undefined;

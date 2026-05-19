@@ -95,6 +95,14 @@ export const ConfigSchema = z.object({
   pam_allowed_policies: z.array(z.string().min(1)).optional(),
   pam_location: z.string().min(1).optional(),
   token_ttl_seconds: z.coerce.number().int().min(60).max(43200).optional(),
+  // PAM grant lifetime. When unset, the PAM grant duration matches
+  // `token_ttl_seconds` (the historical behavior). Setting this longer than
+  // the token TTL lets cached grants serve many token refreshes before the
+  // gate rotates the grant — useful when PAM/IAM propagation latency makes
+  // per-rotation pauses visible. Minted tokens stay clamped to
+  // `grant_expiry - DRAIN_MARGIN_MS`, so a longer grant only changes how
+  // often the gate calls PAM, not how long any individual token is valid.
+  pam_grant_ttl_seconds: z.coerce.number().int().min(60).max(43200).optional(),
   session_ttl_seconds: z.coerce.number().int().min(300).max(86400).optional(),
   // ---- Operator socket (auto-approve for human-initiated escalation) ----
   operator_socket_path: z.string().min(1).transform(expandTilde).optional(),
@@ -191,6 +199,7 @@ const cliToConfigKey: Record<string, keyof Config> = {
   "pam-allowed-policies": "pam_allowed_policies",
   "pam-location": "pam_location",
   "token-ttl-seconds": "token_ttl_seconds",
+  "pam-grant-ttl-seconds": "pam_grant_ttl_seconds",
   "session-ttl-seconds": "session_ttl_seconds",
   "operator-socket-path": "operator_socket_path",
   "operator-socket-group": "operator_socket_group",
@@ -241,6 +250,7 @@ const configKeys: readonly (keyof Config)[] = [
   "pam_policy",
   "pam_location",
   "token_ttl_seconds",
+  "pam_grant_ttl_seconds",
   "session_ttl_seconds",
   "operator_socket_path",
   "operator_socket_group",

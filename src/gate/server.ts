@@ -165,6 +165,13 @@ export async function startGateServer(
   const prodRateLimiter = createProdRateLimiter();
 
   const defaultTokenTtlSeconds = config.token_ttl_seconds ?? 3600;
+  // PAM grant duration defaults to the token TTL — the historical coupling.
+  // Setting `pam_grant_ttl_seconds` longer than the token TTL lets a cached
+  // grant serve many token refreshes before the gate rotates the grant, which
+  // hides PAM/IAM propagation latency from callers. Minted tokens are still
+  // clamped to `grant_expiry - DRAIN_MARGIN_MS` (see handlers.ts), so the
+  // longer grant only affects rotation cadence, not per-token TTL.
+  const pamGrantTtlSeconds = config.pam_grant_ttl_seconds ?? defaultTokenTtlSeconds;
   const sessionTtlSeconds = config.session_ttl_seconds ?? 28800;
   const sessionManager = createSessionManager();
 
@@ -177,7 +184,7 @@ export async function startGateServer(
     const pamLocation = config.pam_location ?? "global";
 
     pam = createPamModule(auth.getSourceAccessToken, {
-      grantDurationSeconds: defaultTokenTtlSeconds,
+      grantDurationSeconds: pamGrantTtlSeconds,
     });
 
     pamDefaultPolicy = resolveEntitlementPath(config.pam_policy, config.project_id, pamLocation);
@@ -404,6 +411,7 @@ export async function startGateServer(
   if (pamDefaultPolicy) {
     console.log(`  pam policy:      ${config.pam_policy} (default)`);
     console.log(`  pam allowlist:   ${pamAllowedPolicies!.size} entitlement(s)`);
+    console.log(`  pam grant TTL:   ${pamGrantTtlSeconds}s`);
   }
   if (operatorServer) {
     console.log(`  operator socket: ${config.operator_socket_path}`);

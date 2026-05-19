@@ -189,6 +189,7 @@ Precedence: CLI flags > environment variables > TOML file > defaults.
 --pam-allowed-policies <ids>  Additional PAM entitlements callers may request (comma-separated)
 --pam-location <loc>       PAM entitlement location (default: global)
 --token-ttl-seconds <secs> Token lifetime in seconds (60–43200, default: 3600)
+--pam-grant-ttl-seconds <secs> PAM grant lifetime in seconds (60–43200, default: token-ttl-seconds). Set longer than the token TTL to amortise PAM/IAM propagation latency across multiple refreshes — one grant serves many tokens before the gate rotates it
 --session-ttl-seconds <secs> Prod session lifetime in seconds (300–86400, default: 28800 / 8h)
 -e, --env <KEY=VALUE>      Extra env var for with-prod subprocess (repeatable, supports ${VAR} substitution)
 -c, --config <path>        Path to TOML config file
@@ -213,6 +214,7 @@ Most config options can be set via `GCP_AUTHCALATOR_*` environment variables (up
 | `GCP_AUTHCALATOR_PAM_POLICY`            | PAM entitlement ID or path (same as `--pam-policy`)                |
 | `GCP_AUTHCALATOR_PAM_LOCATION`          | PAM entitlement location (same as `--pam-location`)                |
 | `GCP_AUTHCALATOR_TOKEN_TTL_SECONDS`     | Token lifetime in seconds (same as `--token-ttl-seconds`)          |
+| `GCP_AUTHCALATOR_PAM_GRANT_TTL_SECONDS` | PAM grant lifetime in seconds (same as `--pam-grant-ttl-seconds`)  |
 | `GCP_AUTHCALATOR_SESSION_TTL_SECONDS`   | Prod session lifetime in seconds (same as `--session-ttl-seconds`) |
 | `GCP_AUTHCALATOR_OPERATOR_SOCKET_PATH`  | Operator socket path (same as `--operator-socket-path`)            |
 | `GCP_AUTHCALATOR_OPERATOR_SOCKET_GROUP` | Operator socket Unix group (same as `--operator-socket-group`)     |
@@ -236,6 +238,15 @@ port = 8173
 
 # Token lifetime (optional, default: 3600):
 # token_ttl_seconds = 3600
+
+# PAM grant lifetime in seconds (optional, default: token_ttl_seconds).
+# Setting this longer than the token TTL amortises PAM/IAM propagation
+# latency across multiple token refreshes — one cached grant serves many
+# minted tokens before the gate rotates it. Minted tokens are still clamped
+# to the grant's expiry minus the 5-minute drain margin, so this only
+# changes how often the gate calls PAM, not how long any individual token
+# is valid. Range: 60–43200 (12 h).
+# pam_grant_ttl_seconds = 14400  # 4 h
 
 # Prod session lifetime — how long with-prod can refresh tokens without
 # re-confirmation (optional, default: 28800 / 8 hours):
