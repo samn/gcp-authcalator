@@ -267,6 +267,48 @@ describe("ConfigSchema", () => {
   test("rejects non-integer token_ttl_seconds", () => {
     expect(() => ConfigSchema.parse({ token_ttl_seconds: 3.5 })).toThrow(z.ZodError);
   });
+
+  test("accepts pam_grant_ttl_seconds within valid range", () => {
+    const config = ConfigSchema.parse({ pam_grant_ttl_seconds: 14400 });
+    expect(config.pam_grant_ttl_seconds).toBe(14400);
+  });
+
+  test("coerces string pam_grant_ttl_seconds to number", () => {
+    const config = ConfigSchema.parse({ pam_grant_ttl_seconds: "14400" });
+    expect(config.pam_grant_ttl_seconds).toBe(14400);
+  });
+
+  test("allows undefined pam_grant_ttl_seconds", () => {
+    const config = ConfigSchema.parse({});
+    expect(config.pam_grant_ttl_seconds).toBeUndefined();
+  });
+
+  test("accepts minimum pam_grant_ttl_seconds of 60", () => {
+    const config = ConfigSchema.parse({ pam_grant_ttl_seconds: 60 });
+    expect(config.pam_grant_ttl_seconds).toBe(60);
+  });
+
+  test("accepts maximum pam_grant_ttl_seconds of 43200", () => {
+    const config = ConfigSchema.parse({ pam_grant_ttl_seconds: 43200 });
+    expect(config.pam_grant_ttl_seconds).toBe(43200);
+  });
+
+  test("rejects pam_grant_ttl_seconds below 60", () => {
+    expect(() => ConfigSchema.parse({ pam_grant_ttl_seconds: 30 })).toThrow(z.ZodError);
+  });
+
+  test("rejects pam_grant_ttl_seconds above 43200", () => {
+    expect(() => ConfigSchema.parse({ pam_grant_ttl_seconds: 50000 })).toThrow(z.ZodError);
+  });
+
+  test("allows pam_grant_ttl_seconds longer than token_ttl_seconds", () => {
+    const config = ConfigSchema.parse({
+      token_ttl_seconds: 3600,
+      pam_grant_ttl_seconds: 14400,
+    });
+    expect(config.token_ttl_seconds).toBe(3600);
+    expect(config.pam_grant_ttl_seconds).toBe(14400);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -469,6 +511,11 @@ describe("mapCliArgs", () => {
     const result = mapCliArgs({ "token-ttl-seconds": "1800" });
     expect(result).toEqual({ token_ttl_seconds: "1800" });
   });
+
+  test("maps pam-grant-ttl-seconds to pam_grant_ttl_seconds", () => {
+    const result = mapCliArgs({ "pam-grant-ttl-seconds": "14400" });
+    expect(result).toEqual({ pam_grant_ttl_seconds: "14400" });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -531,6 +578,7 @@ describe("loadEnvVars", () => {
         GCP_AUTHCALATOR_GATE_URL: "https://env.example.com",
         GCP_AUTHCALATOR_TLS_BUNDLE: "/env/bundle.pem",
         GCP_AUTHCALATOR_TOKEN_TTL_SECONDS: "1800",
+        GCP_AUTHCALATOR_PAM_GRANT_TTL_SECONDS: "14400",
       },
       () => {
         const result = loadEnvVars();
@@ -544,6 +592,7 @@ describe("loadEnvVars", () => {
           gate_url: "https://env.example.com",
           tls_bundle: "/env/bundle.pem",
           token_ttl_seconds: "1800",
+          pam_grant_ttl_seconds: "14400",
         });
       },
     );

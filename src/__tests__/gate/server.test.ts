@@ -137,6 +137,29 @@ describe("startGateServer", () => {
     expect(body.email).toBe("identity@example.com");
   });
 
+  test("accepts pam_grant_ttl_seconds with pam_policy", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "gate-srv-"));
+    const socketPath = join(tempDir, "gate.sock");
+    const config: GateConfig = {
+      ...makeConfig(socketPath),
+      pam_policy: "prod-db-admin",
+      token_ttl_seconds: 3600,
+      pam_grant_ttl_seconds: 14400,
+    };
+
+    result = await startGateServer(config, {
+      authOptions: {
+        sourceClient: mockClient("source-tok"),
+        impersonatedClient: mockClient("dev-tok"),
+        fetchFn: mockFetch("test@example.com"),
+      },
+      auditLogDir: join(tempDir, "audit"),
+    });
+
+    const res = await fetchUnix(socketPath, "/health");
+    expect(res.status).toBe(200);
+  });
+
   test("returns 404 for unknown paths", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "gate-srv-"));
     const socketPath = join(tempDir, "gate.sock");
