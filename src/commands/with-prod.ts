@@ -150,12 +150,12 @@ export async function runWithProd(
     // If the caller explicitly requested a different project, fall through to
     // a new session so the confirmation dialog reflects the correct project.
     if (effectiveProjectId && effectiveProjectId !== nestedSession.projectId) {
-      console.log(
+      console.error(
         `with-prod: requested project ${effectiveProjectId} differs from active session (${nestedSession.projectId}), starting new session`,
       );
     } else {
-      console.log(
-        `with-prod: reusing existing prod session (proxy at ${nestedSession.metadataHost})`,
+      console.error(
+        `with-prod: reusing existing prod session for project ${nestedSession.projectId} (proxy at ${nestedSession.metadataHost})`,
       );
 
       const env: Record<string, string | undefined> = {
@@ -188,8 +188,10 @@ export async function runWithProd(
   // fall back to per-request token mode (each refresh hits the gate, which
   // auto-approves silently if the PAM policy is allowlisted).
   const pendingId = randomBytes(16).toString("hex");
-  console.log("with-prod: requesting prod session from gcp-gate...");
-  console.log(
+  console.error(
+    `with-prod: requesting prod session from gcp-gate for project ${effectiveProjectId}...`,
+  );
+  console.error(
     `with-prod: if no prompt appears, approve with: gcp-authcalator approve ${pendingId}`,
   );
   let conn: GateConnection;
@@ -216,7 +218,7 @@ export async function runWithProd(
       initialExpiresIn = sessionResult.expires_in;
     } catch (err) {
       if (err instanceof SessionNotPermittedError) {
-        console.log(
+        console.error(
           "with-prod: operator socket — falling back to per-request token mode (no session)",
         );
         // pendingId is for the CLI approve flow which doesn't apply on the
@@ -248,7 +250,9 @@ export async function runWithProd(
     }
     process.exit(1);
   }
-  console.log(`with-prod: prod access acquired for ${initialEmail}`);
+  console.error(
+    `with-prod: prod access acquired for ${initialEmail} (project ${effectiveProjectId})`,
+  );
 
   // Tighten umask only around the token-bearing file creation below.
   // The wrapped child should not inherit it — restore before spawn.
