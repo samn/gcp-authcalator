@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [0.11.1] - 2026-05-20
+
 ### Added
 
 - Configurable PAM grant TTL via `--pam-grant-ttl-seconds` /
