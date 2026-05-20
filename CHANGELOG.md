@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [0.11.2] - 2026-05-20
+
 ### Changed
 
 - `with-prod` startup diagnostics ("requesting prod session...",
