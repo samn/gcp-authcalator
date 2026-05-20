@@ -259,10 +259,13 @@ describe("runWithProd", () => {
     // Verify exit code propagated (0)
     expect(exitSpy).toHaveBeenCalledWith(0);
 
-    // Verify log messages include the engineer's email
+    // stdout is reserved for the wrapped child's output.
+    const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
     const logOutput = logSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
-    expect(logOutput).toContain("requesting prod session");
-    expect(logOutput).toContain("prod access acquired for eng@example.com");
+    expect(errorOutput).toContain("requesting prod session from gcp-gate for project my-proj");
+    expect(errorOutput).toContain("prod access acquired for eng@example.com on project my-proj");
+    expect(logOutput).not.toContain("requesting prod session");
+    expect(logOutput).not.toContain("prod access acquired");
   });
 
   test("sets gcloudConfigDir permissions to 0o700 (owner-only)", async () => {
@@ -748,9 +751,9 @@ describe("runWithProd", () => {
     expect(capturedEnv.CLOUDSDK_CORE_ACCOUNT).toBe("human@example.com");
     expect(exitSpy).toHaveBeenCalledWith(0);
 
-    const logOutput = logSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
-    expect(logOutput).toContain("falling back to per-request token mode");
-    expect(logOutput).toContain("prod access acquired for human@example.com");
+    const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
+    expect(errorOutput).toContain("falling back to per-request token mode");
+    expect(errorOutput).toContain("prod access acquired for human@example.com on project my-proj");
   });
 
   test("exits 1 with error message when token fetch fails", async () => {
@@ -988,9 +991,9 @@ describe("runWithProd nested sessions", () => {
     expect(getCapturedCmd()).toEqual(["echo", "hello"]);
     expect(exitSpy).toHaveBeenCalledWith(0);
 
-    const logOutput = logSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
-    expect(logOutput).toContain("reusing existing prod session");
-    expect(logOutput).not.toContain("requesting prod session");
+    const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
+    expect(errorOutput).toContain("reusing existing prod session for project parent-project");
+    expect(errorOutput).not.toContain("requesting prod session");
   });
 
   test("passes through GCE_METADATA_HOST from parent session", async () => {
@@ -1170,9 +1173,9 @@ describe("runWithProd nested sessions", () => {
     }
 
     // Should have gone through normal flow (new token fetch)
-    const logOutput = logSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
-    expect(logOutput).toContain("requesting prod session");
-    expect(logOutput).not.toContain("reusing existing prod session");
+    const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
+    expect(errorOutput).toContain("requesting prod session");
+    expect(errorOutput).not.toContain("reusing existing prod session");
 
     // Should have new metadata proxy, not the parent's
     const env = getCapturedEnv();
@@ -1203,10 +1206,10 @@ describe("runWithProd nested sessions", () => {
     }
 
     // Should have gone through normal flow
-    const logOutput = logSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
-    expect(logOutput).toContain("differs from active session");
-    expect(logOutput).toContain("requesting prod session");
-    expect(logOutput).not.toContain("reusing existing prod session");
+    const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
+    expect(errorOutput).toContain("differs from active session");
+    expect(errorOutput).toContain("requesting prod session");
+    expect(errorOutput).not.toContain("reusing existing prod session");
 
     // New metadata proxy should be started
     const env = getCapturedEnv();
@@ -1240,9 +1243,9 @@ describe("runWithProd nested sessions", () => {
       // process.exit mock throws
     }
 
-    const logOutput = logSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
-    expect(logOutput).toContain("alt-project differs from active session (default-project)");
-    expect(logOutput).not.toContain("reusing existing prod session");
+    const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
+    expect(errorOutput).toContain("alt-project differs from active session (default-project)");
+    expect(errorOutput).not.toContain("reusing existing prod session");
 
     const env = getCapturedEnv();
     expect(env.GCE_METADATA_HOST).toMatch(/^127\.0\.0\.1:\d+$/);
@@ -1274,8 +1277,8 @@ describe("runWithProd nested sessions", () => {
       // process.exit mock throws
     }
 
-    const logOutput = logSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
-    expect(logOutput).toContain("reusing existing prod session");
+    const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
+    expect(errorOutput).toContain("reusing existing prod session for project same-project");
 
     // Should use parent's proxy
     expect(getCapturedEnv().GCE_METADATA_HOST).toBe("127.0.0.1:54321");
@@ -1303,8 +1306,8 @@ describe("runWithProd nested sessions", () => {
       // process.exit mock throws
     }
 
-    const logOutput = logSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
-    expect(logOutput).toContain("reusing existing prod session");
+    const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
+    expect(errorOutput).toContain("reusing existing prod session for project parent-project");
 
     // Should use parent's proxy, not start a new one
     expect(getCapturedEnv().GCE_METADATA_HOST).toBe("127.0.0.1:54321");
@@ -1329,8 +1332,10 @@ describe("runWithProd nested sessions", () => {
       // process.exit mock throws
     }
 
-    const logOutput = logSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
-    expect(logOutput).toContain("reusing existing prod session (proxy at 127.0.0.1:54321)");
+    const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
+    expect(errorOutput).toContain(
+      "reusing existing prod session for project parent-project (proxy at 127.0.0.1:54321)",
+    );
   });
 });
 

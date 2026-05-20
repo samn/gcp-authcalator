@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Changed
+
+- `with-prod` startup diagnostics ("requesting prod session...",
+  "prod access acquired for ...", "reusing existing prod session",
+  "operator socket — falling back to per-request token mode", etc.)
+  now go to stderr instead of stdout, so they no longer contaminate
+  the wrapped command's stdout (e.g. when piping `gcloud ... --format=json`
+  into `jq`). The "prod access acquired" and "requesting prod session"
+  lines also now include the selected GCP project id, making it easy
+  to confirm the `--project` override took effect.
+
 ## [0.11.1] - 2026-05-20
 
 ### Added
