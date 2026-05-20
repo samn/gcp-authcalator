@@ -251,7 +251,7 @@ export async function runWithProd(
     process.exit(1);
   }
   console.error(
-    `with-prod: prod access acquired for ${initialEmail} (project ${effectiveProjectId})`,
+    `with-prod: prod access acquired for ${initialEmail} on project ${effectiveProjectId}`,
   );
 
   // Tighten umask only around the token-bearing file creation below.

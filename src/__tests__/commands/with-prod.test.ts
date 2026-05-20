@@ -259,13 +259,11 @@ describe("runWithProd", () => {
     // Verify exit code propagated (0)
     expect(exitSpy).toHaveBeenCalledWith(0);
 
-    // Diagnostics go to stderr, not stdout — stdout is reserved for the
-    // wrapped command's output. Verify diagnostics name the engineer
-    // and the selected project id.
+    // stdout is reserved for the wrapped child's output.
     const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
     const logOutput = logSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
     expect(errorOutput).toContain("requesting prod session from gcp-gate for project my-proj");
-    expect(errorOutput).toContain("prod access acquired for eng@example.com (project my-proj)");
+    expect(errorOutput).toContain("prod access acquired for eng@example.com on project my-proj");
     expect(logOutput).not.toContain("requesting prod session");
     expect(logOutput).not.toContain("prod access acquired");
   });
@@ -755,7 +753,7 @@ describe("runWithProd", () => {
 
     const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
     expect(errorOutput).toContain("falling back to per-request token mode");
-    expect(errorOutput).toContain("prod access acquired for human@example.com (project my-proj)");
+    expect(errorOutput).toContain("prod access acquired for human@example.com on project my-proj");
   });
 
   test("exits 1 with error message when token fetch fails", async () => {
