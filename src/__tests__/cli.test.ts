@@ -92,6 +92,11 @@ describe("startup version logging", () => {
     const { stderr } = await runCLI(["version"]);
     expect(stderr).not.toMatch(VERSION_LINE);
   });
+
+  test("does not log startup version for kube-token (runs on every kubectl call)", async () => {
+    const { stderr } = await runCLI(["kube-token"]);
+    expect(stderr).not.toMatch(VERSION_LINE);
+  });
 });
 
 // ---------------------------------------------------------------------------

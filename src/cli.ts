@@ -193,15 +193,17 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     process.exit(0);
   }
 
-  // Log version+sha to stderr so the running build is visible in any subcommand's
-  // logs (verifies the deployed binary matches what was built).
-  console.error(`gcp-authcalator v${formatVersion()} (${subcommand})`);
-
-  // Commands that don't need project config
+  // Commands that don't need project config.
+  // kube-token runs as a kubectl credential plugin on every API call, so it
+  // skips the startup version banner to avoid spamming stderr.
   if (subcommand === "kube-token") {
     await runKubeToken();
     return;
   }
+
+  // Log version+sha to stderr so the running build is visible in any subcommand's
+  // logs (verifies the deployed binary matches what was built).
+  console.error(`gcp-authcalator v${formatVersion()} (${subcommand})`);
 
   if (subcommand === "kube-setup") {
     await runKubeSetup();

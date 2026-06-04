@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Changed
+
+- `kube-token` no longer logs the startup version banner
+  (`gcp-authcalator vX.Y.Z (kube-token)`) to stderr. As a kubectl
+  credential plugin it runs on every API call, so the banner spammed
+  kubectl output. All other subcommands still log the banner.
+
 ## [0.11.2] - 2026-05-20
 
 ### Changed
