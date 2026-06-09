@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [0.11.3] - 2026-06-09
+
 ### Changed
 
 - `with-prod` startup output is now more concise. The version banner folds in
