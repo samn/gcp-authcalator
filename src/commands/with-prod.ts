@@ -18,7 +18,20 @@ import { startMetadataProxyServer } from "../metadata-proxy/server.ts";
 import { detectNestedSession, PROD_SESSION_ENV_VAR } from "../with-prod/detect-nested-session.ts";
 import { buildGateConnection } from "../gate/connection.ts";
 import type { GateConnection } from "../gate/connection.ts";
+import { formatVersion } from "../version.ts";
 import type { Subprocess } from "bun";
+
+/**
+ * Delay before printing the CLI approval hint. The hint is noise in the common
+ * case (a confirmation prompt appears immediately), so we only surface it once
+ * a request has been outstanding long enough to look stuck.
+ */
+const APPROVE_HINT_DELAY_MS = 10_000;
+
+/** Startup banner naming the running build and the project being targeted. */
+function startupBanner(projectId: string): string {
+  return `gcp-authcalator v${formatVersion()} with-prod for project ${projectId}`;
+}
 
 type SpawnFn = (
   cmd: string[],
@@ -154,6 +167,7 @@ export async function runWithProd(
         `with-prod: requested project ${effectiveProjectId} differs from active session (${nestedSession.projectId}), starting new session`,
       );
     } else {
+      console.error(startupBanner(nestedSession.projectId));
       console.error(
         `with-prod: reusing existing prod session for project ${nestedSession.projectId} (proxy at ${nestedSession.metadataHost})`,
       );
@@ -183,17 +197,21 @@ export async function runWithProd(
   const wpConfig = WithProdConfigSchema.parse(config);
   effectiveProjectId = options.projectOverride ?? wpConfig.project_id;
 
+  console.error(startupBanner(effectiveProjectId));
+
   // Step 1: Create prod session at gcp-gate (triggers confirmation dialog).
   // If the gate is the operator socket, session creation returns 403 and we
   // fall back to per-request token mode (each refresh hits the gate, which
   // auto-approves silently if the PAM policy is allowlisted).
   const pendingId = randomBytes(16).toString("hex");
-  console.error(
-    `with-prod: requesting prod session from gcp-gate for project ${effectiveProjectId}...`,
-  );
-  console.error(
-    `with-prod: if no prompt appears, approve with: gcp-authcalator approve ${pendingId}`,
-  );
+  // Only surface the manual-approval hint if no prompt has been approved within
+  // APPROVE_HINT_DELAY_MS — otherwise it's noise in the common (fast) path.
+  const hintTimer = setTimeout(() => {
+    console.error(
+      `with-prod: if no prompt appears, approve with: gcp-authcalator approve ${pendingId}`,
+    );
+  }, APPROVE_HINT_DELAY_MS);
+  hintTimer.unref?.(); // never keep the event loop alive for the hint alone
   let conn: GateConnection;
   let initialEmail: string;
   let initialAccessToken: string;
@@ -218,9 +236,9 @@ export async function runWithProd(
       initialExpiresIn = sessionResult.expires_in;
     } catch (err) {
       if (err instanceof SessionNotPermittedError) {
-        console.error(
-          "with-prod: operator socket — falling back to per-request token mode (no session)",
-        );
+        // Operator socket auto-approves per-request; there is no human prompt to
+        // hint about, so cancel the deferred approval hint.
+        clearTimeout(hintTimer);
         // pendingId is for the CLI approve flow which doesn't apply on the
         // operator socket auto-approve path; the gate would 400 if we sent it.
         const tokenResult = await fetchProdToken(conn, {
@@ -239,6 +257,7 @@ export async function runWithProd(
       }
     }
   } catch (err) {
+    clearTimeout(hintTimer);
     // CredentialsExpiredError already carries the full reauth instruction;
     // forwarding the message verbatim keeps the actionable text intact.
     if (err instanceof CredentialsExpiredError) {
@@ -250,6 +269,7 @@ export async function runWithProd(
     }
     process.exit(1);
   }
+  clearTimeout(hintTimer);
   console.error(
     `with-prod: prod access acquired for ${initialEmail} on project ${effectiveProjectId}`,
   );

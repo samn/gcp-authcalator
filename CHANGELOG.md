@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- `with-prod` startup output is now more concise. The version banner folds in
+  the target project (`gcp-authcalator vX.Y.Z (sha) with-prod for project <id>`)
+  and the redundant `requesting prod session...` and
+  `operator socket — falling back to per-request token mode` lines are removed.
+  The `gcp-authcalator approve <id>` hint is now only printed if the request has
+  been outstanding for 10 seconds without approval, instead of unconditionally
+  at startup. Steady-state startup is now two lines: the banner and
+  `prod access acquired for <email> on project <id>`.
 - `kube-token` no longer logs the startup version banner
   (`gcp-authcalator vX.Y.Z (kube-token)`) to stderr. As a kubectl
   credential plugin it runs on every API call, so the banner spammed
