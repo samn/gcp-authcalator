@@ -262,9 +262,12 @@ describe("runWithProd", () => {
     // stdout is reserved for the wrapped child's output.
     const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
     const logOutput = logSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
-    expect(errorOutput).toContain("requesting prod session from gcp-gate for project my-proj");
+    // Banner folds in the version+sha and the target project.
+    expect(errorOutput).toMatch(/gcp-authcalator v\d+\.\d+\.\d+.* with-prod for project my-proj/);
     expect(errorOutput).toContain("prod access acquired for eng@example.com on project my-proj");
-    expect(logOutput).not.toContain("requesting prod session");
+    // The manual-approval hint is deferred and must not appear in the fast path.
+    expect(errorOutput).not.toContain("approve");
+    expect(logOutput).not.toContain("with-prod for project");
     expect(logOutput).not.toContain("prod access acquired");
   });
 
@@ -752,7 +755,7 @@ describe("runWithProd", () => {
     expect(exitSpy).toHaveBeenCalledWith(0);
 
     const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
-    expect(errorOutput).toContain("falling back to per-request token mode");
+    // The operator-socket fallback is silent; acquisition still succeeds.
     expect(errorOutput).toContain("prod access acquired for human@example.com on project my-proj");
   });
 
@@ -993,7 +996,7 @@ describe("runWithProd nested sessions", () => {
 
     const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
     expect(errorOutput).toContain("reusing existing prod session for project parent-project");
-    expect(errorOutput).not.toContain("requesting prod session");
+    expect(errorOutput).not.toContain("prod access acquired");
   });
 
   test("passes through GCE_METADATA_HOST from parent session", async () => {
@@ -1174,7 +1177,7 @@ describe("runWithProd nested sessions", () => {
 
     // Should have gone through normal flow (new token fetch)
     const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
-    expect(errorOutput).toContain("requesting prod session");
+    expect(errorOutput).toContain("prod access acquired");
     expect(errorOutput).not.toContain("reusing existing prod session");
 
     // Should have new metadata proxy, not the parent's
@@ -1208,7 +1211,7 @@ describe("runWithProd nested sessions", () => {
     // Should have gone through normal flow
     const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
     expect(errorOutput).toContain("differs from active session");
-    expect(errorOutput).toContain("requesting prod session");
+    expect(errorOutput).toContain("prod access acquired");
     expect(errorOutput).not.toContain("reusing existing prod session");
 
     // New metadata proxy should be started

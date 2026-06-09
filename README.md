@@ -427,7 +427,7 @@ gcp-authcalator approve <id>
 gcp-authcalator deny <id>
 ```
 
-When the gate's confirmation module cannot show a GUI dialog or terminal prompt, it queues the request and prints the request ID to stderr with instructions. The `with-prod` command also prints the pending ID before requesting a session, so you can approve it immediately. Requests auto-deny after 120 seconds if not resolved.
+When the gate's confirmation module cannot show a GUI dialog or terminal prompt, it queues the request and prints the request ID to stderr with instructions. If no approval has arrived within 10 seconds, the `with-prod` command also prints the pending ID with the `gcp-authcalator approve <id>` hint, so you can approve it manually. Requests auto-deny after 120 seconds if not resolved.
 
 Both commands connect to the gate's **admin socket** (separate from the main socket, not mounted into devcontainers). They do not require `--project-id` — only `--admin-socket-path` is needed (defaults to `$XDG_RUNTIME_DIR/gcp-authcalator-admin/admin.sock`).
 

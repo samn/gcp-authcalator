@@ -1,7 +1,7 @@
 import { parseArgs } from "node:util";
-import { spawnSync } from "node:child_process";
 import { z } from "zod";
 import { loadConfig, mapCliArgs } from "./config.ts";
+import { formatVersion } from "./version.ts";
 import { runGate } from "./commands/gate.ts";
 import { runMetadataProxy } from "./commands/metadata-proxy.ts";
 import { runWithProd } from "./commands/with-prod.ts";
@@ -10,36 +10,9 @@ import { runKubeSetup } from "./commands/kube-setup.ts";
 import { runInitTls } from "./commands/init-tls.ts";
 import { runApprove } from "./commands/approve.ts";
 import { captureAndDeleteTlsBundleEnv } from "./tls/bundle.ts";
-import packageJson from "../package.json";
 
 // Run before any code below that may spawn a subprocess (e.g. getCommitSha).
 captureAndDeleteTlsBundleEnv();
-
-const VERSION = packageJson.version;
-
-function getCommitSha(): string {
-  // When compiled with --define, process.env.COMMIT_SHA is replaced with a literal string.
-  if (process.env.COMMIT_SHA) {
-    return process.env.COMMIT_SHA;
-  }
-  try {
-    const result = spawnSync("git", ["rev-parse", "--short", "HEAD"], {
-      timeout: 1000,
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    if (result.status === 0 && result.stdout) {
-      return Buffer.from(result.stdout).toString().trim();
-    }
-  } catch {
-    // git not available
-  }
-  return "";
-}
-
-function formatVersion(): string {
-  const sha = getCommitSha();
-  return sha ? `${VERSION} (${sha})` : VERSION;
-}
 
 const USAGE = `gcp-authcalator v${formatVersion()} — GCP auth escalator for development environments
 
@@ -202,8 +175,11 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
   }
 
   // Log version+sha to stderr so the running build is visible in any subcommand's
-  // logs (verifies the deployed binary matches what was built).
-  console.error(`gcp-authcalator v${formatVersion()} (${subcommand})`);
+  // logs (verifies the deployed binary matches what was built). with-prod prints
+  // its own project-aware banner once the target project is known, so skip it here.
+  if (subcommand !== "with-prod") {
+    console.error(`gcp-authcalator v${formatVersion()} (${subcommand})`);
+  }
 
   if (subcommand === "kube-setup") {
     await runKubeSetup();
