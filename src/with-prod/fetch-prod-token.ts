@@ -258,8 +258,14 @@ export async function revokeProdSession(
     await fetchFn(`${baseUrl}/session?id=${encodeURIComponent(sessionId)}`, {
       ...extraOpts,
       method: "DELETE",
+      // Bound the request: this is awaited on the exit path, so a hung or
+      // half-open gate socket must not block with-prod from exiting.
+      signal: AbortSignal.timeout(REVOKE_TIMEOUT_MS),
     });
   } catch {
-    // Best-effort cleanup — swallow errors
+    // Best-effort cleanup — swallow errors (including the timeout abort)
   }
 }
+
+/** Max time to wait for the best-effort session revoke on exit. */
+const REVOKE_TIMEOUT_MS = 2000;

@@ -22,13 +22,22 @@ const defaultProcFS: ProcFS = {
 };
 
 /**
- * Given a local TCP port, find the PID that owns the socket.
+ * Given the caller's local TCP port and the proxy's own listen port, find the
+ * PID that owns the connection to the proxy.
  *
- * 1. Parse /proc/net/tcp and /proc/net/tcp6 to find the socket inode for the given local port
+ * 1. Parse /proc/net/tcp and /proc/net/tcp6 to find the socket inode whose
+ *    local_address matches `localPort` AND whose rem_address is the proxy
+ *    (127.0.0.1:`proxyPort`). Matching the full pair is required because a
+ *    local source port is unique only within the 4-tuple — two ESTABLISHED
+ *    sockets can share a local port while connecting to different remotes.
  * 2. Scan /proc/{pid}/fd/ symlinks to find which PID holds that inode
  */
-export function getOwnerPid(localPort: number, fs: ProcFS = defaultProcFS): number | null {
-  const inode = findSocketInode(localPort, fs);
+export function getOwnerPid(
+  localPort: number,
+  proxyPort: number,
+  fs: ProcFS = defaultProcFS,
+): number | null {
+  const inode = findSocketInode(localPort, proxyPort, fs);
   if (inode === null) return null;
   return findPidByInode(inode, fs);
 }
@@ -60,29 +69,44 @@ export function isDescendantOf(
   return false;
 }
 
+/** Format a port as the 4-hex-digit uppercase form used in /proc/net/tcp. */
+function portToHex(port: number): string {
+  return port.toString(16).toUpperCase().padStart(4, "0");
+}
+
 /**
  * Parse /proc/net/tcp and /proc/net/tcp6 to find the inode of the socket
- * bound to the given local port on 127.0.0.1.
+ * connecting `localPort` on 127.0.0.1 to the proxy at 127.0.0.1:`proxyPort`.
  *
  * /proc/net/tcp format (whitespace-delimited):
  *   sl local_address rem_address st tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode
  *
- * local_address is hex IP:hex port (e.g., "0100007F:1F90" = 127.0.0.1:8080)
+ * local_address / rem_address are hex IP:hex port (e.g., "0100007F:1F90" =
+ * 127.0.0.1:8080)
  *
  * /proc/net/tcp6 uses 128-bit addresses. 127.0.0.1 appears as the
  * IPv4-mapped IPv6 address: 0000000000000000FFFF00000100007F
+ *
+ * Both endpoints share the same IP-prefix format within a given file, so the
+ * rem_address target is built from the same prefix as the local_address target.
  */
-function findSocketInode(localPort: number, fs: ProcFS): number | null {
-  const portHex = localPort.toString(16).toUpperCase().padStart(4, "0");
+function findSocketInode(localPort: number, proxyPort: number, fs: ProcFS): number | null {
+  const localPortHex = portToHex(localPort);
+  const proxyPortHex = portToHex(proxyPort);
 
   // Try /proc/net/tcp first (IPv4), then /proc/net/tcp6 (IPv6 / IPv4-mapped)
-  const targets: [string, string][] = [
-    ["/proc/net/tcp", `0100007F:${portHex}`],
-    ["/proc/net/tcp6", `0000000000000000FFFF00000100007F:${portHex}`],
+  const targets: { path: string; prefix: string }[] = [
+    { path: "/proc/net/tcp", prefix: "0100007F" },
+    { path: "/proc/net/tcp6", prefix: "0000000000000000FFFF00000100007F" },
   ];
 
-  for (const [path, localAddrTarget] of targets) {
-    const inode = findInodeInFile(path, localAddrTarget, fs);
+  for (const { path, prefix } of targets) {
+    const inode = findInodeInFile(
+      path,
+      `${prefix}:${localPortHex}`,
+      `${prefix}:${proxyPortHex}`,
+      fs,
+    );
     if (inode !== null) return inode;
   }
 
@@ -92,7 +116,12 @@ function findSocketInode(localPort: number, fs: ProcFS): number | null {
 /** TCP_ESTABLISHED state in /proc/net/tcp (hex). */
 const TCP_ESTABLISHED = "01";
 
-function findInodeInFile(path: string, localAddrTarget: string, fs: ProcFS): number | null {
+function findInodeInFile(
+  path: string,
+  localAddrTarget: string,
+  remAddrTarget: string,
+  fs: ProcFS,
+): number | null {
   let data: string;
   try {
     data = fs.readFileSync(path);
@@ -110,6 +139,13 @@ function findInodeInFile(path: string, localAddrTarget: string, fs: ProcFS): num
 
     const localAddr = fields[1]!.toUpperCase();
     if (localAddr !== localAddrTarget) continue;
+
+    // A local source port is unique only within the full 4-tuple. Require the
+    // remote end to be the proxy itself, so an unrelated socket that merely
+    // shares the local port (e.g. an authorized process's outbound connection
+    // to a different service) cannot be misattributed as the caller.
+    const remAddr = fields[2]!.toUpperCase();
+    if (remAddr !== remAddrTarget) continue;
 
     // LISTEN / TIME_WAIT / CLOSE_WAIT rows can share the same local
     // 5-tuple as a live connection; only ESTABLISHED is attributable.

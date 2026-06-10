@@ -1,5 +1,13 @@
-import { describe, expect, test, afterEach } from "bun:test";
-import { mkdtempSync, existsSync, statSync, rmSync, writeFileSync } from "node:fs";
+import { describe, expect, test, afterEach, spyOn } from "bun:test";
+import {
+  mkdtempSync,
+  existsSync,
+  statSync,
+  rmSync,
+  writeFileSync,
+  readFileSync,
+  readdirSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -182,6 +190,29 @@ describe("ensureTlsFiles", () => {
     expect(second.caCert).not.toBe(first.caCert);
     expect(second.serverCert).not.toBe(first.serverCert);
   });
+
+  test("leaves no temporary files behind after generation (atomic writes)", async () => {
+    const dir = join(makeTempDir(), "tls");
+    await ensureTlsFiles(dir);
+
+    const leftovers = readdirSync(dir).filter((e) => e.endsWith(".tmp"));
+    expect(leftovers).toEqual([]);
+  });
+
+  test("writes client-bundle.pem as well-formed PEM with newline-separated blocks", async () => {
+    const dir = join(makeTempDir(), "tls");
+    await ensureTlsFiles(dir);
+
+    const bundle = readFileSync(join(dir, "client-bundle.pem"), "utf-8");
+    // Concatenating PEM blocks without a separator glues the END/BEGIN markers
+    // into a run of 10 dashes, which standard PEM parsers (openssl, curl,
+    // python) reject.
+    expect(bundle).not.toContain("----------");
+    // The three expected blocks (CA cert, client cert, client key) must each be
+    // recoverable as standalone PEM.
+    const blocks = bundle.match(/-----BEGIN [A-Z ]+-----[\s\S]*?-----END [A-Z ]+-----/g);
+    expect(blocks).toHaveLength(3);
+  });
 });
 
 describe("loadTlsFiles", () => {
@@ -214,6 +245,45 @@ describe("loadAndValidateTlsFiles", () => {
   test("throws with init-tls hint when certs are missing", async () => {
     const dir = join(makeTempDir(), "empty-tls");
     await expect(loadAndValidateTlsFiles(dir)).rejects.toThrow(/init-tls/);
+  });
+
+  test("throws when the CA cert does not assert CA=true in BasicConstraints", async () => {
+    const dir = join(makeTempDir(), "tls");
+    await ensureTlsFiles(dir);
+
+    // Replace ca.pem with a leaf certificate (BasicConstraints cA=false). The
+    // extension is present, so merely checking for its existence is not enough
+    // — the CA bit itself must be asserted.
+    const leafCert = readFileSync(join(dir, "client.pem"), "utf-8");
+    writeFileSync(join(dir, "ca.pem"), leafCert);
+
+    await expect(loadAndValidateTlsFiles(dir)).rejects.toThrow(/CA=true/i);
+  });
+
+  test("warns (without failing startup) when client-bundle.pem is stale", async () => {
+    const dir = join(makeTempDir(), "tls");
+    await ensureTlsFiles(dir);
+
+    // Simulate a crash mid-regeneration that left an OLD bundle next to a
+    // freshly written, self-consistent individual chain: overwrite
+    // client-bundle.pem with a bundle from a different generation (different
+    // CA). The gate doesn't consume the bundle, so it must still start — but it
+    // should warn so the operator re-distributes the bundle.
+    const otherDir = join(makeTempDir(), "tls-other");
+    await ensureTlsFiles(otherDir);
+    const staleBundle = readFileSync(join(otherDir, "client-bundle.pem"), "utf-8");
+    writeFileSync(join(dir, "client-bundle.pem"), staleBundle);
+
+    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const files = await loadAndValidateTlsFiles(dir);
+      expect(files.caCert).toContain("-----BEGIN CERTIFICATE-----");
+      const warned = warnSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(warned).toMatch(/stale/i);
+      expect(warned).toMatch(/init-tls/);
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   test("throws with init-tls hint when CA cert is expired", async () => {

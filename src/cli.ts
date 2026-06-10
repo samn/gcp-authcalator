@@ -23,7 +23,7 @@ Commands:
   gate              Start the host-side token daemon
   metadata-proxy    Start the GCE metadata server emulator
   with-prod         Wrap a command with prod credentials
-  approve           List or approve pending prod access requests
+  approve           Approve a pending prod access request by ID
   deny              Deny a pending prod access request
   init-tls          Generate TLS certificates for remote devcontainer support
   kube-token        kubectl exec credential plugin (outputs ExecCredential JSON)

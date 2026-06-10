@@ -12,6 +12,16 @@ describe("generateServerCert", () => {
     expect(key).toContain("-----BEGIN PRIVATE KEY-----");
   });
 
+  test("server cert backdates notBefore to tolerate clock skew", async () => {
+    const ca = await generateCA();
+    const generatedAt = Date.now();
+    const { cert } = await generateServerCert(ca.caCert, ca.caKey);
+    const x509Cert = new x509.X509Certificate(cert);
+
+    expect(generatedAt - x509Cert.notBefore.getTime()).toBeGreaterThanOrEqual(60_000);
+    expect(generatedAt - x509Cert.notBefore.getTime()).toBeLessThan(60 * 60_000);
+  });
+
   test("server cert has correct subject", async () => {
     const ca = await generateCA();
     const { cert } = await generateServerCert(ca.caCert, ca.caKey);
@@ -106,6 +116,16 @@ describe("generateClientCert", () => {
 
     expect(cert).toContain("-----BEGIN CERTIFICATE-----");
     expect(key).toContain("-----BEGIN PRIVATE KEY-----");
+  });
+
+  test("client cert backdates notBefore to tolerate clock skew", async () => {
+    const ca = await generateCA();
+    const generatedAt = Date.now();
+    const { cert } = await generateClientCert(ca.caCert, ca.caKey);
+    const x509Cert = new x509.X509Certificate(cert);
+
+    expect(generatedAt - x509Cert.notBefore.getTime()).toBeGreaterThanOrEqual(60_000);
+    expect(generatedAt - x509Cert.notBefore.getTime()).toBeLessThan(60 * 60_000);
   });
 
   test("client cert has correct subject", async () => {

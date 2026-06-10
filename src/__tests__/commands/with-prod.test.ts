@@ -271,6 +271,57 @@ describe("runWithProd", () => {
     expect(logOutput).not.toContain("prod access acquired");
   });
 
+  test("awaits session revocation before exiting (DELETE /session is sent)", async () => {
+    // Gate the DELETE so we can prove process.exit does not fire until the
+    // revoke completes. With a fire-and-forget (un-awaited) revoke, exit would
+    // happen immediately and the request would never be transmitted.
+    const baseFetch = mockGateFetch();
+    let releaseRevoke!: () => void;
+    const revokeGate = new Promise<void>((resolve) => {
+      releaseRevoke = resolve;
+    });
+    const revokeCalls: string[] = [];
+    const recordingFetch = (async (url: string, init?: RequestInit) => {
+      const parsed = new URL(url);
+      if (parsed.pathname === "/session" && init?.method === "DELETE") {
+        await revokeGate;
+        revokeCalls.push(parsed.searchParams.get("id") ?? "");
+      }
+      return baseFetch(url as never, init as never);
+    }) as unknown as typeof globalThis.fetch;
+
+    const run = runWithProd(
+      {
+        project_id: "my-proj",
+        socket_path: "/tmp/gate.sock",
+        port: 8173,
+        admin_socket_path: "/tmp/test-admin.sock",
+      },
+      ["echo", "hello"],
+      {
+        fetchOptions: { fetchFn: recordingFetch },
+        spawnFn: mockSpawnCapture().mockSpawnFn,
+      },
+    );
+    // Swallow the eventual process.exit rejection so it isn't unhandled.
+    const settled = run.then(
+      () => "resolved",
+      (err: unknown) => err,
+    );
+
+    // The child has exited and cleanup has begun, but the revoke is blocked.
+    // process.exit must not have fired yet.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(revokeCalls).toEqual([]);
+
+    // Let the revoke complete; now exit should proceed.
+    releaseRevoke();
+    await settled;
+    expect(revokeCalls).toEqual(["test-session-id"]);
+    expect(exitSpy).toHaveBeenCalledWith(0);
+  });
+
   test("sets gcloudConfigDir permissions to 0o700 (owner-only)", async () => {
     const mockFetchFn = mockGateFetch();
 
@@ -331,6 +382,74 @@ describe("runWithProd", () => {
     }
 
     expect(getCapturedEnv().CLOUDSDK_CORE_PROJECT).toBe("alt-proj");
+  });
+
+  test("projectOverride satisfies the project requirement when no project_id is configured", async () => {
+    const mockFetchFn = mockGateFetch();
+    const { mockSpawnFn, getCapturedEnv } = mockSpawnCapture();
+
+    // No project_id in config; the override alone must be enough to proceed
+    // (rather than failing schema validation that demands project_id).
+    let threw: unknown;
+    try {
+      await runWithProd(
+        {
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
+        },
+        ["echo", "hello"],
+        {
+          fetchOptions: { fetchFn: mockFetchFn },
+          spawnFn: mockSpawnFn,
+          projectOverride: "override-proj",
+        },
+      );
+    } catch (err) {
+      threw = err;
+    }
+
+    // The only acceptable throw is the mocked process.exit, never a ZodError.
+    expect(threw).toBeInstanceOf(Error);
+    expect(threw).not.toBeInstanceOf(z.ZodError);
+    expect((threw as Error).message).toBe("process.exit called");
+    expect(getCapturedEnv().CLOUDSDK_CORE_PROJECT).toBe("override-proj");
+    expect(exitSpy).toHaveBeenCalledWith(0);
+  });
+
+  test("overrides GOOGLE_CLOUD_PROJECT/GCLOUD_PROJECT so client libraries target the prod project", async () => {
+    const mockFetchFn = mockGateFetch();
+    const { mockSpawnFn, getCapturedEnv } = mockSpawnCapture();
+
+    // A devcontainer-style parent env that points client libraries at a dev
+    // project. These must not leak through and override the target project.
+    const savedGcp = process.env.GOOGLE_CLOUD_PROJECT;
+    const savedGcloud = process.env.GCLOUD_PROJECT;
+    process.env.GOOGLE_CLOUD_PROJECT = "dev-project";
+    process.env.GCLOUD_PROJECT = "dev-project";
+
+    try {
+      await runWithProd(
+        {
+          project_id: "my-proj",
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
+        },
+        ["echo", "hello"],
+        { fetchOptions: { fetchFn: mockFetchFn }, spawnFn: mockSpawnFn },
+      );
+    } catch {
+      // process.exit mock throws
+    } finally {
+      if (savedGcp === undefined) delete process.env.GOOGLE_CLOUD_PROJECT;
+      else process.env.GOOGLE_CLOUD_PROJECT = savedGcp;
+      if (savedGcloud === undefined) delete process.env.GCLOUD_PROJECT;
+      else process.env.GCLOUD_PROJECT = savedGcloud;
+    }
+
+    expect(getCapturedEnv().GOOGLE_CLOUD_PROJECT).toBe("my-proj");
+    expect(getCapturedEnv().GCLOUD_PROJECT).toBe("my-proj");
   });
 
   test("sends X-Target-Project header with the override project on session creation", async () => {

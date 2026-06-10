@@ -1,3 +1,16 @@
+/**
+ * How far to backdate certificate `notBefore` timestamps. A few minutes of
+ * margin absorbs small clock differences between the host that mints certs and
+ * the client that validates them, so a slightly-ahead client clock doesn't
+ * reject a freshly issued cert as "not yet valid".
+ */
+export const CLOCK_SKEW_MS = 5 * 60 * 1000;
+
+/** notBefore for a freshly generated certificate, backdated for clock skew. */
+export function certNotBefore(): Date {
+  return new Date(Date.now() - CLOCK_SKEW_MS);
+}
+
 /** Generate a random serial number for X.509 certificates. */
 export function randomSerialNumber(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16));

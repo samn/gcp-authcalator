@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Security
+
+- The metadata proxy's PID-based caller validation now matches the caller
+  socket's full connection pair, not just its local port. A local TCP source
+  port is unique only within the 4-tuple, so an unauthorized process that bound
+  its source port to one already used by an authorized descendant's outbound
+  connection could be misattributed to that descendant and served a prod token.
+  `getOwnerPid` now also requires the socket's `rem_address` to be the proxy.
+
+### Fixed
+
+- `with-prod` now reliably revokes its prod session at the gate on exit. The
+  revocation request was previously fire-and-forget, so `process.exit` tore down
+  the event loop before the `DELETE /session` request was transmitted, leaving
+  the session alive until its TTL expired. The revoke is now awaited before exit.
+- The command-summary redaction shown in the approval dialog and written to the
+  audit log now redacts colon-separated secret arguments (e.g.
+  `--password:value`, `token:value`), not just `=`-separated ones. Previously a
+  matching secret key with a `:` separator leaked its value verbatim.
+- The prod token cache now coalesces concurrent refreshes. When a token entered
+  the 5-minute refresh margin, simultaneous metadata requests each triggered
+  their own gate refresh (and, in per-request mode, duplicate PAM grants and
+  audit entries). Concurrent callers now share a single in-flight refresh.
+- `stripControlChars` (used for all operator-visible strings: confirmation
+  dialogs, command summaries, TTY error messages) now also strips C1 control
+  characters (0x80–0x9f), including the single-byte CSI (0x9b). Previously only
+  C0 controls and DEL were removed.
+- `client-bundle.pem` is now written as well-formed PEM with newline-separated
+  blocks. Previously the CA cert, client cert, and client key were concatenated
+  without separators, gluing adjacent `-----END-----`/`-----BEGIN-----` markers
+  together so standard PEM consumers (openssl, curl, python) rejected the file.
+- TLS validation now rejects a CA certificate whose BasicConstraints does not
+  assert `CA=true`, rather than only checking that the extension is present
+  (leaf certs also carry BasicConstraints with `cA=false`).
+- Generated TLS certificates now backdate `notBefore` by 5 minutes to tolerate
+  clock skew, so a client whose clock is slightly ahead of the issuing host no
+  longer rejects a freshly minted certificate as "not yet valid".
+- TLS certificate files are now written atomically (write to a temp file, then
+  rename) so a crash mid-write can no longer leave a truncated key or cert at
+  the real path. TLS validation also now warns when `client-bundle.pem` is
+  stale (its CA no longer matches `ca.pem`, e.g. left behind by a crash during
+  regeneration) so the operator re-distributes it, without failing gate startup
+  over a client-only artifact.
+- `with-prod` now pins `GOOGLE_CLOUD_PROJECT` and `GCLOUD_PROJECT` to the target
+  project for the wrapped command. Google client libraries resolve the project
+  from these env vars before consulting the metadata server, so a parent value
+  (common in devcontainers) previously leaked through and could make a wrapped
+  program target the wrong project while holding prod credentials.
+
 ## [0.11.3] - 2026-06-09
 
 ### Changed

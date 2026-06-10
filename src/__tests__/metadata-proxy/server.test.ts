@@ -337,6 +337,41 @@ describe("startMetadataProxyServer", () => {
     }
   });
 
+  test("PID validation: works when bound to an ephemeral port (config.port === 0)", async () => {
+    // with-prod binds port: 0; the validator must match the caller socket's
+    // rem_address against the *actual* bound port, not config.port (=0).
+    const config: MetadataProxyConfig = {
+      project_id: "test-project",
+      service_account: "sa@test-project.iam.gserviceaccount.com",
+      socket_path: "/tmp/test-gate.sock",
+      admin_socket_path: "/tmp/test-admin.sock",
+      port: 0,
+    };
+
+    const customProvider: TokenProvider = {
+      getToken: async () => ({
+        access_token: "pid-validated-token",
+        expires_at: new Date(Date.now() + 3600_000),
+      }),
+    };
+
+    result = startMetadataProxyServer(config, {
+      tokenProvider: customProvider,
+      allowedAncestorPid: 1, // every process descends from init
+      quiet: true,
+    });
+
+    expect(result.server.port).toBeGreaterThan(0);
+    const res = await fetch(`http://127.0.0.1:${result.server.port}/`, {
+      headers: { "Metadata-Flavor": "Google" },
+    });
+    if (process.platform === "linux") {
+      expect(res.status).toBe(200);
+    } else {
+      expect(res.status).toBe(403);
+    }
+  });
+
   test("PID validation: rejects requests from non-descendant", async () => {
     const port = nextPort++;
     const config = makeConfig(port);

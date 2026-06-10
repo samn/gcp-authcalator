@@ -1,6 +1,6 @@
 import "reflect-metadata";
 import * as x509 from "@peculiar/x509";
-import { randomSerialNumber, keyToPem } from "./utils.ts";
+import { randomSerialNumber, keyToPem, certNotBefore } from "./utils.ts";
 
 /**
  * Generate a self-signed CA certificate with an ECDSA P-256 keypair.
@@ -16,7 +16,7 @@ export async function generateCA(): Promise<{ caCert: string; caKey: string }> {
   const cert = await x509.X509CertificateGenerator.createSelfSigned({
     serialNumber: randomSerialNumber(),
     name: "CN=gcp-authcalator CA",
-    notBefore: new Date(),
+    notBefore: certNotBefore(),
     notAfter: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000), // 90 days
     keys,
     signingAlgorithm: { name: "ECDSA", hash: "SHA-256" },
