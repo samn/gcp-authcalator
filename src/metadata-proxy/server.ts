@@ -66,10 +66,14 @@ export function startMetadataProxyServer(
     fetch(req, server) {
       if (ancestorPid !== undefined) {
         const addr = server.requestIP(req);
-        if (!addr) {
+        // Use the actually-bound port (server.port), not config.port: with-prod
+        // binds an ephemeral port (config.port === 0), and the PID validator
+        // matches the caller socket's rem_address against the proxy's real port.
+        const proxyPort = server.port;
+        if (!addr || proxyPort === undefined) {
           return new Response("Forbidden", { status: 403 });
         }
-        const ownerPid = getOwnerPid(addr.port);
+        const ownerPid = getOwnerPid(addr.port, proxyPort);
         if (ownerPid === null || !isDescendantOf(ownerPid, ancestorPid)) {
           return new Response("Forbidden", { status: 403 });
         }

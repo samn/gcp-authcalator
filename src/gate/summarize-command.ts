@@ -31,9 +31,11 @@ function redactArg(arg: string): string {
     return "***";
   }
 
-  // Redact the value portion of key=value pairs with sensitive keys
+  // Redact the value portion of key=value / key:value pairs with sensitive
+  // keys. SECRET_KEY_RE accepts both `=` and `:` separators, so find whichever
+  // one is present rather than assuming `=`.
   if (SECRET_KEY_RE.test(arg)) {
-    const sepIdx = arg.indexOf("=");
+    const sepIdx = arg.search(/[=:]/);
     if (sepIdx >= 0) {
       return arg.slice(0, sepIdx + 1) + "***";
     }

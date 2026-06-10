@@ -5,6 +5,27 @@ import { getOwnerPid, isDescendantOf, type ProcFS } from "../../metadata-proxy/p
 // Helpers to build fake /proc data
 // ---------------------------------------------------------------------------
 
+/**
+ * The proxy's own listen port used across these tests. getOwnerPid matches the
+ * caller socket's rem_address against the proxy, so sockets default to being
+ * connected to this port (the realistic case).
+ */
+const PROXY_PORT = 8173;
+
+function portHex(port: number): string {
+  return port.toString(16).toUpperCase().padStart(4, "0");
+}
+
+/** Build the rem_address hex ("IP:port") for 127.0.0.1:port (IPv4 /proc/net/tcp). */
+function rem4(port: number): string {
+  return `0100007F:${portHex(port)}`;
+}
+
+/** Build the rem_address hex for IPv4-mapped 127.0.0.1:port (/proc/net/tcp6). */
+function rem6(port: number): string {
+  return `0000000000000000FFFF00000100007F:${portHex(port)}`;
+}
+
 /** Realistic /proc/net/tcp header */
 const TCP_HEADER =
   "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode";
@@ -12,21 +33,32 @@ const TCP_HEADER =
 /**
  * Build a /proc/net/tcp line. port and inode are decimal, IP is always
  * 127.0.0.1. State defaults to "01" (TCP_ESTABLISHED) — the validator
- * filters out non-ESTABLISHED rows.
+ * filters out non-ESTABLISHED rows. `rem` is the rem_address field
+ * (hex "IP:port"), defaulting to the proxy (the realistic caller socket).
  */
-function tcpLine(slot: number, port: number, inode: number, state: string = "01"): string {
-  const portHex = port.toString(16).toUpperCase().padStart(4, "0");
+function tcpLine(
+  slot: number,
+  port: number,
+  inode: number,
+  state: string = "01",
+  rem: string = rem4(PROXY_PORT),
+): string {
   // 127.0.0.1 in little-endian hex = 0100007F
-  return `   ${slot}: 0100007F:${portHex} 00000000:0000 ${state} 00000000:00000000 00:00000000 00000000     0        0 ${inode} 1 0000000000000000 100 0 0 10 0`;
+  return `   ${slot}: 0100007F:${portHex(port)} ${rem} ${state} 00000000:00000000 00:00000000 00000000     0        0 ${inode} 1 0000000000000000 100 0 0 10 0`;
 }
 
 const TCP6_HEADER =
   "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode";
 
 /** Build a /proc/net/tcp6 line for IPv4-mapped 127.0.0.1. */
-function tcp6Line(slot: number, port: number, inode: number, state: string = "01"): string {
-  const portHex = port.toString(16).toUpperCase().padStart(4, "0");
-  return `   ${slot}: 0000000000000000FFFF00000100007F:${portHex} 00000000000000000000000000000000:0000 ${state} 00000000:00000000 00:00000000 00000000     0        0 ${inode} 1 0000000000000000 100 0 0 10 0`;
+function tcp6Line(
+  slot: number,
+  port: number,
+  inode: number,
+  state: string = "01",
+  rem: string = rem6(PROXY_PORT),
+): string {
+  return `   ${slot}: 0000000000000000FFFF00000100007F:${portHex(port)} ${rem} ${state} 00000000:00000000 00:00000000 00000000     0        0 ${inode} 1 0000000000000000 100 0 0 10 0`;
 }
 
 /** Build a /proc/<pid>/status string with given PPid. */
@@ -41,7 +73,7 @@ function statusFile(ppid: number): string {
  * `pids` maps pid → { ppid, fds: Map<fdNum, symlinkTarget> }
  */
 function fakeProcFS(opts: {
-  sockets?: { file: "tcp" | "tcp6"; port: number; inode: number; state?: string }[];
+  sockets?: { file: "tcp" | "tcp6"; port: number; inode: number; state?: string; rem?: string }[];
   pids?: Map<number, { ppid: number; fds?: Map<string, string> }>;
 }): ProcFS {
   const sockets = opts.sockets ?? [];
@@ -54,12 +86,12 @@ function fakeProcFS(opts: {
   const tcpContent =
     TCP_HEADER +
     "\n" +
-    tcpLines.map((s, i) => tcpLine(i, s.port, s.inode, s.state)).join("\n") +
+    tcpLines.map((s, i) => tcpLine(i, s.port, s.inode, s.state, s.rem)).join("\n") +
     "\n";
   const tcp6Content =
     TCP6_HEADER +
     "\n" +
-    tcp6Lines.map((s, i) => tcp6Line(i, s.port, s.inode, s.state)).join("\n") +
+    tcp6Lines.map((s, i) => tcp6Line(i, s.port, s.inode, s.state, s.rem)).join("\n") +
     "\n";
 
   return {
@@ -113,7 +145,7 @@ describe("getOwnerPid", () => {
       sockets: [{ file: "tcp", port: 8080, inode: 12345 }],
       pids: new Map([[42, { ppid: 1, fds: new Map([["3", "socket:[12345]"]]) }]]),
     });
-    expect(getOwnerPid(8080, fs)).toBe(42);
+    expect(getOwnerPid(8080, PROXY_PORT, fs)).toBe(42);
   });
 
   test("finds PID via /proc/net/tcp6 (IPv4-mapped IPv6)", () => {
@@ -121,7 +153,7 @@ describe("getOwnerPid", () => {
       sockets: [{ file: "tcp6", port: 9090, inode: 67890 }],
       pids: new Map([[99, { ppid: 1, fds: new Map([["5", "socket:[67890]"]]) }]]),
     });
-    expect(getOwnerPid(9090, fs)).toBe(99);
+    expect(getOwnerPid(9090, PROXY_PORT, fs)).toBe(99);
   });
 
   test("prefers tcp over tcp6 when both match", () => {
@@ -135,7 +167,7 @@ describe("getOwnerPid", () => {
         [20, { ppid: 1, fds: new Map([["3", "socket:[222]"]]) }],
       ]),
     });
-    expect(getOwnerPid(3000, fs)).toBe(10);
+    expect(getOwnerPid(3000, PROXY_PORT, fs)).toBe(10);
   });
 
   test("returns null when port not found in either tcp file", () => {
@@ -143,7 +175,17 @@ describe("getOwnerPid", () => {
       sockets: [{ file: "tcp", port: 8080, inode: 100 }],
       pids: new Map([[42, { ppid: 1, fds: new Map([["3", "socket:[100]"]]) }]]),
     });
-    expect(getOwnerPid(9999, fs)).toBeNull();
+    expect(getOwnerPid(9999, PROXY_PORT, fs)).toBeNull();
+  });
+
+  test("returns null when caller socket is connected to a different remote, not the proxy", () => {
+    // Same local port and ESTABLISHED, but the only matching socket connects
+    // somewhere other than the proxy → must not be attributed to any PID.
+    const fs = fakeProcFS({
+      sockets: [{ file: "tcp", port: 8080, inode: 100, rem: rem4(9999) }],
+      pids: new Map([[42, { ppid: 1, fds: new Map([["3", "socket:[100]"]]) }]]),
+    });
+    expect(getOwnerPid(8080, PROXY_PORT, fs)).toBeNull();
   });
 
   test("returns null when inode found but no PID owns it", () => {
@@ -151,16 +193,15 @@ describe("getOwnerPid", () => {
       sockets: [{ file: "tcp", port: 8080, inode: 12345 }],
       pids: new Map([[42, { ppid: 1, fds: new Map([["3", "socket:[99999]"]]) }]]),
     });
-    expect(getOwnerPid(8080, fs)).toBeNull();
+    expect(getOwnerPid(8080, PROXY_PORT, fs)).toBeNull();
   });
 
   test("returns null when /proc readdir fails", () => {
     const fs: ProcFS = {
       readFileSync(path: string) {
-        if (path === "/proc/net/tcp") {
-          const portHex = (8080).toString(16).toUpperCase().padStart(4, "0");
-          return `${TCP_HEADER}\n   0: 0100007F:${portHex} 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 55555 1 0000000000000000 100 0 0 10 0\n`;
-        }
+        // An ESTABLISHED socket connected to the proxy exists, so its inode is
+        // found — but /proc can't be listed to map the inode → PID.
+        if (path === "/proc/net/tcp") return `${TCP_HEADER}\n${tcpLine(0, 8080, 55555)}\n`;
         if (path === "/proc/net/tcp6") return `${TCP6_HEADER}\n`;
         throw new Error("ENOENT");
       },
@@ -171,8 +212,7 @@ describe("getOwnerPid", () => {
         throw new Error("ENOENT");
       },
     };
-    // Inode 55555 is found in /proc/net/tcp but /proc can't be listed
-    expect(getOwnerPid(8080, fs)).toBeNull();
+    expect(getOwnerPid(8080, PROXY_PORT, fs)).toBeNull();
   });
 
   test("skips PIDs with unreadable fd directories", () => {
@@ -184,7 +224,7 @@ describe("getOwnerPid", () => {
         [20, { ppid: 1, fds: new Map([["4", "socket:[44444]"]]) }],
       ]),
     });
-    expect(getOwnerPid(7070, fs)).toBe(20);
+    expect(getOwnerPid(7070, PROXY_PORT, fs)).toBe(20);
   });
 
   test("ignores TCP_LISTEN rows (state 0A)", () => {
@@ -200,7 +240,7 @@ describe("getOwnerPid", () => {
         [42, { ppid: 1, fds: new Map([["3", "socket:[200]"]]) }],
       ]),
     });
-    expect(getOwnerPid(8080, fs)).toBe(42);
+    expect(getOwnerPid(8080, PROXY_PORT, fs)).toBe(42);
   });
 
   test("ignores TCP_TIME_WAIT rows (state 06)", () => {
@@ -214,7 +254,7 @@ describe("getOwnerPid", () => {
         [42, { ppid: 1, fds: new Map([["3", "socket:[200]"]]) }],
       ]),
     });
-    expect(getOwnerPid(9000, fs)).toBe(42);
+    expect(getOwnerPid(9000, PROXY_PORT, fs)).toBe(42);
   });
 
   test("returns null when only LISTEN rows match the port", () => {
@@ -222,7 +262,7 @@ describe("getOwnerPid", () => {
       sockets: [{ file: "tcp", port: 8080, inode: 100, state: "0A" }],
       pids: new Map([[10, { ppid: 1, fds: new Map([["3", "socket:[100]"]]) }]]),
     });
-    expect(getOwnerPid(8080, fs)).toBeNull();
+    expect(getOwnerPid(8080, PROXY_PORT, fs)).toBeNull();
   });
 
   test("returns null when /proc/net/tcp is unreadable", () => {
@@ -237,7 +277,38 @@ describe("getOwnerPid", () => {
         throw new Error("ENOENT");
       },
     };
-    expect(getOwnerPid(8080, fs)).toBeNull();
+    expect(getOwnerPid(8080, PROXY_PORT, fs)).toBeNull();
+  });
+
+  // Finding #3: a local TCP source port is unique only as part of the full
+  // 4-tuple. The validator must attribute a connection to the process whose
+  // socket is actually connected to the proxy (rem_address == proxy), not just
+  // any ESTABLISHED socket sharing the local port. Matching on local port alone
+  // would let an unrelated socket be misattributed and bypass the gate.
+  test("attributes the connection to the socket connected to the proxy, not an unrelated socket sharing the local port", () => {
+    const clientPort = 40000;
+
+    const fs = fakeProcFS({
+      sockets: [
+        // First row: an AUTHORIZED descendant's unrelated outbound connection
+        // that happens to use the same local port, but to a DIFFERENT remote.
+        { file: "tcp", port: clientPort, inode: 1111, rem: rem4(9999) },
+        // Second row: the ATTACKER's actual connection to the proxy. Its
+        // rem_address IS the proxy — this is the socket that sent the request.
+        { file: "tcp", port: clientPort, inode: 2222, rem: rem4(PROXY_PORT) },
+      ],
+      pids: new Map([
+        // Authorized process (would pass the ancestry check downstream).
+        [5000, { ppid: 1, fds: new Map([["3", "socket:[1111]"]]) }],
+        // Attacker process (NOT a with-prod descendant).
+        [6000, { ppid: 1, fds: new Map([["3", "socket:[2222]"]]) }],
+      ]),
+    });
+
+    // Only the socket whose rem_address is the proxy is the true owner (PID
+    // 6000). Matching on local port alone would return the first row (PID
+    // 5000), misattributing the attacker's request to an authorized process.
+    expect(getOwnerPid(clientPort, PROXY_PORT, fs)).toBe(6000);
   });
 });
 

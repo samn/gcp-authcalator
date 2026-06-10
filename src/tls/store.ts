@@ -1,5 +1,5 @@
 import "reflect-metadata";
-import { readFileSync, writeFileSync, existsSync, chmodSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, chmodSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import * as x509 from "@peculiar/x509";
@@ -76,8 +76,12 @@ export async function ensureTlsFiles(tlsDir?: string, force?: boolean): Promise<
   writeSecure(paths.clientCert, client.cert);
   writeSecure(paths.clientKey, client.key);
 
-  // Write combined client bundle
-  const bundleContent = `${ca.caCert}${client.cert}${client.key}`;
+  // Write combined client bundle. Join with newlines and normalize trailing
+  // whitespace so PEM blocks stay separated — @peculiar's toString("pem") has
+  // no trailing newline, and a bare concatenation glues END/BEGIN markers
+  // together into invalid PEM that openssl/curl/python reject.
+  const bundleContent =
+    [ca.caCert, client.cert, client.key].map((pem) => pem.trimEnd()).join("\n") + "\n";
   writeSecure(paths.clientBundle, bundleContent);
 
   return {
@@ -132,10 +136,16 @@ export async function loadAndValidateTlsFiles(tlsDir?: string): Promise<TlsFiles
     throw new Error(`TLS client certificate is malformed in ${dir}` + hint);
   }
 
-  // Validate the CA has BasicConstraints CA=true
-  const bcExt = caCert.getExtension("2.5.29.19"); // basicConstraints OID
+  // Validate the CA has BasicConstraints with CA=true (not merely present —
+  // leaf certs also carry BasicConstraints with cA=false).
+  const bcExt = caCert.getExtension(x509.BasicConstraintsExtension);
   if (!bcExt) {
     throw new Error(`TLS CA certificate is missing BasicConstraints extension in ${dir}` + hint);
+  }
+  if (!bcExt.ca) {
+    throw new Error(
+      `TLS CA certificate does not assert CA=true in BasicConstraints in ${dir}` + hint,
+    );
   }
 
   // Validate expiry
@@ -186,6 +196,32 @@ export async function loadAndValidateTlsFiles(tlsDir?: string): Promise<TlsFiles
   } catch (err) {
     if (err instanceof Error && err.message.includes(dir)) throw err;
     throw new Error(`TLS client certificate signature verification failed in ${dir}` + hint);
+  }
+
+  // If a client bundle is present, warn (but don't fail startup) when it no
+  // longer matches the on-disk chain. A crash during regeneration can leave a
+  // stale bundle (old CA) beside a freshly written individual chain: the gate
+  // doesn't consume the bundle, so it starts fine on the validated individual
+  // chain — but remote clients shipping the stale bundle would fail the mTLS
+  // handshake with an opaque error. Surface it so the operator re-distributes,
+  // without taking the gate down over a client-only artifact.
+  const bundlePath = tlsPaths(dir).clientBundle;
+  if (existsSync(bundlePath)) {
+    try {
+      const bundle = parseClientBundle(readFileSync(bundlePath, "utf-8"));
+      const bundleCaSerial = new x509.X509Certificate(bundle.caCert).serialNumber;
+      if (bundleCaSerial !== caCert.serialNumber) {
+        console.warn(
+          `tls: client-bundle.pem in ${dir} is stale (its CA does not match ca.pem).` +
+            `\n  Re-run 'gcp-authcalator init-tls' and re-distribute the bundle to remote clients.`,
+        );
+      }
+    } catch {
+      console.warn(
+        `tls: client-bundle.pem in ${dir} is malformed and may be unusable by remote clients.` +
+          `\n  Re-run 'gcp-authcalator init-tls' to regenerate it.`,
+      );
+    }
   }
 
   return files;
@@ -309,9 +345,15 @@ function tlsPaths(dir: string) {
 }
 
 function writeSecure(filePath: string, content: string): void {
-  writeFileSync(filePath, content, { mode: 0o600 });
-  // Ensure permissions even if file already existed
-  chmodSync(filePath, 0o600);
+  // Write to a sibling temp file then atomically rename into place, so a crash
+  // mid-write can never leave a truncated key/cert at the real path. The temp
+  // lives in the same (0700) directory, so the rename stays on one filesystem
+  // and the secret is never world-visible.
+  const tmpPath = `${filePath}.tmp`;
+  writeFileSync(tmpPath, content, { mode: 0o600 });
+  // Ensure permissions even if the temp file already existed.
+  chmodSync(tmpPath, 0o600);
+  renameSync(tmpPath, filePath);
 }
 
 function isCertExpired(pem: string): boolean {

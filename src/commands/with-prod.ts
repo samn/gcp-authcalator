@@ -179,6 +179,10 @@ export async function runWithProd(
         GCE_METADATA_ROOT: nestedSession.metadataHost,
         CLOUDSDK_CORE_ACCOUNT: nestedSession.email,
         CLOUDSDK_CORE_PROJECT: nestedSession.projectId,
+        // Pin the client-library project vars to the session's project (see the
+        // main flow for why a leaked parent value would otherwise win).
+        GOOGLE_CLOUD_PROJECT: nestedSession.projectId,
+        GCLOUD_PROJECT: nestedSession.projectId,
         [PROD_SESSION_ENV_VAR]: nestedSession.metadataHost,
       };
 
@@ -192,10 +196,15 @@ export async function runWithProd(
   }
 
   // Normal flow: create a prod session and start a fresh proxy. The schema
-  // requires project_id, so the reassign below narrows effectiveProjectId
-  // to a definite string for the rest of the function.
-  const wpConfig = WithProdConfigSchema.parse(config);
-  effectiveProjectId = options.projectOverride ?? wpConfig.project_id;
+  // requires project_id; fold the CLI --project override in first so it can
+  // satisfy that requirement even when no project_id is configured. The parse
+  // then narrows effectiveProjectId to a definite string for the rest of the
+  // function (and still throws if neither a config value nor an override exists).
+  const configForParse: Config = options.projectOverride
+    ? { ...config, project_id: options.projectOverride }
+    : config;
+  const wpConfig = WithProdConfigSchema.parse(configForParse);
+  effectiveProjectId = wpConfig.project_id;
 
   console.error(startupBanner(effectiveProjectId));
 
@@ -366,6 +375,12 @@ export async function runWithProd(
         // Tokens still flow through the PID-validated metadata proxy.
         CLOUDSDK_CORE_ACCOUNT: initialEmail,
         CLOUDSDK_CORE_PROJECT: effectiveProjectId,
+        // Google client libraries (google-auth for Python/Node/etc.) resolve
+        // the project from these env vars *before* the metadata server, so a
+        // parent GOOGLE_CLOUD_PROJECT/GCLOUD_PROJECT (common in devcontainers)
+        // would otherwise silently override the target project. Pin them.
+        GOOGLE_CLOUD_PROJECT: effectiveProjectId,
+        GCLOUD_PROJECT: effectiveProjectId,
         [PROD_SESSION_ENV_VAR]: metadataHost,
       },
       wpConfig.env,
@@ -392,7 +407,9 @@ export async function runWithProd(
     // Best-effort revoke the session so gate can clean up immediately.
     // In per-request mode (operator socket) there is no session to revoke.
     if (sessionId) {
-      void revokeProdSession(conn, sessionId, {
+      // Await so the DELETE is actually transmitted before process.exit() below
+      // tears down the event loop. revokeProdSession swallows its own errors.
+      await revokeProdSession(conn, sessionId, {
         fetchFn: options.fetchOptions?.fetchFn,
       });
     }

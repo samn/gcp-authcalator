@@ -730,7 +730,7 @@ All other setup requirements from the single-operator section still apply.
 - It does **not** issue sessions. `POST /session` and `GET /token?session=…` return 403 on the operator socket. There is no 8-hour bearer-token refresh credential to steal.
 - It does **not** affect the main socket. Agent flows are unchanged: dev tokens are served immediately as before; prod requests still trigger the standard confirmation dialog.
 - It does **not** loosen the existing PAM allowlist. `auto_approve_pam_policies` is required to be a subset of `pam_allowed_policies`. Out-of-allowlist requests on the operator socket return a clean 403 — they do not fall through to a prompt.
-- It does **not** carve out a separate rate-limit budget. The operator socket shares the existing 10/minute prod limiter with the main socket, so a flooding agent surfaces as a real rate-limit signal.
+- It does **not** carve out a separate rate-limit budget. The operator socket shares the existing 20/minute prod limiter with the main socket, so a flooding agent surfaces as a real rate-limit signal.
 
 **Audit a window of auto-approvals:**
 

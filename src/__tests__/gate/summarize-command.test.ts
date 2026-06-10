@@ -125,6 +125,22 @@ describe("summarizeCommand", () => {
     expect(result).toBe("tool --password=***");
   });
 
+  test("redacts colon-separated secret values", () => {
+    const result = summarizeCommand(["tool", "--password:hunter2secret"]);
+
+    expect(result).toBeDefined();
+    expect(result).toBe("tool --password:***");
+    expect(result).not.toContain("hunter2secret");
+  });
+
+  test("redacts colon-separated token values", () => {
+    const result = summarizeCommand(["tool", "token:abcdef"]);
+
+    expect(result).toBeDefined();
+    expect(result).toBe("tool token:***");
+    expect(result).not.toContain("abcdef");
+  });
+
   test("does not redact secret key without equals sign", () => {
     // SECRET_KEY_RE requires = or : at the end; bare --password is just a flag
     const result = summarizeCommand(["tool", "--password"]);

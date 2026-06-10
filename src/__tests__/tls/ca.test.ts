@@ -37,6 +37,18 @@ describe("generateCA", () => {
     expect(validityDays).toBeLessThan(91);
   });
 
+  test("CA cert backdates notBefore to tolerate clock skew", async () => {
+    const generatedAt = Date.now();
+    const { caCert } = await generateCA();
+    const cert = new x509.X509Certificate(caCert);
+
+    // notBefore must be at least a minute before generation so a client whose
+    // clock is slightly ahead doesn't reject the cert as "not yet valid".
+    expect(generatedAt - cert.notBefore.getTime()).toBeGreaterThanOrEqual(60_000);
+    // ...but not absurdly far in the past.
+    expect(generatedAt - cert.notBefore.getTime()).toBeLessThan(60 * 60_000);
+  });
+
   test("CA cert has basicConstraints with cA=true and pathLength=0", async () => {
     const { caCert } = await generateCA();
     const cert = new x509.X509Certificate(caCert);

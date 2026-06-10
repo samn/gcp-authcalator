@@ -1,6 +1,6 @@
 import "reflect-metadata";
 import * as x509 from "@peculiar/x509";
-import { randomSerialNumber, keyToPem, pemToArrayBuffer } from "./utils.ts";
+import { randomSerialNumber, keyToPem, pemToArrayBuffer, certNotBefore } from "./utils.ts";
 
 /**
  * Generate a server certificate signed by the given CA.
@@ -30,7 +30,7 @@ export async function generateServerCert(
     serialNumber: randomSerialNumber(),
     subject: "CN=gcp-authcalator server",
     issuer: caCertObj.subject,
-    notBefore: new Date(),
+    notBefore: certNotBefore(),
     notAfter: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000), // 90 days
     publicKey: keys.publicKey,
     signingKey: caKeyObj,
@@ -81,7 +81,7 @@ export async function generateClientCert(
     serialNumber: randomSerialNumber(),
     subject: "CN=gcp-authcalator client",
     issuer: caCertObj.subject,
-    notBefore: new Date(),
+    notBefore: certNotBefore(),
     notAfter: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000), // 90 days
     publicKey: keys.publicKey,
     signingKey: caKeyObj,
