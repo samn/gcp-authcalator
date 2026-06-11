@@ -18,6 +18,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- PAM grant rotation now ends the gate's own grants with `grants:withdraw`
+  (the requester's operation, v1beta) instead of `grants:revoke`, which
+  requires the approver/admin-level `privilegedaccessmanager.grants.revoke`
+  permission. Previously, engineers without that permission hit a rotation
+  deadlock at every grant refresh: the revoke failed with 403, the follow-up
+  create kept conflicting with the still-open grant, and no new grant was
+  created until the old one expired on its own.
+- The open-grant recovery scan now only considers grants requested by the
+  gate's own identity. Previously, on a shared entitlement, the scan could
+  reuse another engineer's active grant (wrong identity and expiry) or
+  attempt to end other engineers' stale grants.
+- Failed PAM grant rotations are now logged to the gate's console in addition
+  to the audit log, so a refresh failure is visible in the daemon log instead
+  of only in the client's 500 response.
 - `with-prod` now reliably revokes its prod session at the gate on exit. The
   revocation request was previously fire-and-forget, so `process.exit` tore down
   the event loop before the `DELETE /session` request was transmitted, leaving

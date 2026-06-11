@@ -180,6 +180,9 @@ export async function startGateServer(
 
     pam = createPamModule(auth.getSourceAccessToken, {
       grantDurationSeconds: pamGrantTtlSeconds,
+      // Scope open-grant scans to our own grants — shared entitlements list
+      // every team member's grants and only ours may be reused or withdrawn.
+      getRequesterEmail: auth.getIdentityEmail,
     });
 
     pamDefaultPolicy = resolveEntitlementPath(config.pam_policy, config.project_id, pamLocation);
@@ -385,7 +388,7 @@ export async function startGateServer(
     pendingQueue.denyAll();
     sessionManager.revokeAll();
     if (pam) {
-      await pam.revokeAll();
+      await pam.withdrawAll();
     }
     stop();
     process.exit(0);
