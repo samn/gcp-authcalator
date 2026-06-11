@@ -63,14 +63,16 @@
 //   coalesce onto one rotation rather than racing.
 // ---------------------------------------------------------------------------
 
-const PAM_API_BASE = "https://privilegedaccessmanager.googleapis.com/v1";
+const PAM_HOST = "https://privilegedaccessmanager.googleapis.com";
+
+const PAM_API_BASE = `${PAM_HOST}/v1`;
 
 /**
  * `grants.withdraw` (and polling of the Operation it returns) lives on the
  * v1beta surface only — v1 ships revoke but not withdraw. Everything else
  * stays on v1.
  */
-const PAM_API_BASE_V1BETA = "https://privilegedaccessmanager.googleapis.com/v1beta";
+const PAM_API_BASE_V1BETA = `${PAM_HOST}/v1beta`;
 
 /** Fallback grant duration when not configured (1 hour). */
 const FALLBACK_GRANT_DURATION_SECONDS = 3600;
@@ -432,12 +434,17 @@ export function createPamModule(
     /** First active grant with usable remaining lifetime, if any. */
     usable?: PamGrantResponse & { name: string };
     /**
-     * Active grants whose computed expiry has already passed. These are
-     * what's blocking createGrant via PAM's state lag — the recovery path
-     * withdraws them and retries.
+     * Our own non-terminal grants that hold the open-grant slot without
+     * being usable: active grants whose computed expiry has passed (PAM's
+     * state lag) and still-pending grants (APPROVAL_AWAITED / SCHEDULED /
+     * ACTIVATING — e.g. orphaned by a poll timeout in a previous run).
+     * These are what's blocking createGrant — the recovery path withdraws
+     * them and retries.
      */
-    stale: Array<PamGrantResponse & { name: string }>;
+    blocking: Array<PamGrantResponse & { name: string }>;
     scanned: number;
+    /** Non-terminal grants excluded because they belong to other requesters. */
+    skippedOtherRequester: number;
   }
 
   async function scanForOpenGrants(entitlementPath: string): Promise<OpenGrantScan> {
@@ -459,8 +466,9 @@ export function createPamModule(
       requester === undefined || g.requester?.toLowerCase() === requester;
 
     const baseUrl = `${PAM_API_BASE}/${entitlementPath}/grants?pageSize=${LIST_GRANTS_PAGE_SIZE}`;
-    const stale: Array<PamGrantResponse & { name: string }> = [];
+    const blocking: Array<PamGrantResponse & { name: string }> = [];
     let scanned = 0;
+    let skippedOtherRequester = 0;
     let pageToken: string | undefined;
 
     for (let page = 0; page < LIST_GRANTS_MAX_PAGES; page++) {
@@ -480,22 +488,28 @@ export function createPamModule(
       scanned += grants.length;
 
       // Once we find a usable grant we're done — the caller wants to reuse
-      // it directly without withdrawing the stale ones (they'll age out on
-      // their own and don't block anything).
+      // it directly without withdrawing the blocking ones (they'll age out
+      // on their own once we stop conflicting with them).
       for (const g of grants) {
-        if (!isActiveState(g.state) || typeof g.name !== "string" || !isOwnGrant(g)) continue;
-        const named = g as PamGrantResponse & { name: string };
-        if (hasUsableLifetime(computeGrantExpiry(named))) {
-          return { usable: named, stale, scanned };
+        if (typeof g.name !== "string" || !g.state || isTerminalState(g.state)) continue;
+        if (!isOwnGrant(g)) {
+          skippedOtherRequester++;
+          continue;
         }
-        stale.push(named);
+        const named = g as PamGrantResponse & { name: string };
+        if (isActiveState(g.state) && hasUsableLifetime(computeGrantExpiry(named))) {
+          return { usable: named, blocking, scanned, skippedOtherRequester };
+        }
+        // Active-but-expired (state lag) or still pending — either way it
+        // holds the open-grant slot and withdraw can clear it.
+        blocking.push(named);
       }
 
       if (!data.nextPageToken) break;
       pageToken = data.nextPageToken;
     }
 
-    return { stale, scanned };
+    return { blocking, scanned, skippedOtherRequester };
   }
 
   async function createGrantWithRecovery(
@@ -507,33 +521,50 @@ export function createPamModule(
 
     // 409 / 400 FAILED_PRECONDITION ("open Grant"): another grant of ours is
     // open for the same privileged access. Scan to learn whether it's usable
-    // (reuse it) or stale (PAM's state lags actual expiry — withdraw and
-    // retry). withdrawGrantAndWait polls the LRO so a single retry suffices.
+    // (reuse it) or merely blocking (expired-but-laggy or stuck pending —
+    // withdraw and retry). withdrawGrantAndWait polls the LRO so a single
+    // retry suffices.
     const scan = await scanForOpenGrants(entitlementPath);
     if (scan.usable) return scan.usable;
 
-    if (scan.stale.length === 0) {
+    if (scan.blocking.length === 0) {
+      const otherNote =
+        scan.skippedOtherRequester > 0
+          ? `; ${scan.skippedOtherRequester} open grant(s) belong to other requesters`
+          : "";
       throw new Error(
-        `PAM grant conflict but no active grant of ours found for "${entitlementPath}" ` +
-          `(scanned ${scan.scanned} grant(s) across ${LIST_GRANTS_MAX_PAGES} page(s))`,
+        `PAM grant conflict but no open grant of ours found for "${entitlementPath}" ` +
+          `(scanned ${scan.scanned} grant(s) across ${LIST_GRANTS_MAX_PAGES} page(s)${otherNote})`,
       );
     }
 
-    await Promise.allSettled(
-      scan.stale.map((g) => withdrawGrantAndWait(g.name, "clearing stale grant before retry")),
-    );
+    const withdrawn = (
+      await Promise.all(
+        scan.blocking.map((g) => withdrawGrantAndWait(g.name, "clearing blocking grant on retry")),
+      )
+    ).filter(Boolean).length;
 
     const retry = await createGrantOnce(entitlementPath, justification);
     if (retry.kind === "ok") return retry.grant;
 
     // The retry still conflicts after we waited for withdraw to complete.
     // Surface a distinct error so this doesn't look like the original
-    // "no active grant found" deadlock.
-    throw new Error(
-      `PAM grant conflict persists after withdrawing ${scan.stale.length} stale grant(s) ` +
-        `for "${entitlementPath}"`,
-    );
+    // "no open grant found" deadlock, and don't claim withdrawals that
+    // never landed — the withdraw failures themselves are in the gate log.
+    const detail =
+      withdrawn === scan.blocking.length
+        ? `after withdrawing ${scan.blocking.length} blocking grant(s)`
+        : `and only ${withdrawn} of ${scan.blocking.length} blocking grant(s) could be withdrawn ` +
+          `(see gate log for withdraw errors)`;
+    throw new Error(`PAM grant conflict persists ${detail} for "${entitlementPath}"`);
   }
+
+  /**
+   * Thrown when a polled grant lands in a terminal state. Distinguished so
+   * the rotation cleanup path knows the grant is already closed and skips
+   * the best-effort withdraw it performs for still-pending grants.
+   */
+  class GrantTerminalStateError extends Error {}
 
   async function pollGrant(grantName: string): Promise<PamGrantResponse> {
     const deadline = now() + POLL_TIMEOUT_MS;
@@ -558,7 +589,9 @@ export function createPamModule(
       }
 
       if (isTerminalState(grant.state)) {
-        throw new Error(`PAM grant entered terminal state ${grant.state}: ${grantName}`);
+        throw new GrantTerminalStateError(
+          `PAM grant entered terminal state ${grant.state}: ${grantName}`,
+        );
       }
 
       // Still pending (APPROVAL_AWAITED, ACTIVATING, SCHEDULED, etc.) —
@@ -651,7 +684,21 @@ export function createPamModule(
       throw new Error("PAM API returned a grant with no resource name");
     }
 
-    const activated = isActiveState(grant.state) ? grant : await pollGrant(grant.name);
+    let activated = grant;
+    if (!isActiveState(grant.state)) {
+      try {
+        activated = await pollGrant(grant.name);
+      } catch (err) {
+        // A grant that never activated (poll timeout or API failure) still
+        // holds the open-grant slot and would 409-block every follow-up
+        // create. Withdraw it best-effort before surfacing the failure;
+        // terminal grants are already closed and need no cleanup.
+        if (!(err instanceof GrantTerminalStateError)) {
+          await withdrawGrantAndWait(grant.name, "cleaning up grant that failed to activate");
+        }
+        throw err;
+      }
+    }
     const entry = cacheGrant(entitlementPath, activated);
 
     return {
@@ -714,12 +761,16 @@ export function createPamModule(
    * End one of our own grants via `grants:withdraw` and wait for the LRO.
    * `reason` is local log context only — WithdrawGrantRequest has no fields,
    * so the request body must be empty.
+   *
+   * Best-effort: never throws. Returns whether PAM accepted the withdraw
+   * request, so callers can report failures accurately (LRO confirmation
+   * remains best-effort and does not affect the result).
    */
   async function withdrawGrantAndWait(
     grantName: string,
     reason: string,
     deadlineMs: number = WITHDRAW_OP_TIMEOUT_MS,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const startedAt = now();
     try {
       const url = `${PAM_API_BASE_V1BETA}/${grantName}:withdraw`;
@@ -728,33 +779,37 @@ export function createPamModule(
       if (!res.ok) {
         const text = await res.text();
         console.error(`pam: withdraw ${grantName} (${reason}) failed: ${res.status} ${text}`);
-        return;
+        return false;
       }
 
       const op = (await res.json().catch(() => ({}))) as PamOperation;
       if (op.done || !op.name) {
         // Synchronous withdraw or untrackable response — assume done.
         if (op.error) {
-          console.error(`pam: withdraw ${grantName} operation error: ${JSON.stringify(op.error)}`);
+          console.error(
+            `pam: withdraw ${grantName} (${reason}) operation error: ${JSON.stringify(op.error)}`,
+          );
         }
-        return;
+        return true;
       }
 
       const remaining = deadlineMs - (now() - startedAt);
       if (remaining > 0) {
         await pollWithdrawOperation(op.name, remaining);
       }
+      return true;
     } catch (err) {
       console.error(
-        `pam: withdraw ${grantName} threw: ${err instanceof Error ? err.message : String(err)}`,
+        `pam: withdraw ${grantName} (${reason}) threw: ${err instanceof Error ? err.message : String(err)}`,
       );
+      return false;
     }
   }
 
   // Fire-and-forget: deadline 0 means withdrawGrantAndWait POSTs the
   // withdraw, reads its Operation response, and skips polling. Used on
   // shutdown where we want the request landed but not the LRO confirmation.
-  function withdrawGrantFireAndForget(grantName: string, reason: string): Promise<void> {
+  function withdrawGrantFireAndForget(grantName: string, reason: string): Promise<boolean> {
     return withdrawGrantAndWait(grantName, reason, 0);
   }
 

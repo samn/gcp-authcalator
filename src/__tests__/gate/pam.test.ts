@@ -358,7 +358,7 @@ describe("ensureGrant", () => {
       { status: 200, body: { grants: [] } },
     ]);
 
-    await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow("no active grant of ours found");
+    await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow("no open grant of ours found");
   });
 
   test("throws when grant is denied during polling", async () => {
@@ -445,7 +445,7 @@ describe("ensureGrant", () => {
       { status: 200, body: { grants: [] } },
     ]);
 
-    await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow("no active grant of ours found");
+    await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow("no open grant of ours found");
   });
 
   test("throws on 400 FAILED_PRECONDITION without 'open Grant' phrase", async () => {
@@ -646,7 +646,7 @@ describe("ensureGrant", () => {
     });
 
     await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow(
-      /no active grant of ours found.*scanned \d+ grant\(s\) across 10 page\(s\)/,
+      /no open grant of ours found.*scanned \d+ grant\(s\) across 10 page\(s\)/,
     );
     expect(pages).toBe(10);
   });
@@ -1328,6 +1328,129 @@ describe("ensureGrant", () => {
     await pam.withdrawAll();
     expect(withdrawnNames).toHaveLength(1);
   });
+
+  test("rotation failure is logged to the console, not just thrown", async () => {
+    // The thrown error reaches the client and the audit file, but the gate's
+    // console log must show it too — otherwise a failed rotation looks
+    // silent in the daemon log (the original bug report symptom).
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { pam } = makeModule([{ status: 500, body: { error: { message: "boom" } } }]);
+      await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow("PAM API error (500)");
+      const logged = errorSpy.mock.calls.map((c) => String(c[0]));
+      expect(logged.some((m) => m.includes(`grant rotation failed for ${entitlementPath}`))).toBe(
+        true,
+      );
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  test("withdraws the just-created grant when activation polling times out", async () => {
+    // A grant that never activates (e.g. approval never arrives) still
+    // holds the open-grant slot; leaving it behind would 409-block every
+    // follow-up create. The failure path must withdraw it best-effort.
+    const grantName = `${entitlementPath}/grants/grant-1`;
+    let currentTime = 0;
+    const withdrawn: string[] = [];
+
+    const pam = createPamModule(async () => "token", {
+      fetchFn: (async (url: string, init?: RequestInit) => {
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (method === "POST" && url.includes(":withdraw")) {
+          withdrawn.push(url);
+          return new Response(JSON.stringify({ name: "op-1", done: true }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        // Create and every activation poll: the grant stays pending while
+        // each poll advances time past the 120s deadline.
+        if (method === "GET") currentTime += 200_000;
+        return new Response(JSON.stringify({ name: grantName, state: "APPROVAL_AWAITED" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }) as unknown as typeof globalThis.fetch,
+      now: () => currentTime,
+      sleepFn: () => Promise.resolve(),
+    });
+
+    await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow("was not activated within");
+    expect(withdrawn).toHaveLength(1);
+    expect(withdrawn[0]).toContain(grantName);
+  });
+
+  test("does not withdraw a grant that entered a terminal state during polling", async () => {
+    // Terminal grants no longer hold the open-grant slot — cleanup would be
+    // a wasted (and confusingly logged) API call.
+    const grantName = `${entitlementPath}/grants/grant-1`;
+    let withdrawCalls = 0;
+
+    const pam = createPamModule(async () => "token", {
+      fetchFn: (async (url: string, init?: RequestInit) => {
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (method === "POST" && url.includes(":withdraw")) {
+          withdrawCalls++;
+          return new Response("{}", { status: 200 });
+        }
+        if (method === "POST") {
+          return new Response(JSON.stringify({ name: grantName, state: "APPROVAL_AWAITED" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify({ name: grantName, state: "DENIED" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }) as unknown as typeof globalThis.fetch,
+      sleepFn: () => Promise.resolve(),
+    });
+
+    await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow("terminal state DENIED");
+    expect(withdrawCalls).toBe(0);
+  });
+
+  test("persistent conflict error reports withdraw failures instead of claiming success", async () => {
+    // When the blocking grant can't be withdrawn (e.g. the v1beta surface
+    // is blocked by policy), the conflict error must not assert that the
+    // withdrawals happened — that misdirects debugging away from the
+    // actual withdraw failure in the gate log.
+    const currentTime = 10_000_000;
+    const staleGrant = {
+      ...makeActivatedGrant(
+        `${entitlementPath}/grants/stale-active`,
+        new Date(currentTime - 2 * 60 * 60 * 1000).toISOString(),
+      ),
+      state: "ACTIVE",
+    };
+
+    const pam = createPamModule(async () => "token", {
+      fetchFn: (async (url: string, init?: RequestInit) => {
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (method === "POST" && url.includes(":withdraw")) {
+          return new Response(JSON.stringify({ error: { message: "blocked" } }), { status: 403 });
+        }
+        if (method === "GET" && /\/grants\?pageSize=\d+/.test(url)) {
+          return new Response(JSON.stringify({ grants: [staleGrant] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        // Both creates 409.
+        return new Response(JSON.stringify({ error: { message: "Already exists" } }), {
+          status: 409,
+          headers: { "Content-Type": "application/json" },
+        });
+      }) as unknown as typeof globalThis.fetch,
+      now: () => currentTime,
+    });
+
+    await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow(
+      /grant conflict persists and only 0 of 1 blocking grant\(s\) could be withdrawn/,
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1877,23 +2000,6 @@ describe("withdraw API surface", () => {
       `https://privilegedaccessmanager.googleapis.com/v1beta/${operationName}`,
     );
   });
-
-  test("rotation failure is logged to the console, not just thrown", async () => {
-    // The thrown error reaches the client and the audit file, but the gate's
-    // console log must show it too — otherwise a failed rotation looks
-    // silent in the daemon log (the original bug report symptom).
-    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
-    try {
-      const { pam } = makeModule([{ status: 500, body: { error: { message: "boom" } } }]);
-      await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow("PAM API error (500)");
-      const logged = errorSpy.mock.calls.map((c) => String(c[0]));
-      expect(logged.some((m) => m.includes(`grant rotation failed for ${entitlementPath}`))).toBe(
-        true,
-      );
-    } finally {
-      errorSpy.mockRestore();
-    }
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1945,18 +2051,18 @@ describe("scanForOpenGrants requester filtering", () => {
   test("does not reuse another requester's usable grant; withdraws only its own stale grant", async () => {
     const currentTime = 10_000_000;
     const teammateUsable = {
-      name: `${entitlementPath}/grants/teammate-usable`,
-      state: "ACTIVE",
+      ...makeActivatedGrant(
+        `${entitlementPath}/grants/teammate-usable`,
+        new Date(currentTime).toISOString(),
+      ),
       requester: "teammate@example.com",
-      createTime: new Date(currentTime).toISOString(),
-      requestedDuration: "3600s",
     };
     const ownStale = {
-      name: `${entitlementPath}/grants/own-stale`,
-      state: "ACTIVE",
+      ...makeActivatedGrant(
+        `${entitlementPath}/grants/own-stale`,
+        new Date(currentTime - 2 * 60 * 60 * 1000).toISOString(),
+      ),
       requester: "me@example.com", // lowercase — must still match ownEmail
-      createTime: new Date(currentTime - 2 * 60 * 60 * 1000).toISOString(),
-      requestedDuration: "3600s",
     };
     const freshName = `${entitlementPath}/grants/fresh`;
     const withdrawn: string[] = [];
@@ -1964,12 +2070,7 @@ describe("scanForOpenGrants requester filtering", () => {
     const pam = makeFilteringModule([teammateUsable, ownStale], {
       currentTime,
       onWithdraw: (url) => withdrawn.push(url),
-      createAfterRetry: {
-        name: freshName,
-        state: "ACTIVATED",
-        createTime: new Date(currentTime).toISOString(),
-        requestedDuration: "3600s",
-      },
+      createAfterRetry: makeActivatedGrant(freshName, new Date(currentTime).toISOString()),
     });
 
     const result = await pam.ensureGrant(entitlementPath);
@@ -1983,20 +2084,18 @@ describe("scanForOpenGrants requester filtering", () => {
   test("throws without withdrawing anything when only other requesters' grants exist", async () => {
     const currentTime = 10_000_000;
     const teammateStale = {
-      name: `${entitlementPath}/grants/teammate-stale`,
-      state: "ACTIVE",
+      ...makeActivatedGrant(
+        `${entitlementPath}/grants/teammate-stale`,
+        new Date(currentTime - 2 * 60 * 60 * 1000).toISOString(),
+      ),
       requester: "teammate@example.com",
-      createTime: new Date(currentTime - 2 * 60 * 60 * 1000).toISOString(),
-      requestedDuration: "3600s",
     };
     // A grant with no requester field can't be attributed to us — never
     // reuse or withdraw it.
-    const unattributedUsable = {
-      name: `${entitlementPath}/grants/unattributed`,
-      state: "ACTIVE",
-      createTime: new Date(currentTime).toISOString(),
-      requestedDuration: "3600s",
-    };
+    const unattributedUsable = makeActivatedGrant(
+      `${entitlementPath}/grants/unattributed`,
+      new Date(currentTime).toISOString(),
+    );
     const withdrawn: string[] = [];
 
     const pam = makeFilteringModule([teammateStale, unattributedUsable], {
@@ -2004,18 +2103,23 @@ describe("scanForOpenGrants requester filtering", () => {
       onWithdraw: (url) => withdrawn.push(url),
     });
 
-    await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow("no active grant of ours found");
+    // The error must say that open grants were excluded by the requester
+    // filter — without that diagnostic, a requester-format mismatch would
+    // be indistinguishable from "no grants at all".
+    await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow(
+      /no open grant of ours found.*2 open grant\(s\) belong to other requesters/s,
+    );
     expect(withdrawn).toHaveLength(0);
   });
 
   test("reuses its own usable grant matched case-insensitively", async () => {
     const currentTime = 10_000_000;
     const ownUsable = {
-      name: `${entitlementPath}/grants/own-usable`,
-      state: "ACTIVE",
+      ...makeActivatedGrant(
+        `${entitlementPath}/grants/own-usable`,
+        new Date(currentTime).toISOString(),
+      ),
       requester: "ME@example.COM",
-      createTime: new Date(currentTime).toISOString(),
-      requestedDuration: "3600s",
     };
     const withdrawn: string[] = [];
 
@@ -2027,5 +2131,31 @@ describe("scanForOpenGrants requester filtering", () => {
     const result = await pam.ensureGrant(entitlementPath);
     expect(result.name).toContain("own-usable");
     expect(withdrawn).toHaveLength(0);
+  });
+
+  test("withdraws its own pending grant that is blocking creation", async () => {
+    // A grant stuck in a pending state (e.g. APPROVAL_AWAITED after a poll
+    // timeout in a previous run) holds the open-grant slot just like an
+    // active one, and withdraw can clear it — the scan must treat it as a
+    // withdrawable blocker, not skip it for being non-active.
+    const currentTime = 10_000_000;
+    const ownPending = {
+      name: `${entitlementPath}/grants/own-pending`,
+      state: "APPROVAL_AWAITED",
+      requester: "me@example.com",
+    };
+    const freshName = `${entitlementPath}/grants/fresh`;
+    const withdrawn: string[] = [];
+
+    const pam = makeFilteringModule([ownPending], {
+      currentTime,
+      onWithdraw: (url) => withdrawn.push(url),
+      createAfterRetry: makeActivatedGrant(freshName, new Date(currentTime).toISOString()),
+    });
+
+    const result = await pam.ensureGrant(entitlementPath);
+    expect(result.name).toBe(freshName);
+    expect(withdrawn).toHaveLength(1);
+    expect(withdrawn[0]).toContain("own-pending");
   });
 });
