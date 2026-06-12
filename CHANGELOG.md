@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [0.11.4] - 2026-06-12
+
 ### Security
 
 - The metadata proxy's PID-based caller validation now matches the caller
