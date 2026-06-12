@@ -524,6 +524,47 @@ describe("createAuthModule", () => {
       await expect(getIdentityEmail()).rejects.toBeInstanceOf(CredentialsExpiredError);
     });
 
+    test("credentials-expired reset drops the cached identity email", async () => {
+      // After the engineer re-runs `gcloud auth application-default login`
+      // they may be a different account. The identity email feeds audit
+      // attribution and PAM requester filtering, so the reset must force it
+      // to re-resolve instead of serving the pre-reset identity forever.
+      let tokenCalls = 0;
+      const client = {
+        credentials: { expiry_date: Date.now() + 3600_000 },
+        getAccessToken: async () => {
+          tokenCalls++;
+          if (tokenCalls === 2) {
+            throw new Error("invalid_grant: reauth related error (rapt_required)");
+          }
+          return { token: `token-${tokenCalls}`, res: null };
+        },
+      } as unknown as AuthClient;
+
+      let fetchCount = 0;
+      const fetchFn = (async () => {
+        fetchCount++;
+        const email = fetchCount === 1 ? "alice@example.com" : "bob@example.com";
+        return new Response(JSON.stringify({ email }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }) as unknown as typeof globalThis.fetch;
+
+      const { getIdentityEmail, mintProdToken } = createAuthModule(TEST_CONFIG, {
+        sourceClient: client,
+        impersonatedClient: mockClient("dev"),
+        fetchFn,
+      });
+
+      expect(await getIdentityEmail()).toBe("alice@example.com");
+      await expect(mintProdToken()).rejects.toBeInstanceOf(CredentialsExpiredError);
+      // The reset cleared the email cache: the next call re-resolves the
+      // identity against the (re-read) credentials.
+      expect(await getIdentityEmail()).toBe("bob@example.com");
+      expect(fetchCount).toBe(2);
+    });
+
     test("getIdentityEmail converts tokeninfo invalid_token into CredentialsExpiredError", async () => {
       // The scenario the user actually hits: `gcloud auth application-default
       // revoke` cascade-revokes the access token at Google. The gate's cached

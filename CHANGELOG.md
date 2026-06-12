@@ -18,6 +18,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- PAM grant rotation now ends the gate's own grants with `grants:withdraw`
+  (the requester's operation, v1beta) instead of `grants:revoke`, which
+  requires the approver/admin-level `privilegedaccessmanager.grants.revoke`
+  permission. Previously, engineers without that permission hit a rotation
+  deadlock at every grant refresh: the revoke failed with 403, the follow-up
+  create kept conflicting with the still-open grant, and no new grant was
+  created until the old one expired on its own. Note: `WithdrawGrantRequest`
+  carries no fields, so the rotation/shutdown reason string previously sent
+  with revoke is no longer recorded on the PAM side; the grant justification
+  (set at creation) still carries the command context.
+- The open-grant recovery scan now only considers grants requested by the
+  gate's own identity. Previously, on a shared entitlement, the scan could
+  reuse another engineer's active grant (wrong identity and expiry) or
+  attempt to end other engineers' stale grants. When every open grant is
+  excluded by the requester filter, the conflict error says how many were
+  skipped so an identity mismatch is diagnosable.
+- The open-grant recovery also withdraws the gate's own grants stuck in
+  pending states (e.g. `APPROVAL_AWAITED` left behind by an interrupted run),
+  and a grant that fails to activate within the polling deadline is withdrawn
+  immediately instead of being left to block future creates until it expires.
+- The credentials-expired reset now also drops the cached identity email, so
+  re-running `gcloud auth application-default login` as a different account
+  re-resolves the identity used for audit attribution and PAM requester
+  filtering.
+- Failed PAM grant rotations are now logged to the gate's console in addition
+  to the audit log, so a refresh failure is visible in the daemon log instead
+  of only in the client's 500 response. The grant-conflict error no longer
+  claims blocking grants were withdrawn when the withdraw requests failed.
 - `with-prod` now reliably revokes its prod session at the gate on exit. The
   revocation request was previously fire-and-forget, so `process.exit` tore down
   the event loop before the `DELETE /session` request was transmitted, leaving

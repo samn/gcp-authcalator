@@ -99,7 +99,10 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
    * engineer reruns `gcloud auth application-default login` on the host)
    * re-reads `application_default_credentials.json` without a daemon
    * restart. Token caches are cleared too — they were minted with a
-   * refresh token that is now known to be dead.
+   * refresh token that is now known to be dead. The identity email cache
+   * is also dropped: the engineer may re-login as a different account, and
+   * the email feeds audit attribution and PAM requester filtering, so it
+   * must re-resolve against the new credentials.
    *
    * An injected source client (test fixture) is preserved so the reset
    * path doesn't blow away the mock the test depends on.
@@ -113,6 +116,7 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
         if (!options.sourceClient) sourceClient = null;
         impersonatedClients.clear();
         devTokenCaches.clear();
+        emailCache = null;
       }
       throw mapped;
     }
