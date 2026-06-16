@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- `with-prod` now sets `GOOGLE_CLOUD_QUOTA_PROJECT` on the wrapped command's
+  environment so end-user-credential (prod) API calls have a quota/billing
+  project, avoiding the "authenticated using end user credentials" warnings and
+  quota errors. By default it follows the selected target project (`--project`
+  / `project_id`); set `quota_project` (`--quota-project`) to pin a static
+  billing project, or `no_quota_project = true` (`--no-quota-project`) to opt
+  out and leave any inherited value untouched. Following the selected project
+  requires the active credential to hold `serviceusage.services.use` on it.
+
 ## [0.11.4] - 2026-06-12
 
 ### Security
