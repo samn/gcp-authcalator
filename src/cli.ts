@@ -54,6 +54,8 @@ Options:
   --operator-socket-group <name>     Optional: multi-operator mode. Sets mode 0660 with this group; without it, mode 0600 owned by gate UID
   --auto-approve-pam-policies <ids>  PAM entitlements that auto-approve on the operator socket (comma-separated; subset of --pam-allowed-policies)
   --agent-uid <uid|name>             Agent UID (or username) — required with --operator-socket-path; gate refuses to start if this UID equals the gate UID (or, in group mode, is in the operator group)
+  --quota-project <id>     with-prod: GOOGLE_CLOUD_QUOTA_PROJECT for the wrapped command (default: the target project)
+  --no-quota-project       with-prod: don't manage GOOGLE_CLOUD_QUOTA_PROJECT (leave the inherited value untouched)
   -e, --env <KEY=VALUE>    Extra env var for with-prod subprocess (repeatable, supports \${VAR} substitution)
   -c, --config <path>      Path to TOML config file
   -h, --help               Show this help message
@@ -130,6 +132,8 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       "operator-socket-group": { type: "string" },
       "auto-approve-pam-policies": { type: "string" },
       "agent-uid": { type: "string" },
+      "quota-project": { type: "string" },
+      "no-quota-project": { type: "boolean" },
       env: { type: "string", short: "e", multiple: true },
       config: { type: "string", short: "c" },
       help: { type: "boolean", short: "h" },

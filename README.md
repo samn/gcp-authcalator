@@ -191,6 +191,8 @@ Precedence: CLI flags > environment variables > TOML file > defaults.
 --token-ttl-seconds <secs> Token lifetime in seconds (60–43200, default: 3600)
 --pam-grant-ttl-seconds <secs> PAM grant lifetime in seconds (60–43200, default: token-ttl-seconds). Set longer than the token TTL to amortise PAM/IAM propagation latency across multiple refreshes — one grant serves many tokens before the gate rotates it
 --session-ttl-seconds <secs> Prod session lifetime in seconds (300–86400, default: 28800 / 8h)
+--quota-project <id>       with-prod: GOOGLE_CLOUD_QUOTA_PROJECT for the wrapped command (default: the target project)
+--no-quota-project         with-prod: don't manage GOOGLE_CLOUD_QUOTA_PROJECT (leave the inherited value untouched)
 -e, --env <KEY=VALUE>      Extra env var for with-prod subprocess (repeatable, supports ${VAR} substitution)
 -c, --config <path>        Path to TOML config file
 ```
@@ -199,26 +201,28 @@ Precedence: CLI flags > environment variables > TOML file > defaults.
 
 Most config options can be set via `GCP_AUTHCALATOR_*` environment variables (uppercased key name with `GCP_AUTHCALATOR_` prefix). Options that take arrays or maps (`scopes`, `pam_allowed_policies`, `auto_approve_pam_policies`, `env`) are only available via CLI flags or TOML config.
 
-| Variable                                | Description                                                        |
-| --------------------------------------- | ------------------------------------------------------------------ |
-| `GCP_AUTHCALATOR_PROJECT_ID`            | GCP project ID (same as `--project-id`)                            |
-| `GCP_AUTHCALATOR_SERVICE_ACCOUNT`       | Service account email (same as `--service-account`)                |
-| `GCP_AUTHCALATOR_SOCKET_PATH`           | Unix socket path (same as `--socket-path`)                         |
-| `GCP_AUTHCALATOR_ADMIN_SOCKET_PATH`     | Admin socket path for approve/deny (same as `--admin-socket-path`) |
-| `GCP_AUTHCALATOR_PORT`                  | Metadata proxy port (same as `--port`)                             |
-| `GCP_AUTHCALATOR_GATE_TLS_PORT`         | Gate TCP+mTLS listener port (same as `--gate-tls-port`)            |
-| `GCP_AUTHCALATOR_TLS_DIR`               | TLS certificate directory (same as `--tls-dir`)                    |
-| `GCP_AUTHCALATOR_GATE_URL`              | Gate URL for remote connections (same as `--gate-url`)             |
-| `GCP_AUTHCALATOR_TLS_BUNDLE`            | Path to TLS client bundle file (same as `--tls-bundle`)            |
-| `GCP_AUTHCALATOR_TLS_BUNDLE_B64`        | Base64-encoded TLS client bundle (preferred for secrets)           |
-| `GCP_AUTHCALATOR_PAM_POLICY`            | PAM entitlement ID or path (same as `--pam-policy`)                |
-| `GCP_AUTHCALATOR_PAM_LOCATION`          | PAM entitlement location (same as `--pam-location`)                |
-| `GCP_AUTHCALATOR_TOKEN_TTL_SECONDS`     | Token lifetime in seconds (same as `--token-ttl-seconds`)          |
-| `GCP_AUTHCALATOR_PAM_GRANT_TTL_SECONDS` | PAM grant lifetime in seconds (same as `--pam-grant-ttl-seconds`)  |
-| `GCP_AUTHCALATOR_SESSION_TTL_SECONDS`   | Prod session lifetime in seconds (same as `--session-ttl-seconds`) |
-| `GCP_AUTHCALATOR_OPERATOR_SOCKET_PATH`  | Operator socket path (same as `--operator-socket-path`)            |
-| `GCP_AUTHCALATOR_OPERATOR_SOCKET_GROUP` | Operator socket Unix group (same as `--operator-socket-group`)     |
-| `GCP_AUTHCALATOR_AGENT_UID`             | Agent UID or username (same as `--agent-uid`)                      |
+| Variable                                | Description                                                                          |
+| --------------------------------------- | ------------------------------------------------------------------------------------ |
+| `GCP_AUTHCALATOR_PROJECT_ID`            | GCP project ID (same as `--project-id`)                                              |
+| `GCP_AUTHCALATOR_SERVICE_ACCOUNT`       | Service account email (same as `--service-account`)                                  |
+| `GCP_AUTHCALATOR_SOCKET_PATH`           | Unix socket path (same as `--socket-path`)                                           |
+| `GCP_AUTHCALATOR_ADMIN_SOCKET_PATH`     | Admin socket path for approve/deny (same as `--admin-socket-path`)                   |
+| `GCP_AUTHCALATOR_PORT`                  | Metadata proxy port (same as `--port`)                                               |
+| `GCP_AUTHCALATOR_GATE_TLS_PORT`         | Gate TCP+mTLS listener port (same as `--gate-tls-port`)                              |
+| `GCP_AUTHCALATOR_TLS_DIR`               | TLS certificate directory (same as `--tls-dir`)                                      |
+| `GCP_AUTHCALATOR_GATE_URL`              | Gate URL for remote connections (same as `--gate-url`)                               |
+| `GCP_AUTHCALATOR_TLS_BUNDLE`            | Path to TLS client bundle file (same as `--tls-bundle`)                              |
+| `GCP_AUTHCALATOR_TLS_BUNDLE_B64`        | Base64-encoded TLS client bundle (preferred for secrets)                             |
+| `GCP_AUTHCALATOR_PAM_POLICY`            | PAM entitlement ID or path (same as `--pam-policy`)                                  |
+| `GCP_AUTHCALATOR_PAM_LOCATION`          | PAM entitlement location (same as `--pam-location`)                                  |
+| `GCP_AUTHCALATOR_TOKEN_TTL_SECONDS`     | Token lifetime in seconds (same as `--token-ttl-seconds`)                            |
+| `GCP_AUTHCALATOR_PAM_GRANT_TTL_SECONDS` | PAM grant lifetime in seconds (same as `--pam-grant-ttl-seconds`)                    |
+| `GCP_AUTHCALATOR_SESSION_TTL_SECONDS`   | Prod session lifetime in seconds (same as `--session-ttl-seconds`)                   |
+| `GCP_AUTHCALATOR_OPERATOR_SOCKET_PATH`  | Operator socket path (same as `--operator-socket-path`)                              |
+| `GCP_AUTHCALATOR_OPERATOR_SOCKET_GROUP` | Operator socket Unix group (same as `--operator-socket-group`)                       |
+| `GCP_AUTHCALATOR_AGENT_UID`             | Agent UID or username (same as `--agent-uid`)                                        |
+| `GCP_AUTHCALATOR_QUOTA_PROJECT`         | with-prod quota/billing project (same as `--quota-project`)                          |
+| `GCP_AUTHCALATOR_NO_QUOTA_PROJECT`      | `true`/`false`: opt out of managing the quota project (same as `--no-quota-project`) |
 
 ### TOML config file
 
@@ -391,6 +395,10 @@ gcp-authcalator with-prod --scopes="https://www.googleapis.com/auth/sqlservice.l
 # Target a specific project (overrides the configured default for this invocation):
 gcp-authcalator with-prod --project alt-project -- gcloud sql instances list
 
+# Pin the quota/billing project, or opt out of setting it:
+gcp-authcalator with-prod --quota-project my-billing-project -- gcloud ...
+gcp-authcalator with-prod --no-quota-project -- gcloud ...
+
 # Pass extra env vars (e.g. for GDAL/OGR):
 gcp-authcalator with-prod \
   --env CPL_MACHINE_IS_GCE=YES \
@@ -401,6 +409,8 @@ gcp-authcalator with-prod \
 **Required options:** `--project-id` (or `--project` for the target this invocation acts against)
 
 **Multi-project setups.** `--project` lets one gate serve many GCP projects without re-running for each. Common pattern: organise projects under a GCP folder (or attach an org-wide entitlement); configure `pam_policy` as a folder- or organization-scoped entitlement (`folders/{id}/locations/{loc}/entitlements/{name}` or `organizations/{id}/locations/{loc}/entitlements/{name}`) so a single PAM grant covers every project beneath; grant the impersonation service account the IAM it needs across that scope. The gate does not enforce a project allowlist — the security boundary is folder/org/PAM scope + IAM bindings on the service account. The effective project flows through to the metadata proxy (`/computeMetadata/v1/project/project-id`), the wrapped child's `CLOUDSDK_CORE_PROJECT`, and the gate's audit log via the `X-Target-Project` header / `target_project` audit field.
+
+**Quota project.** `with-prod` sets `GOOGLE_CLOUD_QUOTA_PROJECT` on the wrapped command so end-user-credential (prod) API calls have a quota/billing project — without one, Google APIs emit "authenticated using end user credentials" warnings or fail with quota errors. By default it follows the selected target project (`--project` / `project_id`), so the project you act against bills its own quota; this requires the active credential to hold `serviceusage.services.use` on that project. Pin a separate billing project with `--quota-project <id>` (or `quota_project` in config), or opt out with `--no-quota-project` (`no_quota_project = true`) — opt-out leaves any inherited `GOOGLE_CLOUD_QUOTA_PROJECT` untouched and takes precedence over `quota_project`. An explicit `--env GOOGLE_CLOUD_QUOTA_PROJECT=...` overrides all of the above.
 
 This command:
 

@@ -283,6 +283,7 @@ The actual implementation adds several security hardening measures beyond this p
 - **Environment stripping** — all credential-related env vars (`GOOGLE_APPLICATION_CREDENTIALS`, `CLOUDSDK_AUTH_ACCESS_TOKEN`, `CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE`, etc.) are removed from the child's environment to prevent bypass
 - **Temp directory in user-private runtime dir** — not `/tmp`, preventing other users from observing or racing the temp directory
 - **Extra environment variables** — configurable via `[env]` TOML table or `--env` CLI flag. Values support `${VAR}` and `${VAR:-default}` substitution resolved after the elevated environment is built, allowing tools like GDAL to reference `GCE_METADATA_HOST` without tool-specific code in gcp-authcalator
+- **Quota project** — sets `GOOGLE_CLOUD_QUOTA_PROJECT` so end-user-credential (prod) API calls have a quota/billing project. Defaults to the selected target project (the same value as `CLOUDSDK_CORE_PROJECT` / `GOOGLE_CLOUD_PROJECT`); `quota_project` pins a static project, and `no_quota_project` opts out (leaving any inherited value untouched, and taking precedence over `quota_project`). The value is set on the base environment before the `[env]` extras are applied, so an explicit `[env] GOOGLE_CLOUD_QUOTA_PROJECT` still wins
 
 Usage: `with-prod -- python some/script.py`, `with-prod -- gcloud sql instances list`, `with-prod -- alembic upgrade head`
 

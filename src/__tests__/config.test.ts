@@ -309,6 +309,38 @@ describe("ConfigSchema", () => {
     expect(config.token_ttl_seconds).toBe(3600);
     expect(config.pam_grant_ttl_seconds).toBe(14400);
   });
+
+  test("accepts quota_project string", () => {
+    const config = ConfigSchema.parse({ quota_project: "billing-proj" });
+    expect(config.quota_project).toBe("billing-proj");
+  });
+
+  test("rejects empty quota_project", () => {
+    expect(() => ConfigSchema.parse({ quota_project: "" })).toThrow(z.ZodError);
+  });
+
+  test("quota_project is optional", () => {
+    expect(ConfigSchema.parse({}).quota_project).toBeUndefined();
+  });
+
+  test("no_quota_project accepts native booleans (TOML/CLI)", () => {
+    expect(ConfigSchema.parse({ no_quota_project: true }).no_quota_project).toBe(true);
+    expect(ConfigSchema.parse({ no_quota_project: false }).no_quota_project).toBe(false);
+  });
+
+  test("no_quota_project coerces 'true'/'false' strings (env vars)", () => {
+    expect(ConfigSchema.parse({ no_quota_project: "true" }).no_quota_project).toBe(true);
+    expect(ConfigSchema.parse({ no_quota_project: "false" }).no_quota_project).toBe(false);
+  });
+
+  test("no_quota_project rejects non-boolean strings", () => {
+    expect(() => ConfigSchema.parse({ no_quota_project: "yes" })).toThrow(z.ZodError);
+    expect(() => ConfigSchema.parse({ no_quota_project: "1" })).toThrow(z.ZodError);
+  });
+
+  test("no_quota_project is optional", () => {
+    expect(ConfigSchema.parse({}).no_quota_project).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -516,6 +548,11 @@ describe("mapCliArgs", () => {
     const result = mapCliArgs({ "pam-grant-ttl-seconds": "14400" });
     expect(result).toEqual({ pam_grant_ttl_seconds: "14400" });
   });
+
+  test("maps quota-project and no-quota-project", () => {
+    const result = mapCliArgs({ "quota-project": "billing-proj", "no-quota-project": true });
+    expect(result).toEqual({ quota_project: "billing-proj", no_quota_project: true });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -604,6 +641,20 @@ describe("loadEnvVars", () => {
       expect(result.project_id).toBe("env-project");
       expect(result.port).toBeUndefined();
     });
+  });
+
+  test("reads quota project env vars as raw strings", () => {
+    withEnv(
+      {
+        GCP_AUTHCALATOR_QUOTA_PROJECT: "billing-proj",
+        GCP_AUTHCALATOR_NO_QUOTA_PROJECT: "true",
+      },
+      () => {
+        const result = loadEnvVars();
+        expect(result.quota_project).toBe("billing-proj");
+        expect(result.no_quota_project).toBe("true");
+      },
+    );
   });
 
   test("returns empty object when no env vars set", () => {
@@ -775,5 +826,20 @@ describe("loadConfig", () => {
       filePath,
     );
     expect(config.scopes).toEqual(["https://www.googleapis.com/auth/sqlservice.login"]);
+  });
+
+  test("coerces GCP_AUTHCALATOR_NO_QUOTA_PROJECT string to boolean", () => {
+    withEnv({ GCP_AUTHCALATOR_NO_QUOTA_PROJECT: "true" }, () => {
+      expect(loadConfig({}).no_quota_project).toBe(true);
+    });
+    withEnv({ GCP_AUTHCALATOR_NO_QUOTA_PROJECT: "false" }, () => {
+      expect(loadConfig({}).no_quota_project).toBe(false);
+    });
+  });
+
+  test("rejects invalid GCP_AUTHCALATOR_NO_QUOTA_PROJECT value", () => {
+    withEnv({ GCP_AUTHCALATOR_NO_QUOTA_PROJECT: "yes" }, () => {
+      expect(() => loadConfig({})).toThrow(z.ZodError);
+    });
   });
 });

@@ -89,6 +89,33 @@ function applyExtraEnvVars(
   return result;
 }
 
+/**
+ * Resolve the GOOGLE_CLOUD_QUOTA_PROJECT value for the wrapped command, or
+ * undefined to leave the inherited environment untouched.
+ *
+ * Quota project matters for end-user-credential (prod) API calls, which Google
+ * APIs bill/quota against a caller-chosen project. The paved default is to
+ * follow the selected target project so the project being worked on pays for
+ * its own quota.
+ *
+ * - no_quota_project: opt out — we neither set, override, nor delete the var,
+ *   so a value already in the environment passes through unchanged.
+ * - quota_project: static override (e.g. a dedicated billing project).
+ * - otherwise: follow the resolved target project.
+ *
+ * Following the selected project requires the active credential to hold
+ * `serviceusage.services.use` on it; no_quota_project is the escape hatch when
+ * it doesn't.
+ */
+function resolveQuotaProject(
+  projectId: string,
+  quotaProject: string | undefined,
+  noQuotaProject: boolean | undefined,
+): string | undefined {
+  if (noQuotaProject) return undefined;
+  return quotaProject ?? projectId;
+}
+
 /** Strip credential env vars that could bypass the metadata proxy. */
 function stripCredentialEnvVars(
   env: Record<string, string | undefined>,
@@ -189,6 +216,17 @@ export async function runWithProd(
       // Preserve parent's CLOUDSDK_CONFIG if set
       if (process.env.CLOUDSDK_CONFIG) {
         env.CLOUDSDK_CONFIG = process.env.CLOUDSDK_CONFIG;
+      }
+
+      // Quota project follows the session's project (opt-out leaves any
+      // inherited value untouched — see resolveQuotaProject).
+      const quotaProject = resolveQuotaProject(
+        nestedSession.projectId,
+        config.quota_project,
+        config.no_quota_project,
+      );
+      if (quotaProject !== undefined) {
+        env.GOOGLE_CLOUD_QUOTA_PROJECT = quotaProject;
       }
 
       await spawnAndWait(wrappedCommand, applyExtraEnvVars(env, config.env), spawnFn);
@@ -361,30 +399,39 @@ export async function runWithProd(
   let exitCode: number | undefined;
   try {
     // Step 5: Spawn wrapped command with metadata env vars
-    const env = applyExtraEnvVars(
-      {
-        ...stripCredentialEnvVars(process.env),
-        GCE_METADATA_HOST: metadataHost,
-        GCE_METADATA_IP: metadataHost,
-        GCE_METADATA_ROOT: metadataHost,
-        CLOUDSDK_CONFIG: gcloudConfigDir,
-        // Explicitly set gcloud-specific env vars so `gcloud auth list` and
-        // other gcloud commands show the correct active account and project.
-        // gcloud's internal account-enumeration code may not honor
-        // GCE_METADATA_HOST, falling back to the original metadata proxy.
-        // Tokens still flow through the PID-validated metadata proxy.
-        CLOUDSDK_CORE_ACCOUNT: initialEmail,
-        CLOUDSDK_CORE_PROJECT: effectiveProjectId,
-        // Google client libraries (google-auth for Python/Node/etc.) resolve
-        // the project from these env vars *before* the metadata server, so a
-        // parent GOOGLE_CLOUD_PROJECT/GCLOUD_PROJECT (common in devcontainers)
-        // would otherwise silently override the target project. Pin them.
-        GOOGLE_CLOUD_PROJECT: effectiveProjectId,
-        GCLOUD_PROJECT: effectiveProjectId,
-        [PROD_SESSION_ENV_VAR]: metadataHost,
-      },
-      wpConfig.env,
+    const baseEnv: Record<string, string | undefined> = {
+      ...stripCredentialEnvVars(process.env),
+      GCE_METADATA_HOST: metadataHost,
+      GCE_METADATA_IP: metadataHost,
+      GCE_METADATA_ROOT: metadataHost,
+      CLOUDSDK_CONFIG: gcloudConfigDir,
+      // Explicitly set gcloud-specific env vars so `gcloud auth list` and
+      // other gcloud commands show the correct active account and project.
+      // gcloud's internal account-enumeration code may not honor
+      // GCE_METADATA_HOST, falling back to the original metadata proxy.
+      // Tokens still flow through the PID-validated metadata proxy.
+      CLOUDSDK_CORE_ACCOUNT: initialEmail,
+      CLOUDSDK_CORE_PROJECT: effectiveProjectId,
+      // Google client libraries (google-auth for Python/Node/etc.) resolve
+      // the project from these env vars *before* the metadata server, so a
+      // parent GOOGLE_CLOUD_PROJECT/GCLOUD_PROJECT (common in devcontainers)
+      // would otherwise silently override the target project. Pin them.
+      GOOGLE_CLOUD_PROJECT: effectiveProjectId,
+      GCLOUD_PROJECT: effectiveProjectId,
+      [PROD_SESSION_ENV_VAR]: metadataHost,
+    };
+    // Quota project for end-user-credential API calls. Follows the target
+    // project by default; opt-out leaves any inherited value untouched. Set
+    // before applyExtraEnvVars so an explicit [env] entry still wins.
+    const quotaProject = resolveQuotaProject(
+      effectiveProjectId,
+      wpConfig.quota_project,
+      wpConfig.no_quota_project,
     );
+    if (quotaProject !== undefined) {
+      baseEnv.GOOGLE_CLOUD_QUOTA_PROJECT = quotaProject;
+    }
+    const env = applyExtraEnvVars(baseEnv, wpConfig.env);
 
     const child = spawnFn(wrappedCommand, {
       env,

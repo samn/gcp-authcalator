@@ -1061,6 +1061,142 @@ describe("runWithProd", () => {
   });
 });
 
+describe("runWithProd quota project", () => {
+  let logSpy: ReturnType<typeof spyOn>;
+  let exitSpy: ReturnType<typeof spyOn>;
+  let errorSpy: ReturnType<typeof spyOn>;
+  let originalEnv: NodeJS.ProcessEnv;
+
+  const baseConfig = {
+    project_id: "my-proj",
+    socket_path: "/tmp/gate.sock",
+    port: 8173,
+    admin_socket_path: "/tmp/test-admin.sock",
+  };
+
+  beforeEach(() => {
+    // Save/restore the full env so manipulating GOOGLE_CLOUD_QUOTA_PROJECT in
+    // one test can't bleed into another, and so a parent value (if any) doesn't
+    // perturb the unset-default assertion.
+    originalEnv = { ...process.env };
+    delete process.env.GOOGLE_CLOUD_QUOTA_PROJECT;
+    logSpy = spyOn(console, "log").mockImplementation(() => {});
+    errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    exitSpy = spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("process.exit called");
+    });
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+    logSpy.mockRestore();
+    errorSpy.mockRestore();
+    exitSpy.mockRestore();
+  });
+
+  test("defaults GOOGLE_CLOUD_QUOTA_PROJECT to the target project", async () => {
+    const { mockSpawnFn, getCapturedEnv } = mockSpawnCapture();
+    try {
+      await runWithProd(baseConfig, ["echo", "test"], {
+        fetchOptions: { fetchFn: mockGateFetch() },
+        spawnFn: mockSpawnFn,
+      });
+    } catch {
+      // process.exit mock throws
+    }
+    expect(getCapturedEnv().GOOGLE_CLOUD_QUOTA_PROJECT).toBe("my-proj");
+  });
+
+  test("quota project follows projectOverride", async () => {
+    const { mockSpawnFn, getCapturedEnv } = mockSpawnCapture();
+    try {
+      await runWithProd(baseConfig, ["echo", "test"], {
+        fetchOptions: { fetchFn: mockGateFetch() },
+        spawnFn: mockSpawnFn,
+        projectOverride: "alt-proj",
+      });
+    } catch {
+      // process.exit mock throws
+    }
+    expect(getCapturedEnv().GOOGLE_CLOUD_QUOTA_PROJECT).toBe("alt-proj");
+  });
+
+  test("static quota_project overrides the target project", async () => {
+    const { mockSpawnFn, getCapturedEnv } = mockSpawnCapture();
+    try {
+      await runWithProd({ ...baseConfig, quota_project: "billing-proj" }, ["echo", "test"], {
+        fetchOptions: { fetchFn: mockGateFetch() },
+        spawnFn: mockSpawnFn,
+        projectOverride: "alt-proj",
+      });
+    } catch {
+      // process.exit mock throws
+    }
+    expect(getCapturedEnv().GOOGLE_CLOUD_QUOTA_PROJECT).toBe("billing-proj");
+  });
+
+  test("no_quota_project leaves GOOGLE_CLOUD_QUOTA_PROJECT unset when none inherited", async () => {
+    const { mockSpawnFn, getCapturedEnv } = mockSpawnCapture();
+    try {
+      await runWithProd({ ...baseConfig, no_quota_project: true }, ["echo", "test"], {
+        fetchOptions: { fetchFn: mockGateFetch() },
+        spawnFn: mockSpawnFn,
+      });
+    } catch {
+      // process.exit mock throws
+    }
+    expect("GOOGLE_CLOUD_QUOTA_PROJECT" in getCapturedEnv()).toBe(false);
+  });
+
+  test("no_quota_project preserves an inherited GOOGLE_CLOUD_QUOTA_PROJECT", async () => {
+    process.env.GOOGLE_CLOUD_QUOTA_PROJECT = "inherited-proj";
+    const { mockSpawnFn, getCapturedEnv } = mockSpawnCapture();
+    try {
+      await runWithProd({ ...baseConfig, no_quota_project: true }, ["echo", "test"], {
+        fetchOptions: { fetchFn: mockGateFetch() },
+        spawnFn: mockSpawnFn,
+      });
+    } catch {
+      // process.exit mock throws
+    }
+    expect(getCapturedEnv().GOOGLE_CLOUD_QUOTA_PROJECT).toBe("inherited-proj");
+  });
+
+  test("no_quota_project wins over a static quota_project", async () => {
+    const { mockSpawnFn, getCapturedEnv } = mockSpawnCapture();
+    try {
+      await runWithProd(
+        { ...baseConfig, quota_project: "billing-proj", no_quota_project: true },
+        ["echo", "test"],
+        {
+          fetchOptions: { fetchFn: mockGateFetch() },
+          spawnFn: mockSpawnFn,
+        },
+      );
+    } catch {
+      // process.exit mock throws
+    }
+    expect("GOOGLE_CLOUD_QUOTA_PROJECT" in getCapturedEnv()).toBe(false);
+  });
+
+  test("explicit [env] GOOGLE_CLOUD_QUOTA_PROJECT overrides the auto value", async () => {
+    const { mockSpawnFn, getCapturedEnv } = mockSpawnCapture();
+    try {
+      await runWithProd(
+        { ...baseConfig, env: { GOOGLE_CLOUD_QUOTA_PROJECT: "env-override" } },
+        ["echo", "test"],
+        {
+          fetchOptions: { fetchFn: mockGateFetch() },
+          spawnFn: mockSpawnFn,
+        },
+      );
+    } catch {
+      // process.exit mock throws
+    }
+    expect(getCapturedEnv().GOOGLE_CLOUD_QUOTA_PROJECT).toBe("env-override");
+  });
+});
+
 describe("runWithProd nested sessions", () => {
   let logSpy: ReturnType<typeof spyOn>;
   let exitSpy: ReturnType<typeof spyOn>;
@@ -1458,6 +1594,29 @@ describe("runWithProd nested sessions", () => {
     expect(errorOutput).toContain(
       "reusing existing prod session for project parent-project (proxy at 127.0.0.1:54321)",
     );
+  });
+
+  test("sets GOOGLE_CLOUD_QUOTA_PROJECT from the parent session project", async () => {
+    process.env[PROD_SESSION_ENV_VAR] = "127.0.0.1:54321";
+    delete process.env.GOOGLE_CLOUD_QUOTA_PROJECT;
+
+    const mockFetchFn = mockCombinedFetch({ proxyProjectBody: "parent-project" });
+    const { mockSpawnFn, getCapturedEnv } = mockSpawnCapture();
+
+    try {
+      await runWithProd(
+        { socket_path: "/tmp/gate.sock", port: 8173, admin_socket_path: "/tmp/test-admin.sock" },
+        ["echo", "test"],
+        {
+          fetchOptions: { fetchFn: mockFetchFn },
+          spawnFn: mockSpawnFn,
+        },
+      );
+    } catch {
+      // process.exit mock throws
+    }
+
+    expect(getCapturedEnv().GOOGLE_CLOUD_QUOTA_PROJECT).toBe("parent-project");
   });
 });
 

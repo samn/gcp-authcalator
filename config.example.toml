@@ -135,6 +135,22 @@ service_account = "dev-runner@my-gcp-project.iam.gserviceaccount.com"
 # agent_uid = 1001
 # agent_uid = "claude"
 
+# Quota / billing project for the wrapped command's end-user-credential
+# (prod) API calls (sets GOOGLE_CLOUD_QUOTA_PROJECT). Only `with-prod` uses
+# these; the gate and metadata-proxy ignore them.
+#
+# Default (both unset): follow the selected target project (`project_id` or
+# `--project`), so the project being worked on bills its own quota. This
+# requires the active credential to hold `serviceusage.services.use` on it.
+#
+# Pin a dedicated billing project instead:
+# quota_project = "my-billing-project"
+#
+# Or opt out entirely — authcalator won't set, override, or delete
+# GOOGLE_CLOUD_QUOTA_PROJECT; any value already in the environment passes
+# through unchanged. Takes precedence over quota_project. (CLI: --no-quota-project)
+# no_quota_project = true
+
 # Extra environment variables for with-prod subprocess.
 # Values support ${VAR} and ${VAR:-default} substitution resolved against the
 # elevated environment (after GCE_METADATA_HOST etc. are set).

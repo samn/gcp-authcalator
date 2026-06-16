@@ -121,6 +121,19 @@ export const ConfigSchema = z.object({
   // in group mode, not a member of the operator group). Accepts a number
   // (TOML), a numeric string (env var/CLI), or a username.
   agent_uid: z.union([z.number().int().nonnegative(), z.string().min(1)]).optional(),
+  // ---- with-prod quota project (GOOGLE_CLOUD_QUOTA_PROJECT) ----
+  // Static override for the quota/billing project of the wrapped command's
+  // end-user-credential API calls. When unset (and no_quota_project is not
+  // set), with-prod follows the selected target project. See with-prod.ts.
+  quota_project: z.string().min(1).optional(),
+  // Opt out of managing GOOGLE_CLOUD_QUOTA_PROJECT entirely. Takes precedence
+  // over quota_project. The preprocess accepts the literal strings "true"/
+  // "false" (env vars / CLI booleans always arrive as those or real booleans)
+  // and lets z.boolean() reject anything else loudly — plain z.coerce.boolean()
+  // would turn the string "false" into true (non-empty string is truthy).
+  no_quota_project: z
+    .preprocess((v) => (v === "true" ? true : v === "false" ? false : v), z.boolean())
+    .optional(),
   env: z.record(z.string(), z.string()).optional(),
 });
 
@@ -209,6 +222,8 @@ const cliToConfigKey: Record<string, keyof Config> = {
   "operator-socket-group": "operator_socket_group",
   "auto-approve-pam-policies": "auto_approve_pam_policies",
   "agent-uid": "agent_uid",
+  "quota-project": "quota_project",
+  "no-quota-project": "no_quota_project",
 };
 
 /** Convert a CLI-arg values object (kebab-case keys) to config keys (snake_case). */
@@ -259,6 +274,8 @@ const configKeys: readonly (keyof Config)[] = [
   "operator_socket_path",
   "operator_socket_group",
   "agent_uid",
+  "quota_project",
+  "no_quota_project",
 ];
 
 /**
