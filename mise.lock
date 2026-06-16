@@ -49,60 +49,60 @@ checksum = "sha256:538f9c846355d9e847b2671bc00c47da4229a0befb24df3282b739770f3b4
 url = "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-windows-x64-baseline.zip"
 
 [[tools.prek]]
-version = "0.3.13"
+version = "0.4.4"
 backend = "aqua:j178/prek"
 
 [tools.prek."platforms.linux-arm64"]
-checksum = "sha256:af3122f5ddd69644b7cf4d3e3263305e7e2d12e03be2cb56e8888493ff4d9e72"
-url = "https://github.com/j178/prek/releases/download/v0.3.13/prek-aarch64-unknown-linux-musl.tar.gz"
+checksum = "sha256:b38ea178e3f73a7a767edde47a091faac2814d93ba7faa590cba8d19d0fdc76a"
+url = "https://github.com/j178/prek/releases/download/v0.4.4/prek-aarch64-unknown-linux-musl.tar.gz"
 provenance = "github-attestations"
 
 [tools.prek."platforms.linux-arm64-musl"]
-checksum = "sha256:af3122f5ddd69644b7cf4d3e3263305e7e2d12e03be2cb56e8888493ff4d9e72"
-url = "https://github.com/j178/prek/releases/download/v0.3.13/prek-aarch64-unknown-linux-musl.tar.gz"
+checksum = "sha256:b38ea178e3f73a7a767edde47a091faac2814d93ba7faa590cba8d19d0fdc76a"
+url = "https://github.com/j178/prek/releases/download/v0.4.4/prek-aarch64-unknown-linux-musl.tar.gz"
 provenance = "github-attestations"
 
 [tools.prek."platforms.linux-x64"]
-checksum = "sha256:e10cb36c9181044cda34522899457458e3551396dbc4dcf60e1ac1a8d7a71670"
-url = "https://github.com/j178/prek/releases/download/v0.3.13/prek-x86_64-unknown-linux-musl.tar.gz"
+checksum = "sha256:4a0aa963c6468ebcd4734ee7d763e8c1223bfb9bdabcb4528a7afac6b0147e12"
+url = "https://github.com/j178/prek/releases/download/v0.4.4/prek-x86_64-unknown-linux-musl.tar.gz"
 provenance = "github-attestations"
 
 [tools.prek."platforms.linux-x64-baseline"]
-checksum = "sha256:e10cb36c9181044cda34522899457458e3551396dbc4dcf60e1ac1a8d7a71670"
-url = "https://github.com/j178/prek/releases/download/v0.3.13/prek-x86_64-unknown-linux-musl.tar.gz"
+checksum = "sha256:4a0aa963c6468ebcd4734ee7d763e8c1223bfb9bdabcb4528a7afac6b0147e12"
+url = "https://github.com/j178/prek/releases/download/v0.4.4/prek-x86_64-unknown-linux-musl.tar.gz"
 provenance = "github-attestations"
 
 [tools.prek."platforms.linux-x64-musl"]
-checksum = "sha256:e10cb36c9181044cda34522899457458e3551396dbc4dcf60e1ac1a8d7a71670"
-url = "https://github.com/j178/prek/releases/download/v0.3.13/prek-x86_64-unknown-linux-musl.tar.gz"
+checksum = "sha256:4a0aa963c6468ebcd4734ee7d763e8c1223bfb9bdabcb4528a7afac6b0147e12"
+url = "https://github.com/j178/prek/releases/download/v0.4.4/prek-x86_64-unknown-linux-musl.tar.gz"
 provenance = "github-attestations"
 
 [tools.prek."platforms.linux-x64-musl-baseline"]
-checksum = "sha256:e10cb36c9181044cda34522899457458e3551396dbc4dcf60e1ac1a8d7a71670"
-url = "https://github.com/j178/prek/releases/download/v0.3.13/prek-x86_64-unknown-linux-musl.tar.gz"
+checksum = "sha256:4a0aa963c6468ebcd4734ee7d763e8c1223bfb9bdabcb4528a7afac6b0147e12"
+url = "https://github.com/j178/prek/releases/download/v0.4.4/prek-x86_64-unknown-linux-musl.tar.gz"
 provenance = "github-attestations"
 
 [tools.prek."platforms.macos-arm64"]
-checksum = "sha256:0b3b3dd0fbab7b95217280248196bde741b47b8de7bf60de50b4a12a9cc17b1f"
-url = "https://github.com/j178/prek/releases/download/v0.3.13/prek-aarch64-apple-darwin.tar.gz"
+checksum = "sha256:d3d74f96bbb9fe88d14bdb3119501f8f39602b885e19f57c6567791599afd231"
+url = "https://github.com/j178/prek/releases/download/v0.4.4/prek-aarch64-apple-darwin.tar.gz"
 provenance = "github-attestations"
 
 [tools.prek."platforms.macos-x64"]
-checksum = "sha256:2bbfdf15cfe6e954b98cb27094828f5c55a8bec0a02cf55041f783c71e3b8955"
-url = "https://github.com/j178/prek/releases/download/v0.3.13/prek-x86_64-apple-darwin.tar.gz"
+checksum = "sha256:960809f1b7541210e4182fb5408b2de5394ef4a490f8de51bc19724e4c0df227"
+url = "https://github.com/j178/prek/releases/download/v0.4.4/prek-x86_64-apple-darwin.tar.gz"
 provenance = "github-attestations"
 
 [tools.prek."platforms.macos-x64-baseline"]
-checksum = "sha256:2bbfdf15cfe6e954b98cb27094828f5c55a8bec0a02cf55041f783c71e3b8955"
-url = "https://github.com/j178/prek/releases/download/v0.3.13/prek-x86_64-apple-darwin.tar.gz"
+checksum = "sha256:960809f1b7541210e4182fb5408b2de5394ef4a490f8de51bc19724e4c0df227"
+url = "https://github.com/j178/prek/releases/download/v0.4.4/prek-x86_64-apple-darwin.tar.gz"
 provenance = "github-attestations"
 
 [tools.prek."platforms.windows-x64"]
-checksum = "sha256:ca32a6451cfdd22a27d99313b3a2f91eb0ce6d191eb8e35e2467f1551252ebbb"
-url = "https://github.com/j178/prek/releases/download/v0.3.13/prek-x86_64-pc-windows-msvc.zip"
+checksum = "sha256:c6b503e858a7ba17df47618d1c5b0331132b70bcc2a35704e5f422d21c433abe"
+url = "https://github.com/j178/prek/releases/download/v0.4.4/prek-x86_64-pc-windows-msvc.zip"
 provenance = "github-attestations"
 
 [tools.prek."platforms.windows-x64-baseline"]
-checksum = "sha256:ca32a6451cfdd22a27d99313b3a2f91eb0ce6d191eb8e35e2467f1551252ebbb"
-url = "https://github.com/j178/prek/releases/download/v0.3.13/prek-x86_64-pc-windows-msvc.zip"
+checksum = "sha256:c6b503e858a7ba17df47618d1c5b0331132b70bcc2a35704e5f422d21c433abe"
+url = "https://github.com/j178/prek/releases/download/v0.4.4/prek-x86_64-pc-windows-msvc.zip"
 provenance = "github-attestations"

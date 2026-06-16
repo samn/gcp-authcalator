@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Changed
+
+- Upgraded dependencies to their latest versions (observing a 5-day release
+  cooldown): `google-auth-library` 10.6.2 → 10.7.0, `oxfmt` 0.51.0 → 0.54.0,
+  `oxlint` 1.67.0 → 1.69.0, and the `prek` toolchain pin 0.3.13 → 0.4.4. No
+  breaking changes affect this project.
+
 ### Added
 
 - `with-prod` now sets `GOOGLE_CLOUD_QUOTA_PROJECT` on the wrapped command's
