@@ -7,12 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
-### Changed
-
-- Upgraded dependencies to their latest versions (observing a 5-day release
-  cooldown): `google-auth-library` 10.6.2 → 10.7.0, `oxfmt` 0.51.0 → 0.54.0,
-  `oxlint` 1.67.0 → 1.69.0, and the `prek` toolchain pin 0.3.13 → 0.4.4. No
-  breaking changes affect this project.
+## [0.12.0] - 2026-06-16
 
 ### Added
 
@@ -24,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   billing project, or `no_quota_project = true` (`--no-quota-project`) to opt
   out and leave any inherited value untouched. Following the selected project
   requires the active credential to hold `serviceusage.services.use` on it.
+
+### Changed
+
+- Upgraded dependencies to their latest versions (observing a 5-day release
+  cooldown): `google-auth-library` 10.6.2 → 10.7.0, `oxfmt` 0.51.0 → 0.54.0,
+  `oxlint` 1.67.0 → 1.69.0, and the `prek` toolchain pin 0.3.13 → 0.4.4. No
+  breaking changes affect this project.
 
 ## [0.11.4] - 2026-06-12
 
