@@ -3,6 +3,7 @@ import { parse as parseTOML } from "smol-toml";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { DRAIN_MARGIN_MS } from "./gate/pam.ts";
 
 // ---------------------------------------------------------------------------
 // Runtime directory helpers
@@ -80,6 +81,28 @@ export const DEFAULT_SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
  *  and `pam_grant_ttl_seconds` (and any future TTL sharing this range) in lockstep. */
 const ttlSecondsSchema = z.coerce.number().int().min(60).max(43200).optional();
 
+/**
+ * Lower bound for `pam_grant_ttl_seconds`, in seconds. A PAM grant must outlive
+ * the drain margin: `hasUsableLifetime` only treats a grant as usable while it
+ * has more than `DRAIN_MARGIN_MS` of life left, and minted tokens are clamped
+ * to `grant_expiry - DRAIN_MARGIN_MS`. A grant at or below the margin is never
+ * usable and every token it backs is clamped to 0 s (born expired), sending the
+ * client into a refresh storm. Flooring the *token clamp* instead would be
+ * wrong — it would serve tokens valid past the grant's withdrawal — so the
+ * guard belongs here, failing fast at config-parse time.
+ */
+const DRAIN_MARGIN_SECONDS = DRAIN_MARGIN_MS / 1000;
+
+/** `pam_grant_ttl_seconds`: shared TTL bounds, plus the drain-margin floor. */
+const pamGrantTtlSecondsSchema = ttlSecondsSchema.refine(
+  (v) => v === undefined || v > DRAIN_MARGIN_SECONDS,
+  {
+    message:
+      `pam_grant_ttl_seconds must be greater than the ${DRAIN_MARGIN_SECONDS}s drain margin; ` +
+      `a shorter grant would mint already-expired tokens`,
+  },
+);
+
 export const ConfigSchema = z.object({
   project_id: z.string().min(1).optional(),
   service_account: z.email().optional(),
@@ -106,7 +129,7 @@ export const ConfigSchema = z.object({
   // per-rotation pauses visible. Minted tokens stay clamped to
   // `grant_expiry - DRAIN_MARGIN_MS`, so a longer grant only changes how
   // often the gate calls PAM, not how long any individual token is valid.
-  pam_grant_ttl_seconds: ttlSecondsSchema,
+  pam_grant_ttl_seconds: pamGrantTtlSecondsSchema,
   session_ttl_seconds: z.coerce.number().int().min(300).max(86400).optional(),
   // ---- Operator socket (auto-approve for human-initiated escalation) ----
   operator_socket_path: z.string().min(1).transform(expandTilde).optional(),
@@ -178,6 +201,28 @@ export const GateConfigSchema = ConfigSchema.required({
       message:
         "every auto_approve_pam_policies entry must also be in pam_allowed_policies (or equal pam_policy)",
       path: ["auto_approve_pam_policies"],
+    },
+  )
+  .refine(
+    (c) => {
+      // The gate only creates PAM grants when pam_policy is set (server.ts).
+      if (!c.pam_policy) return true;
+      // Effective grant lifetime the gate will request, mirroring server.ts:
+      // explicit pam_grant_ttl_seconds, else token_ttl_seconds, else the 3600s
+      // default. The pam_grant_ttl_seconds field already carries the drain-margin
+      // floor on its own; this closes the fallback path where an unset grant TTL
+      // silently inherits a sub-margin token_ttl_seconds and mints born-expired
+      // tokens. (3600 mirrors server.ts's default; any sane default exceeds the
+      // margin, so this stays correct regardless of that constant.)
+      const effectiveGrantTtl = c.pam_grant_ttl_seconds ?? c.token_ttl_seconds ?? 3600;
+      return effectiveGrantTtl > DRAIN_MARGIN_SECONDS;
+    },
+    {
+      message:
+        `token_ttl_seconds becomes the PAM grant lifetime when pam_grant_ttl_seconds is unset, so ` +
+        `with pam_policy set it must exceed the ${DRAIN_MARGIN_SECONDS}s drain margin (a shorter grant ` +
+        `mints already-expired tokens). Set pam_grant_ttl_seconds explicitly above ${DRAIN_MARGIN_SECONDS}s.`,
+      path: ["token_ttl_seconds"],
     },
   );
 

@@ -96,6 +96,36 @@ const POLL_MAX_MS = 5_000;
 const POLL_TIMEOUT_MS = 120_000;
 
 /**
+ * Per-request timeout for an individual PAM API call (create, list, poll-get,
+ * withdraw). Without this, a half-open connection (NAT/LB idle-drop, a lost
+ * RST, a PAM backend stalled behind IAM-replication lag) leaves the fetch
+ * waiting on the OS TCP retransmission timeout — minutes on Linux — and, via
+ * the single-flight slot below, blocks every other caller for the entitlement.
+ */
+const PAM_FETCH_TIMEOUT_MS = 10_000;
+
+/**
+ * Overall wall-clock budget for one grant rotation (`doRotateGrant`). A
+ * backstop, not a tight SLA, deliberately set ABOVE the worst-case sum of the
+ * rotation's own internal deadlines so it never aborts a rotation the code
+ * itself still considers in-progress. That worst case is the conflict-recovery
+ * path, summing roughly: pre-withdraw LRO (<=`WITHDRAW_OP_TIMEOUT_MS` 30 s) +
+ * create (<=`PAM_FETCH_TIMEOUT_MS` 10 s) + a full `LIST_GRANTS_MAX_PAGES` scan
+ * (<=10 x 10 s = 100 s) + blocking-grant withdraw (<=30 s) + retry create
+ * (<=10 s) + pollGrant (<=`POLL_TIMEOUT_MS` 120 s) ~= 300 s, so the budget sits
+ * well past it.
+ *
+ * The budget still bounds two things the per-request timeout cannot: the
+ * cumulative cost of many sequential calls, and the ADC token acquisition that
+ * runs before every PAM call (`getAccessToken`, not covered by the fetch
+ * signal). When it fires it aborts the rotation's `AbortSignal` (cancelling
+ * in-flight PAM fetches) AND rejects, so the single-flight slot is freed and
+ * the abandoned rotation cannot keep mutating shared state — see
+ * `withRotationBudget`.
+ */
+const ROTATION_BUDGET_MS = 420_000;
+
+/**
  * LRO polling for grants.withdraw Operations. Observed PAM behavior: ending
  * a grant settles in ~3 s with sub-second polling; these constants give ~3
  * polls in that window without burning RTTs against a not-yet-done Operation.
@@ -200,6 +230,10 @@ export interface PamModuleOptions {
   grantDurationSeconds?: number;
   /** Override sleeping inside polling loops; tests pass `() => Promise.resolve()`. */
   sleepFn?: (ms: number) => Promise<void>;
+  /** Per-request timeout (ms) for individual PAM API calls. Defaults to PAM_FETCH_TIMEOUT_MS. */
+  fetchTimeoutMs?: number;
+  /** Overall wall-clock budget (ms) for one grant rotation. Defaults to ROTATION_BUDGET_MS. */
+  rotationBudgetMs?: number;
   /**
    * Email of the identity the gate requests grants as. When set, the
    * open-grant scan only considers grants whose `requester` matches —
@@ -355,6 +389,8 @@ export function createPamModule(
   const sleep =
     options.sleepFn ?? ((ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms)));
   const getRequesterEmail = options.getRequesterEmail;
+  const fetchTimeoutMs = options.fetchTimeoutMs ?? PAM_FETCH_TIMEOUT_MS;
+  const rotationBudgetMs = options.rotationBudgetMs ?? ROTATION_BUDGET_MS;
 
   const grantCache = new Map<string, CachedGrant>();
   // Single-flight rotation per entitlement: concurrent `ensureGrant` calls
@@ -367,16 +403,47 @@ export function createPamModule(
     return expiresAt.getTime() - now() > DRAIN_MARGIN_MS;
   }
 
-  async function pamFetch(url: string, init?: RequestInit): Promise<Response> {
+  async function pamFetch(
+    url: string,
+    init?: RequestInit,
+    rotationSignal?: AbortSignal,
+  ): Promise<Response> {
     const token = await getAccessToken();
-    return fetchFn(url, {
-      ...init,
-      headers: {
-        ...init?.headers,
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-    });
+    // Combine the per-request timeout with the rotation-wide budget signal (when
+    // a rotation is in flight) so the overall budget can cancel an in-flight
+    // call, not just the next one. If the budget already fired, the combined
+    // signal is born aborted and the fetch rejects immediately.
+    const timeoutSignal = AbortSignal.timeout(fetchTimeoutMs);
+    const signal = rotationSignal
+      ? AbortSignal.any([timeoutSignal, rotationSignal])
+      : timeoutSignal;
+    try {
+      return await fetchFn(url, {
+        ...init,
+        signal,
+        headers: {
+          ...init?.headers,
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+      });
+    } catch (err) {
+      // A rotation-budget abort surfaces the budget error (the abort reason),
+      // not a per-call timeout message — they are different failures.
+      if (rotationSignal?.aborted) {
+        throw rotationSignal.reason instanceof Error
+          ? rotationSignal.reason
+          : new Error(String(rotationSignal.reason));
+      }
+      // Otherwise surface the abort as an actionable message instead of a bare
+      // DOMException, so the gate log / client error names the stalled call.
+      if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
+        throw new Error(`PAM API request timed out after ${fetchTimeoutMs}ms: ${url}`, {
+          cause: err,
+        });
+      }
+      throw err;
+    }
   }
 
   type CreateGrantOnceResult = { kind: "ok"; grant: PamGrantResponse } | { kind: "open-conflict" };
@@ -384,6 +451,7 @@ export function createPamModule(
   async function createGrantOnce(
     entitlementPath: string,
     justification?: string,
+    signal?: AbortSignal,
   ): Promise<CreateGrantOnceResult> {
     const url = `${PAM_API_BASE}/${entitlementPath}/grants`;
     const body = {
@@ -393,10 +461,14 @@ export function createPamModule(
       },
     };
 
-    const res = await pamFetch(url, {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
+    const res = await pamFetch(
+      url,
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+      },
+      signal,
+    );
 
     if (res.status === 409) {
       return { kind: "open-conflict" };
@@ -447,7 +519,10 @@ export function createPamModule(
     skippedOtherRequester: number;
   }
 
-  async function scanForOpenGrants(entitlementPath: string): Promise<OpenGrantScan> {
+  async function scanForOpenGrants(
+    entitlementPath: string,
+    signal?: AbortSignal,
+  ): Promise<OpenGrantScan> {
     // PAM's grants.list endpoint rejects every `filter=` we've tried as
     // "invalid list filter", so we list unfiltered and bucket client-side.
     // ENDED grants stick around in the response, so on a busy entitlement
@@ -473,7 +548,7 @@ export function createPamModule(
 
     for (let page = 0; page < LIST_GRANTS_MAX_PAGES; page++) {
       const url = pageToken ? `${baseUrl}&pageToken=${encodeURIComponent(pageToken)}` : baseUrl;
-      const res = await pamFetch(url);
+      const res = await pamFetch(url, undefined, signal);
 
       if (!res.ok) {
         const text = await res.text();
@@ -515,8 +590,9 @@ export function createPamModule(
   async function createGrantWithRecovery(
     entitlementPath: string,
     justification?: string,
+    signal?: AbortSignal,
   ): Promise<PamGrantResponse> {
-    const first = await createGrantOnce(entitlementPath, justification);
+    const first = await createGrantOnce(entitlementPath, justification, signal);
     if (first.kind === "ok") return first.grant;
 
     // 409 / 400 FAILED_PRECONDITION ("open Grant"): another grant of ours is
@@ -524,7 +600,7 @@ export function createPamModule(
     // (reuse it) or merely blocking (expired-but-laggy or stuck pending —
     // withdraw and retry). withdrawGrantAndWait polls the LRO so a single
     // retry suffices.
-    const scan = await scanForOpenGrants(entitlementPath);
+    const scan = await scanForOpenGrants(entitlementPath, signal);
     if (scan.usable) return scan.usable;
 
     if (scan.blocking.length === 0) {
@@ -540,11 +616,18 @@ export function createPamModule(
 
     const withdrawn = (
       await Promise.all(
-        scan.blocking.map((g) => withdrawGrantAndWait(g.name, "clearing blocking grant on retry")),
+        scan.blocking.map((g) =>
+          withdrawGrantAndWait(
+            g.name,
+            "clearing blocking grant on retry",
+            WITHDRAW_OP_TIMEOUT_MS,
+            signal,
+          ),
+        ),
       )
     ).filter(Boolean).length;
 
-    const retry = await createGrantOnce(entitlementPath, justification);
+    const retry = await createGrantOnce(entitlementPath, justification, signal);
     if (retry.kind === "ok") return retry.grant;
 
     // The retry still conflicts after we waited for withdraw to complete.
@@ -566,16 +649,21 @@ export function createPamModule(
    */
   class GrantTerminalStateError extends Error {}
 
-  async function pollGrant(grantName: string): Promise<PamGrantResponse> {
+  async function pollGrant(grantName: string, signal?: AbortSignal): Promise<PamGrantResponse> {
     const deadline = now() + POLL_TIMEOUT_MS;
     let delay = POLL_INITIAL_MS;
 
     while (now() < deadline) {
+      // The rotation budget can fire mid-poll; stop promptly rather than
+      // polling out the full POLL_TIMEOUT_MS after the caller has given up.
+      if (signal?.aborted) {
+        throw signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason));
+      }
       await sleep(delay);
       delay = Math.min(delay * 2, POLL_MAX_MS);
 
       const url = `${PAM_API_BASE}/${grantName}`;
-      const res = await pamFetch(url);
+      const res = await pamFetch(url, undefined, signal);
 
       if (!res.ok) {
         const text = await res.text();
@@ -629,6 +717,35 @@ export function createPamModule(
     return entry;
   }
 
+  /**
+   * Run a rotation under the overall wall-clock budget. On expiry the budget
+   * both (a) aborts the rotation's `AbortSignal` — cancelling any in-flight PAM
+   * fetch and making every later one reject immediately, so the abandoned
+   * rotation stops issuing calls and stops mutating shared state (grantCache) —
+   * and (b) rejects the race, so `ensureGrant` settles and frees the
+   * single-flight slot even if the rotation is wedged in `getAccessToken` (the
+   * one step no signal can cancel). `Promise.race` keeps an internal reaction
+   * on `work`, so its eventual rejection is handled (no unhandledRejection).
+   * `doRotateGrant` also re-checks the signal before writing the cache and
+   * best-effort withdraws any grant it created post-abort, so a budget hit
+   * neither clobbers a newer rotation's cache entry nor leaks an open grant.
+   */
+  function withRotationBudget(
+    run: (signal: AbortSignal) => Promise<PamGrantResult>,
+  ): Promise<PamGrantResult> {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        const err = new Error(`PAM grant rotation exceeded its ${rotationBudgetMs}ms budget`);
+        controller.abort(err);
+        reject(err);
+      }, rotationBudgetMs);
+      timer.unref?.();
+    });
+    return Promise.race([run(controller.signal), deadline]).finally(() => clearTimeout(timer));
+  }
+
   async function ensureGrant(
     entitlementPath: string,
     justification?: string,
@@ -646,7 +763,9 @@ export function createPamModule(
     const pending = inFlightRotations.get(entitlementPath);
     if (pending) return pending;
 
-    const rotation = doRotateGrant(entitlementPath, justification, cached);
+    const rotation = withRotationBudget((signal) =>
+      doRotateGrant(entitlementPath, justification, cached, signal),
+    );
     inFlightRotations.set(entitlementPath, rotation);
     try {
       return await rotation;
@@ -668,17 +787,23 @@ export function createPamModule(
     entitlementPath: string,
     justification: string | undefined,
     cached: CachedGrant | undefined,
+    signal?: AbortSignal,
   ): Promise<PamGrantResult> {
     // Withdraw the cached grant before re-creating. Even when our computed
     // expiry has passed, PAM's state can lag and leave the grant in an "open"
     // state that 409s the immediate createGrant. withdrawGrantAndWait polls
     // the LRO so the follow-up create doesn't race the withdraw.
     if (cached) {
-      await withdrawGrantAndWait(cached.name, "renewing before expiry");
+      await withdrawGrantAndWait(
+        cached.name,
+        "renewing before expiry",
+        WITHDRAW_OP_TIMEOUT_MS,
+        signal,
+      );
     }
     grantCache.delete(entitlementPath);
 
-    const grant = await createGrantWithRecovery(entitlementPath, justification);
+    const grant = await createGrantWithRecovery(entitlementPath, justification, signal);
 
     if (!grant.name) {
       throw new Error("PAM API returned a grant with no resource name");
@@ -687,7 +812,7 @@ export function createPamModule(
     let activated = grant;
     if (!isActiveState(grant.state)) {
       try {
-        activated = await pollGrant(grant.name);
+        activated = await pollGrant(grant.name, signal);
       } catch (err) {
         // A grant that never activated (poll timeout or API failure) still
         // holds the open-grant slot and would 409-block every follow-up
@@ -699,6 +824,19 @@ export function createPamModule(
         throw err;
       }
     }
+
+    // The budget may have fired in the no-await gap between pollGrant returning
+    // and this point. If so, the caller has already received the budget error
+    // and freed the single-flight slot, and a newer rotation may now own the
+    // cache entry — writing here would clobber it (stale TTL) or resurrect a
+    // grant a later rotation already withdrew. Best-effort withdraw the grant
+    // we just created (no signal: it is aborted, and this cleanup must run) so
+    // it is not orphaned, then surface the budget error. (See withRotationBudget.)
+    if (signal?.aborted) {
+      await withdrawGrantAndWait(grant.name, "rotation aborted by budget after activation");
+      throw signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason));
+    }
+
     const entry = cacheGrant(entitlementPath, activated);
 
     return {
@@ -709,7 +847,11 @@ export function createPamModule(
     };
   }
 
-  async function pollWithdrawOperation(operationName: string, deadlineMs: number): Promise<void> {
+  async function pollWithdrawOperation(
+    operationName: string,
+    deadlineMs: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
     const deadline = now() + deadlineMs;
     let delay = WITHDRAW_OP_INITIAL_MS;
 
@@ -721,7 +863,7 @@ export function createPamModule(
       delay = Math.min(delay * 2, WITHDRAW_OP_MAX_MS);
 
       // The Operation was created on the v1beta surface, so poll it there.
-      const res = await pamFetch(`${PAM_API_BASE_V1BETA}/${operationName}`);
+      const res = await pamFetch(`${PAM_API_BASE_V1BETA}/${operationName}`, undefined, signal);
 
       if (res.ok) {
         const op = (await res.json().catch(() => ({}))) as PamOperation;
@@ -770,11 +912,12 @@ export function createPamModule(
     grantName: string,
     reason: string,
     deadlineMs: number = WITHDRAW_OP_TIMEOUT_MS,
+    signal?: AbortSignal,
   ): Promise<boolean> {
     const startedAt = now();
     try {
       const url = `${PAM_API_BASE_V1BETA}/${grantName}:withdraw`;
-      const res = await pamFetch(url, { method: "POST" });
+      const res = await pamFetch(url, { method: "POST" }, signal);
 
       if (!res.ok) {
         const text = await res.text();
@@ -795,7 +938,7 @@ export function createPamModule(
 
       const remaining = deadlineMs - (now() - startedAt);
       if (remaining > 0) {
-        await pollWithdrawOperation(op.name, remaining);
+        await pollWithdrawOperation(op.name, remaining, signal);
       }
       return true;
     } catch (err) {

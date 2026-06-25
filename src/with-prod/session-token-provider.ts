@@ -3,7 +3,17 @@ import { CredentialsExpiredError } from "../gate/credentials-error.ts";
 import { TARGET_PROJECT_HEADER } from "../gate/types.ts";
 import type { CachedToken, TokenProvider } from "../metadata-proxy/types.ts";
 import { createCachingTokenProvider } from "./caching-token-provider.ts";
-import { throwTypedGateError } from "./fetch-prod-token.ts";
+import { fetchWithGateTimeout, throwTypedGateError } from "./fetch-prod-token.ts";
+
+/**
+ * Backstop timeout for a session token refresh. No confirmation happens on this
+ * path (the session is pre-approved); the gate's work is a PAM grant renewal
+ * (bounded by its rotation budget) plus a token mint. Sized above that — and
+ * above the acquisition cap is unnecessary since there is no confirmation here
+ * — so a wedged gate surfaces as an error instead of silently stalling the
+ * wrapped command, while never aborting a legitimately slow PAM rotation.
+ */
+const SESSION_REFRESH_TIMEOUT_MS = 480_000;
 
 export interface SessionTokenProviderOptions {
   /** Override fetch for testing. */
@@ -42,9 +52,11 @@ export function createSessionTokenProvider(
 
   return createCachingTokenProvider(initialToken, options.onRefresh, async () => {
     const url = `${baseUrl}/token?session=${encodeURIComponent(sessionId)}`;
-    const res = await fetchFn(
+    const res = await fetchWithGateTimeout(
+      fetchFn,
       url,
-      refreshHeaders ? { ...extraOpts, headers: refreshHeaders } : extraOpts,
+      { ...extraOpts, ...(refreshHeaders ? { headers: refreshHeaders } : {}) },
+      SESSION_REFRESH_TIMEOUT_MS,
     );
 
     if (res.status === 401) {

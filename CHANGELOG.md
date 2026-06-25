@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Fixed
+
+- **PAM grant acquisition could hang for 10+ minutes.** Every PAM API call
+  (create, list, poll, withdraw) and every `with-prod` prod-token acquisition
+  request (session creation, token, identity, session refresh) now carries a
+  request timeout, and a whole grant rotation is bounded by an overall
+  wall-clock budget. Previously none of these calls had a timeout, so a stalled
+  connection — a half-open socket, or a PAM backend slowed by IAM-replication
+  lag — waited on the OS TCP retransmission timeout (minutes). Because grant
+  rotation is single-flight per entitlement, one wedged call also blocked every
+  concurrent and subsequent prod-token request for that entitlement; when the
+  rotation budget fires it now cancels the rotation's in-flight PAM fetches and
+  frees the single-flight slot, so a wedged rotation can no longer pin later
+  callers, clobber a newer rotation's cache entry, or leave a grant orphaned.
+
+### Changed
+
+- `pam_grant_ttl_seconds` must now be greater than the 5-minute drain margin
+  (range 301–43200, was 60–43200). A grant at or below the margin is never
+  usable and mints already-expired tokens, sending the client into a refresh
+  storm — this is now rejected at config-parse time instead of failing silently
+  at runtime. The same floor applies to the effective grant lifetime: when
+  `pam_policy` is set and `pam_grant_ttl_seconds` is unset, `token_ttl_seconds`
+  becomes the grant lifetime and is validated against the drain margin too.
+
 ## [0.12.0] - 2026-06-16
 
 ### Added

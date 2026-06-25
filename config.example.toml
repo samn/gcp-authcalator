@@ -71,7 +71,9 @@ service_account = "dev-runner@my-gcp-project.iam.gserviceaccount.com"
 # Keep this low to limit exfiltration risk. Tokens auto-refresh within sessions.
 # token_ttl_seconds = 3600
 
-# PAM grant lifetime in seconds (default: token_ttl_seconds, range: 60–43200).
+# PAM grant lifetime in seconds (default: token_ttl_seconds, range: 301–43200 —
+# must exceed the 5-minute drain margin, otherwise every minted token is clamped
+# to 0s and the client refresh-storms).
 # Configure independently of token_ttl_seconds when PAM/IAM propagation latency
 # makes per-rotation pauses visible to callers: a longer grant means one cached
 # grant serves many short-lived tokens before the gate calls PAM again. Minted
