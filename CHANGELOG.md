@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [0.12.1] - 2026-06-25
+
 ### Fixed
 
 - **PAM grant acquisition could hang for 10+ minutes.** Every PAM API call
