@@ -283,11 +283,6 @@ describe("ConfigSchema", () => {
     expect(config.pam_grant_ttl_seconds).toBeUndefined();
   });
 
-  test("accepts minimum pam_grant_ttl_seconds of 60", () => {
-    const config = ConfigSchema.parse({ pam_grant_ttl_seconds: 60 });
-    expect(config.pam_grant_ttl_seconds).toBe(60);
-  });
-
   test("accepts maximum pam_grant_ttl_seconds of 43200", () => {
     const config = ConfigSchema.parse({ pam_grant_ttl_seconds: 43200 });
     expect(config.pam_grant_ttl_seconds).toBe(43200);
@@ -295,6 +290,26 @@ describe("ConfigSchema", () => {
 
   test("rejects pam_grant_ttl_seconds below 60", () => {
     expect(() => ConfigSchema.parse({ pam_grant_ttl_seconds: 30 })).toThrow(z.ZodError);
+  });
+
+  // A grant must outlive the 5-minute drain margin, otherwise hasUsableLifetime
+  // is never satisfied and every minted token is clamped to 0s (born expired),
+  // sending the client into a refresh storm. The schema must reject it.
+  test("rejects pam_grant_ttl_seconds at or below the 300s drain margin", () => {
+    expect(() => ConfigSchema.parse({ pam_grant_ttl_seconds: 300 })).toThrow(/drain margin/);
+    expect(() => ConfigSchema.parse({ pam_grant_ttl_seconds: 120 })).toThrow(/drain margin/);
+  });
+
+  test("accepts the smallest grant TTL above the drain margin", () => {
+    const config = ConfigSchema.parse({ pam_grant_ttl_seconds: 301 });
+    expect(config.pam_grant_ttl_seconds).toBe(301);
+  });
+
+  test("does not apply the drain-margin floor to token_ttl_seconds", () => {
+    // Only the PAM grant TTL carries the drain-margin constraint; a short token
+    // TTL is legitimate (the token is just minted with a short life).
+    const config = ConfigSchema.parse({ token_ttl_seconds: 120 });
+    expect(config.token_ttl_seconds).toBe(120);
   });
 
   test("rejects pam_grant_ttl_seconds above 43200", () => {
@@ -370,6 +385,40 @@ describe("GateConfigSchema", () => {
     expect(config.project_id).toBe("my-proj");
     expect(config.service_account).toBe("sa@proj.iam.gserviceaccount.com");
     expect(config.socket_path).toBe(getDefaultSocketPath());
+  });
+
+  // The drain-margin floor must also cover the fallback: when pam_policy is set
+  // and pam_grant_ttl_seconds is unset, token_ttl_seconds becomes the grant
+  // lifetime, so a sub-margin token TTL must be rejected too — otherwise the
+  // born-expired/refresh-storm failure slips through.
+  test("rejects a sub-margin token_ttl_seconds when pam_policy makes it the grant TTL", () => {
+    expect(() =>
+      GateConfigSchema.parse({
+        project_id: "my-proj",
+        pam_policy: "prod-admin",
+        token_ttl_seconds: 120,
+      }),
+    ).toThrow(/drain margin/);
+  });
+
+  test("allows a sub-margin token_ttl_seconds when no pam_policy is configured", () => {
+    const config = GateConfigSchema.parse({
+      project_id: "my-proj",
+      service_account: "sa@proj.iam.gserviceaccount.com",
+      token_ttl_seconds: 120,
+    });
+    expect(config.token_ttl_seconds).toBe(120);
+  });
+
+  test("allows a sub-margin token_ttl_seconds when pam_grant_ttl_seconds is set above the margin", () => {
+    const config = GateConfigSchema.parse({
+      project_id: "my-proj",
+      pam_policy: "prod-admin",
+      token_ttl_seconds: 120,
+      pam_grant_ttl_seconds: 3600,
+    });
+    expect(config.token_ttl_seconds).toBe(120);
+    expect(config.pam_grant_ttl_seconds).toBe(3600);
   });
 
   test("accepts operator_socket_path without operator_socket_group (UID mode)", () => {

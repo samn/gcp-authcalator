@@ -46,6 +46,30 @@ describe("createSessionTokenProvider", () => {
     expect(callCount()).toBe(0);
   });
 
+  test("attaches a backstop abort signal to the session refresh request", async () => {
+    // A silent refresh hang stalls the wrapped command; the refresh must carry
+    // a timeout signal so a wedged gate surfaces as an error instead.
+    let capturedInit: RequestInit | undefined;
+    const fetchFn = (async (_url: string, init: RequestInit) => {
+      capturedInit = init;
+      return new Response(JSON.stringify({ access_token: "fresh", expires_in: 3600 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof globalThis.fetch;
+
+    // Near-expiry initial token forces a refresh on the first getToken().
+    const nearExpiry: CachedToken = {
+      access_token: "old",
+      expires_at: new Date(Date.now() + 60_000),
+    };
+    const provider = createSessionTokenProvider(unixConn, "session-id", nearExpiry, { fetchFn });
+
+    await provider.getToken();
+
+    expect(capturedInit?.signal).toBeInstanceOf(AbortSignal);
+  });
+
   test("returns same cached token on repeated calls", async () => {
     const { fetchFn, callCount } = mockFetch([]);
     const provider = createSessionTokenProvider(unixConn, "session-id", validInitialToken, {

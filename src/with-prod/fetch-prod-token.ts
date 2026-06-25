@@ -1,6 +1,63 @@
-import { type GateConnection, connectionFetchOpts } from "../gate/connection.ts";
+import {
+  type BunRequestInit,
+  type GateConnection,
+  connectionFetchOpts,
+} from "../gate/connection.ts";
 import { CREDENTIALS_EXPIRED_CODE, CredentialsExpiredError } from "../gate/credentials-error.ts";
 import { SESSION_NOT_PERMITTED_CODE, TARGET_PROJECT_HEADER } from "../gate/types.ts";
+
+// ---------------------------------------------------------------------------
+// Backstop timeouts for talking to the gate
+//
+// These exist to convert a wedged gate socket from an infinite client hang
+// into a clear, actionable error — NOT to bound normal latency (the gate's own
+// per-request and rotation timeouts do that). They are therefore sized ABOVE
+// the gate's legitimate worst-case wait so they never false-abort a real one;
+// the hierarchy is: gate per-call (10 s) < gate rotation budget (~420 s) <
+// these client caps. See `fetchWithGateTimeout`.
+// ---------------------------------------------------------------------------
+
+/**
+ * Acquisition requests (`/token?level=prod`, `POST /session`) block on
+ * host-side confirmation (≤120 s pending-queue) AND a PAM grant rotation
+ * (≤ the gate's rotation budget), so this is sized above their sum.
+ */
+const PROD_FETCH_TIMEOUT_MS = 600_000;
+
+/**
+ * The lightweight `/identity` read does no confirmation or PAM work (just a
+ * tokeninfo lookup), so it gets a short cap.
+ */
+const IDENTITY_FETCH_TIMEOUT_MS = 30_000;
+
+/**
+ * Fetch the gate with a backstop timeout, rethrowing an abort as an actionable,
+ * URL-bearing error instead of a bare `DOMException` — mirroring the gate's own
+ * `pamFetch`, so a wedged socket surfaces "gcp-gate request timed out after
+ * Nms: <url>" rather than "The operation timed out". Uses an AbortController +
+ * `clearTimeout` so the (multi-minute) timer is released the instant the
+ * request settles, rather than lingering — important on the repeatedly-called
+ * session-refresh path.
+ */
+export async function fetchWithGateTimeout(
+  fetchFn: typeof globalThis.fetch,
+  url: string,
+  init: BunRequestInit,
+  timeoutMs: number,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetchFn(url, { ...init, signal: controller.signal });
+  } catch (err) {
+    if (err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError")) {
+      throw new Error(`gcp-gate request timed out after ${timeoutMs}ms: ${url}`, { cause: err });
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /** Raised when the gate signals that sessions are disabled on this socket. */
 export class SessionNotPermittedError extends Error {
@@ -103,7 +160,12 @@ export async function fetchProdAccessToken(
   if (options.tokenTtlSeconds !== undefined) {
     tokenUrl += `&token_ttl_seconds=${options.tokenTtlSeconds}`;
   }
-  const tokenRes = await fetchFn(tokenUrl, { ...extraOpts, headers });
+  const tokenRes = await fetchWithGateTimeout(
+    fetchFn,
+    tokenUrl,
+    { ...extraOpts, headers },
+    PROD_FETCH_TIMEOUT_MS,
+  );
 
   if (!tokenRes.ok) {
     const text = await tokenRes.text();
@@ -137,7 +199,12 @@ export async function fetchProdToken(
 
   const token = await fetchProdAccessToken(conn, options);
 
-  const identityRes = await fetchFn(`${baseUrl}/identity`, extraOpts);
+  const identityRes = await fetchWithGateTimeout(
+    fetchFn,
+    `${baseUrl}/identity`,
+    extraOpts,
+    IDENTITY_FETCH_TIMEOUT_MS,
+  );
   if (!identityRes.ok) {
     const text = await identityRes.text();
     throwTypedGateError(text);
@@ -209,7 +276,12 @@ export async function createProdSession(
     sessionUrl += `?${params.join("&")}`;
   }
 
-  const res = await fetchFn(sessionUrl, { ...extraOpts, method: "POST", headers });
+  const res = await fetchWithGateTimeout(
+    fetchFn,
+    sessionUrl,
+    { ...extraOpts, method: "POST", headers },
+    PROD_FETCH_TIMEOUT_MS,
+  );
 
   if (!res.ok) {
     const text = await res.text();

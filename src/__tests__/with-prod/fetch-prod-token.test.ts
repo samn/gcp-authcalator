@@ -32,6 +32,74 @@ function mockGateFetch(
   }) as unknown as typeof globalThis.fetch;
 }
 
+describe("acquisition-path fetch timeouts", () => {
+  // These calls block on host-side confirmation and PAM grant creation, so a
+  // wedged gate would otherwise hang the client forever. Each acquisition
+  // request must carry a backstop abort signal.
+  test("attaches an abort signal to the prod-token and identity requests", async () => {
+    const signalsByUrl: Record<string, unknown> = {};
+    const fetchFn = (async (url: string, init: RequestInit) => {
+      signalsByUrl[url] = init?.signal;
+      if (url.includes("/identity")) {
+        return new Response(JSON.stringify({ email: "a@b.com" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ access_token: "tok", expires_in: 1800 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof globalThis.fetch;
+
+    await fetchProdToken({ mode: "unix" as const, socketPath: "/tmp/gate.sock" }, { fetchFn });
+
+    expect(signalsByUrl["http://localhost/token?level=prod"]).toBeInstanceOf(AbortSignal);
+    expect(signalsByUrl["http://localhost/identity"]).toBeInstanceOf(AbortSignal);
+  });
+
+  test("attaches an abort signal to the session-creation request", async () => {
+    let capturedInit: RequestInit | undefined;
+    const fetchFn = (async (_url: string, init: RequestInit) => {
+      capturedInit = init;
+      return new Response(
+        JSON.stringify({
+          session_id: "s",
+          access_token: "t",
+          email: "e@x.com",
+          expires_in: 3600,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as unknown as typeof globalThis.fetch;
+
+    await createProdSession({ mode: "unix" as const, socketPath: "/tmp/gate.sock" }, { fetchFn });
+
+    expect(capturedInit?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  test("surfaces an actionable, URL-bearing error (not a bare DOMException) when a request aborts", async () => {
+    // Simulate the backstop timer firing: fetch rejects with an AbortError.
+    const fetchFn = (async () => {
+      throw new DOMException("The operation was aborted", "AbortError");
+    }) as unknown as typeof globalThis.fetch;
+
+    await expect(
+      createProdSession({ mode: "unix" as const, socketPath: "/tmp/gate.sock" }, { fetchFn }),
+    ).rejects.toThrow(/gcp-gate request timed out after \d+ms: .*\/session/);
+  });
+
+  test("lets non-abort fetch errors propagate unchanged", async () => {
+    const fetchFn = (async () => {
+      throw new Error("ECONNREFUSED");
+    }) as unknown as typeof globalThis.fetch;
+
+    await expect(
+      createProdSession({ mode: "unix" as const, socketPath: "/tmp/gate.sock" }, { fetchFn }),
+    ).rejects.toThrow(/ECONNREFUSED/);
+  });
+});
+
 describe("fetchProdToken", () => {
   test("fetches token and identity with correct URLs", async () => {
     const capturedUrls: string[] = [];

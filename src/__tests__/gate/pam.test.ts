@@ -2159,3 +2159,167 @@ describe("scanForOpenGrants requester filtering", () => {
     expect(withdrawn[0]).toContain("own-pending");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Per-request fetch timeout and overall rotation budget
+//
+// These bound the two ways a grant rotation could otherwise hang forever:
+//   - a single PAM HTTP call that never completes (half-open connection)
+//   - the cumulative time of a rotation, including the ADC token acquisition
+//     that runs before every PAM call and is NOT covered by the per-fetch
+//     signal.
+// Without these bounds a wedged call also poisons the single-flight slot, so
+// every concurrent and subsequent caller for the entitlement blocks too.
+// ---------------------------------------------------------------------------
+
+type Settled<T> =
+  | { status: "resolved"; value: T }
+  | { status: "rejected"; error: Error }
+  | { status: "pending" };
+
+/**
+ * Await `p`, but resolve to `{status:"pending"}` if it hasn't settled within
+ * `ms`. bun's per-test timeout does NOT abort a never-settling promise
+ * (verified against bun 1.3.x), so a test that asserts "this call is bounded"
+ * must bound the wait itself — otherwise a regression would hang the suite
+ * instead of failing it. The guard timer is unref'd and cleared so it never
+ * keeps the loop alive.
+ */
+async function settleWithin<T>(p: Promise<T>, ms: number): Promise<Settled<T>> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const guard = new Promise<Settled<T>>((resolve) => {
+    timer = setTimeout(() => resolve({ status: "pending" }), ms);
+    timer.unref?.();
+  });
+  const settled = await Promise.race([
+    p.then(
+      (value): Settled<T> => ({ status: "resolved", value }),
+      (error): Settled<T> => ({ status: "rejected", error }),
+    ),
+    guard,
+  ]);
+  clearTimeout(timer);
+  return settled;
+}
+
+/** Poll `pred` every 10 ms until it is true or `ms` elapses. */
+async function until(pred: () => boolean, ms: number): Promise<boolean> {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (pred()) return true;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  return pred();
+}
+
+describe("ensureGrant fetch timeout and rotation budget", () => {
+  const entitlementPath = "projects/p/locations/global/entitlements/e";
+
+  test("aborts a hung PAM request via the per-request fetch timeout", async () => {
+    // A fetch that settles only when its AbortSignal fires — so it resolves
+    // iff pamFetch attaches a per-request timeout signal.
+    const hangingFetch = ((_url: string, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          reject((init.signal as AbortSignal).reason);
+        });
+      })) as unknown as typeof globalThis.fetch;
+
+    const pam = createPamModule(async () => "token", {
+      fetchFn: hangingFetch,
+      fetchTimeoutMs: 50,
+    });
+
+    const outcome = await settleWithin(pam.ensureGrant(entitlementPath), 1000);
+    expect(outcome.status).toBe("rejected");
+    if (outcome.status === "rejected") {
+      expect(outcome.error.message).toMatch(/timed out/i);
+    }
+  });
+
+  test("bounds the whole rotation by the budget even when ADC token acquisition hangs", async () => {
+    // getAccessToken runs inside pamFetch *before* the HTTP call and is not
+    // covered by the per-fetch signal, so only the overall budget can bound it.
+    const pam = createPamModule(() => new Promise<string>(() => {}), {
+      fetchFn: mockFetch([]),
+      rotationBudgetMs: 100,
+    });
+
+    const outcome = await settleWithin(pam.ensureGrant(entitlementPath), 1000);
+    expect(outcome.status).toBe("rejected");
+    if (outcome.status === "rejected") {
+      expect(outcome.error.message).toMatch(/budget/i);
+    }
+  });
+
+  test("a hung rotation clears the in-flight slot so a later call recovers", async () => {
+    const grantName = `${entitlementPath}/grants/g1`;
+    let tokenCalls = 0;
+    const getToken = (): Promise<string> => {
+      tokenCalls++;
+      // First rotation hangs forever; the budget must abort it and clear the
+      // single-flight slot so a fresh call can proceed.
+      if (tokenCalls === 1) return new Promise<string>(() => {});
+      return Promise.resolve("token");
+    };
+
+    const pam = createPamModule(getToken, {
+      fetchFn: mockFetch([{ status: 200, body: makeActivatedGrant(grantName) }]),
+      rotationBudgetMs: 100,
+    });
+
+    const first = await settleWithin(pam.ensureGrant(entitlementPath), 1000);
+    expect(first.status).toBe("rejected");
+
+    // Slot cleared → a fresh rotation starts and succeeds instead of returning
+    // the previous (still-hung) promise.
+    const second = await settleWithin(pam.ensureGrant(entitlementPath), 1000);
+    expect(second.status).toBe("resolved");
+    if (second.status === "resolved") {
+      expect(second.value.name).toBe(grantName);
+    }
+  });
+
+  test("a budget abort during polling rejects promptly and withdraws the un-activated grant", async () => {
+    // The created grant never activates; the budget must fire mid-poll, reject
+    // the rotation, and best-effort withdraw the grant so it is not orphaned
+    // (rather than letting the abandoned rotation cache or leak it).
+    const grantName = `${entitlementPath}/grants/pending-1`;
+    const withdrawn: string[] = [];
+    const pendingBody = JSON.stringify({
+      name: grantName,
+      state: "APPROVAL_AWAITED",
+      requestedDuration: "3600s",
+    });
+
+    const fetchFn = (async (url: string, init?: RequestInit) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (method === "POST" && url.includes(":withdraw")) {
+        withdrawn.push(url);
+        return new Response("{}", { status: 200 });
+      }
+      // create POST and poll GET both return a never-activating grant.
+      return new Response(pendingBody, {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof globalThis.fetch;
+
+    const pam = createPamModule(async () => "token", {
+      fetchFn,
+      rotationBudgetMs: 100,
+      // Cap the real poll back-off so the budget fires within a few iterations.
+      sleepFn: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 10))),
+    });
+
+    const outcome = await settleWithin(pam.ensureGrant(entitlementPath), 2000);
+    expect(outcome.status).toBe("rejected");
+    if (outcome.status === "rejected") {
+      expect(outcome.error.message).toMatch(/budget/i);
+    }
+
+    // The grant we created must be withdrawn (background cleanup), not orphaned.
+    expect(await until(() => withdrawn.length > 0, 2000)).toBe(true);
+    expect(withdrawn[0]).toContain("pending-1");
+  });
+});
