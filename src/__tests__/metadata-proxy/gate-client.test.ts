@@ -516,3 +516,88 @@ describe("createGateClient — getUniverseDomain", () => {
     expect(result).toBe("googleapis.com");
   });
 });
+
+describe("createGateClient — fetch timeouts", () => {
+  /**
+   * A fetch mock that records the init options passed to it. Used to verify
+   * the gate-client attaches an AbortSignal to every request, so a wedged
+   * gate socket cannot hang the container indefinitely. Returns the right
+   * shape for each endpoint so the request completes normally.
+   */
+  function capturingFetch(): {
+    fetchFn: typeof globalThis.fetch;
+    lastInit: () => RequestInit | undefined;
+  } {
+    let last: RequestInit | undefined;
+    const fetchFn = (async (url: string, init?: RequestInit) => {
+      last = init;
+      if (url.includes("/project-number")) {
+        return new Response(JSON.stringify({ project_number: "123456" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.includes("/universe-domain")) {
+        return new Response(JSON.stringify({ universe_domain: "googleapis.com" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(
+        JSON.stringify({ access_token: "tok", expires_in: 3600, token_type: "Bearer" }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as unknown as typeof globalThis.fetch;
+    return { fetchFn, lastInit: () => last };
+  }
+
+  test("getToken attaches an AbortSignal", async () => {
+    const { fetchFn, lastInit } = capturingFetch();
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
+    await client.getToken();
+    expect(lastInit()?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  test("getNumericProjectId attaches an AbortSignal", async () => {
+    const { fetchFn, lastInit } = capturingFetch();
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
+    await client.getNumericProjectId();
+    expect(lastInit()?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  test("getUniverseDomain attaches an AbortSignal", async () => {
+    const { fetchFn, lastInit } = capturingFetch();
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
+    await client.getUniverseDomain();
+    expect(lastInit()?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  test("getToken surfaces a timeout as an actionable error naming the URL", async () => {
+    // fetch that rejects with an AbortError, simulating a timed-out request.
+    const fetchFn = (async () => {
+      const err = new DOMException("The operation timed out", "TimeoutError");
+      throw err;
+    }) as unknown as typeof globalThis.fetch;
+
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
+    await expect(client.getToken()).rejects.toThrow(/gcp-gate request timed out/);
+  });
+
+  test("getNumericProjectId surfaces a timeout as an actionable error naming the URL", async () => {
+    const fetchFn = (async () => {
+      throw new DOMException("aborted", "AbortError");
+    }) as unknown as typeof globalThis.fetch;
+
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
+    await expect(client.getNumericProjectId()).rejects.toThrow(/gcp-gate request timed out/);
+  });
+
+  test("getUniverseDomain surfaces a timeout as an actionable error naming the URL", async () => {
+    const fetchFn = (async () => {
+      throw new DOMException("aborted", "AbortError");
+    }) as unknown as typeof globalThis.fetch;
+
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
+    await expect(client.getUniverseDomain()).rejects.toThrow(/gcp-gate request timed out/);
+  });
+});

@@ -3,11 +3,29 @@ import {
   type GateConnection,
   type BunRequestInit,
   connectionFetchOpts,
+  fetchWithGateTimeout,
 } from "../gate/connection.ts";
 import type { CachedToken, GateClient } from "./types.ts";
 
 /** Minimum remaining lifetime before we re-fetch a cached token (5 minutes). */
 const CACHE_MARGIN_MS = 5 * 60 * 1000;
+
+/**
+ * Backstop timeout for gate fetches originating from the metadata proxy.
+ *
+ * Dev tokens, project-number, and universe-domain requests involve no human
+ * confirmation — only ADC + impersonation / lookup — so legitimate latency is
+ * small. Without this cap a wedged gate socket (half-open TCP, dead gate
+ * process with socket file present, NAT/LB idle-drop on the TCP+mTLS path)
+ * hangs every container command on the OS TCP retransmission timeout (~15 min
+ * on Linux with default `tcp_retries2`). The rest of the codebase bounds
+ * gate fetches (3 s healthcheck, 5 s kube-token, 10 s PAM, 30 s identity,
+ * 480 s session refresh); the dev-token path was the lone gap.
+ *
+ * 30 s matches `IDENTITY_FETCH_TIMEOUT_MS` and comfortably covers slow
+ * ADC/impersonation while still converting a stall into a clear error.
+ */
+const GATE_FETCH_TIMEOUT_MS = 30_000;
 
 export interface GateClientOptions {
   /** Override fetch for testing. */
@@ -140,7 +158,7 @@ export function createGateClient(
     const tokenUrl = options.scopes
       ? `${baseUrl}/token?scopes=${options.scopes.map(encodeURIComponent).join(",")}`
       : `${baseUrl}/token`;
-    const res = await fetchFn(tokenUrl, extraOpts);
+    const res = await fetchWithGateTimeout(fetchFn, tokenUrl, extraOpts, GATE_FETCH_TIMEOUT_MS);
 
     if (!res.ok) {
       const text = await res.text();
@@ -168,7 +186,12 @@ export function createGateClient(
       return numericProjectIdCache;
     }
 
-    const res = await fetchFn(`${baseUrl}/project-number`, extraOpts);
+    const res = await fetchWithGateTimeout(
+      fetchFn,
+      `${baseUrl}/project-number`,
+      extraOpts,
+      GATE_FETCH_TIMEOUT_MS,
+    );
 
     if (!res.ok) {
       const text = await res.text();
@@ -190,7 +213,12 @@ export function createGateClient(
       return universeDomainCache;
     }
 
-    const res = await fetchFn(`${baseUrl}/universe-domain`, extraOpts);
+    const res = await fetchWithGateTimeout(
+      fetchFn,
+      `${baseUrl}/universe-domain`,
+      extraOpts,
+      GATE_FETCH_TIMEOUT_MS,
+    );
 
     if (!res.ok) {
       const text = await res.text();

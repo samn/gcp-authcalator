@@ -189,7 +189,7 @@ Precedence: CLI flags > environment variables > TOML file > defaults.
 --pam-allowed-policies <ids>  Additional PAM entitlements callers may request (comma-separated)
 --pam-location <loc>       PAM entitlement location (default: global)
 --token-ttl-seconds <secs> Token lifetime in seconds (60–43200, default: 3600)
---pam-grant-ttl-seconds <secs> PAM grant lifetime in seconds (301–43200 — must exceed the 5-min drain margin; default: token-ttl-seconds). Set longer than the token TTL to amortise PAM/IAM propagation latency across multiple refreshes — one grant serves many tokens before the gate rotates it
+--pam-grant-ttl-seconds <secs> PAM grant lifetime in seconds (601–43200 — must exceed 2× the 5-min drain margin; default: token-ttl-seconds). Set longer than the token TTL to amortise PAM/IAM propagation latency across multiple refreshes — one grant serves many tokens before the gate rotates it
 --session-ttl-seconds <secs> Prod session lifetime in seconds (300–86400, default: 28800 / 8h)
 --quota-project <id>       with-prod: GOOGLE_CLOUD_QUOTA_PROJECT for the wrapped command (default: the target project)
 --no-quota-project         with-prod: don't manage GOOGLE_CLOUD_QUOTA_PROJECT (leave the inherited value untouched)
@@ -249,7 +249,7 @@ port = 8173
 # minted tokens before the gate rotates it. Minted tokens are still clamped
 # to the grant's expiry minus the 5-minute drain margin, so this only
 # changes how often the gate calls PAM, not how long any individual token
-# is valid. Range: 301–43200 (must exceed the 5-minute drain margin, else
+# is valid. Range: 601–43200 (must exceed 2× the 5-min drain margin, else
 # every minted token would be born expired). 12 h max.
 # pam_grant_ttl_seconds = 14400  # 4 h
 

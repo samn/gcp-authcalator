@@ -83,23 +83,26 @@ const ttlSecondsSchema = z.coerce.number().int().min(60).max(43200).optional();
 
 /**
  * Lower bound for `pam_grant_ttl_seconds`, in seconds. A PAM grant must outlive
- * the drain margin: `hasUsableLifetime` only treats a grant as usable while it
- * has more than `DRAIN_MARGIN_MS` of life left, and minted tokens are clamped
- * to `grant_expiry - DRAIN_MARGIN_MS`. A grant at or below the margin is never
- * usable and every token it backs is clamped to 0 s (born expired), sending the
- * client into a refresh storm. Flooring the *token clamp* instead would be
- * wrong — it would serve tokens valid past the grant's withdrawal — so the
- * guard belongs here, failing fast at config-parse time.
+ * the drain margin by a comfortable margin: `hasUsableLifetime` only treats a
+ * grant as usable while it has more than `DRAIN_MARGIN_MS` of life left, and
+ * minted tokens are clamped to `grant_expiry - DRAIN_MARGIN_MS`. A grant at or
+ * below the margin is never usable and every token it backs is clamped to 0 s
+ * (born expired), sending the client into a refresh storm. The floor is 2×
+ * the drain margin (600 s): a minimum-configured grant still mints ~5 min
+ * tokens — short but usable, and clearly a "you set the minimum" config smell.
+ * Flooring the *token clamp* instead would be wrong — it would serve tokens
+ * valid past the grant's withdrawal — so the guard belongs here, failing fast
+ * at config-parse time.
  */
 const DRAIN_MARGIN_SECONDS = DRAIN_MARGIN_MS / 1000;
 
 /** `pam_grant_ttl_seconds`: shared TTL bounds, plus the drain-margin floor. */
 const pamGrantTtlSecondsSchema = ttlSecondsSchema.refine(
-  (v) => v === undefined || v > DRAIN_MARGIN_SECONDS,
+  (v) => v === undefined || v > DRAIN_MARGIN_SECONDS * 2,
   {
     message:
-      `pam_grant_ttl_seconds must be greater than the ${DRAIN_MARGIN_SECONDS}s drain margin; ` +
-      `a shorter grant would mint already-expired tokens`,
+      `pam_grant_ttl_seconds must be greater than ${DRAIN_MARGIN_SECONDS * 2}s (2× the ` +
+      `${DRAIN_MARGIN_SECONDS}s drain margin); a shorter grant would mint already-expired tokens`,
   },
 );
 
@@ -209,19 +212,21 @@ export const GateConfigSchema = ConfigSchema.required({
       if (!c.pam_policy) return true;
       // Effective grant lifetime the gate will request, mirroring server.ts:
       // explicit pam_grant_ttl_seconds, else token_ttl_seconds, else the 3600s
-      // default. The pam_grant_ttl_seconds field already carries the drain-margin
-      // floor on its own; this closes the fallback path where an unset grant TTL
-      // silently inherits a sub-margin token_ttl_seconds and mints born-expired
-      // tokens. (3600 mirrors server.ts's default; any sane default exceeds the
-      // margin, so this stays correct regardless of that constant.)
+      // default. The pam_grant_ttl_seconds field already carries the drain-
+      // margin floor on its own; this closes the fallback path where an unset
+      // grant TTL silently inherits a sub-floor token_ttl_seconds and mints
+      // born-expired tokens. (3600 mirrors server.ts's default; any sane
+      // default exceeds the floor, so this stays correct regardless of that
+      // constant.)
       const effectiveGrantTtl = c.pam_grant_ttl_seconds ?? c.token_ttl_seconds ?? 3600;
-      return effectiveGrantTtl > DRAIN_MARGIN_SECONDS;
+      return effectiveGrantTtl > DRAIN_MARGIN_SECONDS * 2;
     },
     {
       message:
         `token_ttl_seconds becomes the PAM grant lifetime when pam_grant_ttl_seconds is unset, so ` +
-        `with pam_policy set it must exceed the ${DRAIN_MARGIN_SECONDS}s drain margin (a shorter grant ` +
-        `mints already-expired tokens). Set pam_grant_ttl_seconds explicitly above ${DRAIN_MARGIN_SECONDS}s.`,
+        `with pam_policy set it must exceed ${DRAIN_MARGIN_SECONDS * 2}s (2× the ${DRAIN_MARGIN_SECONDS}s ` +
+        `drain margin — a shorter grant mints already-expired tokens). ` +
+        `Set pam_grant_ttl_seconds explicitly above ${DRAIN_MARGIN_SECONDS * 2}s.`,
       path: ["token_ttl_seconds"],
     },
   );

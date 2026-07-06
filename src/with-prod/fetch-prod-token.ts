@@ -1,7 +1,7 @@
 import {
-  type BunRequestInit,
   type GateConnection,
   connectionFetchOpts,
+  fetchWithGateTimeout,
 } from "../gate/connection.ts";
 import { CREDENTIALS_EXPIRED_CODE, CredentialsExpiredError } from "../gate/credentials-error.ts";
 import { SESSION_NOT_PERMITTED_CODE, TARGET_PROJECT_HEADER } from "../gate/types.ts";
@@ -29,35 +29,6 @@ const PROD_FETCH_TIMEOUT_MS = 600_000;
  * tokeninfo lookup), so it gets a short cap.
  */
 const IDENTITY_FETCH_TIMEOUT_MS = 30_000;
-
-/**
- * Fetch the gate with a backstop timeout, rethrowing an abort as an actionable,
- * URL-bearing error instead of a bare `DOMException` — mirroring the gate's own
- * `pamFetch`, so a wedged socket surfaces "gcp-gate request timed out after
- * Nms: <url>" rather than "The operation timed out". Uses an AbortController +
- * `clearTimeout` so the (multi-minute) timer is released the instant the
- * request settles, rather than lingering — important on the repeatedly-called
- * session-refresh path.
- */
-export async function fetchWithGateTimeout(
-  fetchFn: typeof globalThis.fetch,
-  url: string,
-  init: BunRequestInit,
-  timeoutMs: number,
-): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetchFn(url, { ...init, signal: controller.signal });
-  } catch (err) {
-    if (err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError")) {
-      throw new Error(`gcp-gate request timed out after ${timeoutMs}ms: ${url}`, { cause: err });
-    }
-    throw err;
-  } finally {
-    clearTimeout(timer);
-  }
-}
 
 /** Raised when the gate signals that sessions are disabled on this socket. */
 export class SessionNotPermittedError extends Error {

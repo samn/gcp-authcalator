@@ -2158,6 +2158,59 @@ describe("scanForOpenGrants requester filtering", () => {
     expect(withdrawn).toHaveLength(1);
     expect(withdrawn[0]).toContain("own-pending");
   });
+
+  test("does not reuse an own grant whose expiry can't be computed (missing createTime)", async () => {
+    // F3: a pre-existing grant missing `createTime` (or `requestedDuration`)
+    // cannot be safely reused — computeGrantExpiry's fallback (now()+15min)
+    // can overstate a reused grant's remaining life, leading to tokens that
+    // outlive the grant's real end. The scan must classify such a grant as
+    // blocking (force a fresh create after withdraw), not usable.
+    const currentTime = 10_000_000;
+    const ownUnparseable = {
+      name: `${entitlementPath}/grants/own-unparseable`,
+      state: "ACTIVATED",
+      requester: "me@example.com",
+      // createTime intentionally missing — computeGrantExpiry can't bound it
+      requestedDuration: "3600s",
+    };
+    const freshName = `${entitlementPath}/grants/fresh`;
+    const withdrawn: string[] = [];
+
+    const pam = makeFilteringModule([ownUnparseable], {
+      currentTime,
+      onWithdraw: (url) => withdrawn.push(url),
+      createAfterRetry: makeActivatedGrant(freshName, new Date(currentTime).toISOString()),
+    });
+
+    const result = await pam.ensureGrant(entitlementPath);
+    expect(result.name).toBe(freshName);
+    expect(withdrawn).toHaveLength(1);
+    expect(withdrawn[0]).toContain("own-unparseable");
+  });
+
+  test("does not reuse an own grant whose requestedDuration is missing", async () => {
+    const currentTime = 10_000_000;
+    const ownNoDuration = {
+      name: `${entitlementPath}/grants/own-no-duration`,
+      state: "ACTIVATED",
+      requester: "me@example.com",
+      createTime: new Date(currentTime).toISOString(),
+      // requestedDuration intentionally missing
+    };
+    const freshName = `${entitlementPath}/grants/fresh`;
+    const withdrawn: string[] = [];
+
+    const pam = makeFilteringModule([ownNoDuration], {
+      currentTime,
+      onWithdraw: (url) => withdrawn.push(url),
+      createAfterRetry: makeActivatedGrant(freshName, new Date(currentTime).toISOString()),
+    });
+
+    const result = await pam.ensureGrant(entitlementPath);
+    expect(result.name).toBe(freshName);
+    expect(withdrawn).toHaveLength(1);
+    expect(withdrawn[0]).toContain("own-no-duration");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -2321,5 +2374,98 @@ describe("ensureGrant fetch timeout and rotation budget", () => {
     // The grant we created must be withdrawn (background cleanup), not orphaned.
     expect(await until(() => withdrawn.length > 0, 2000)).toBe(true);
     expect(withdrawn[0]).toContain("pending-1");
+  });
+});
+
+describe("scanForOpenGrants requester-lookup failure", () => {
+  // F4: when getRequesterEmail() throws (e.g. tokeninfo.googleapis.com is down
+  // but ADC is fine), the scan must surface a distinct, diagnosable error
+  // rather than collapsing into a generic PAM API failure. The initial
+  // createGrantOnce doesn't need the email; only the 409-conflict recovery
+  // path does. Without a typed error, this surfaces as an opaque "PAM API
+  // error" and is misdiagnosed as a PAM-side problem.
+  const entitlementPath = "projects/p/locations/global/entitlements/e";
+
+  test("surfaces a distinct error naming the requester-lookup failure", async () => {
+    const currentTime = 10_000_000;
+    const ownUsable = {
+      ...makeActivatedGrant(
+        `${entitlementPath}/grants/own-usable`,
+        new Date(currentTime).toISOString(),
+      ),
+      requester: "me@example.com",
+    };
+
+    const pam = createPamModule(async () => "token", {
+      fetchFn: (async (url: string, init?: RequestInit) => {
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (method === "GET" && /\/grants\?pageSize=\d+/.test(url)) {
+          return new Response(JSON.stringify({ grants: [ownUsable] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        if (method === "POST" && url.endsWith("/grants")) {
+          // Force the 409 path so the scan runs.
+          return new Response(JSON.stringify({ error: { message: "Already exists" } }), {
+            status: 409,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        throw new Error(`unexpected fetch: ${method} ${url}`);
+      }) as unknown as typeof globalThis.fetch,
+      now: () => currentTime,
+      getRequesterEmail: async () => {
+        throw new Error("tokeninfo returned 503");
+      },
+    });
+
+    await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow(
+      /requester.*lookup|could not resolve.*requester|email.*lookup/i,
+    );
+  });
+
+  test("the surfaced error carries the underlying cause", async () => {
+    const currentTime = 10_000_000;
+    const ownUsable = {
+      ...makeActivatedGrant(
+        `${entitlementPath}/grants/own-usable`,
+        new Date(currentTime).toISOString(),
+      ),
+      requester: "me@example.com",
+    };
+
+    const pam = createPamModule(async () => "token", {
+      fetchFn: (async (url: string, init?: RequestInit) => {
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (method === "GET" && /\/grants\?pageSize=\d+/.test(url)) {
+          return new Response(JSON.stringify({ grants: [ownUsable] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        if (method === "POST" && url.endsWith("/grants")) {
+          return new Response(JSON.stringify({ error: { message: "Already exists" } }), {
+            status: 409,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        throw new Error(`unexpected fetch: ${method} ${url}`);
+      }) as unknown as typeof globalThis.fetch,
+      now: () => currentTime,
+      getRequesterEmail: async () => {
+        throw new Error("tokeninfo returned 503");
+      },
+    });
+
+    try {
+      await pam.ensureGrant(entitlementPath);
+      throw new Error("expected ensureGrant to reject");
+    } catch (err) {
+      expect(err).toBeInstanceOf(Error);
+      const cause = (err as Error & { cause?: unknown }).cause;
+      expect(cause).toBeInstanceOf(Error);
+      expect((cause as Error).message).toContain("tokeninfo returned 503");
+    }
   });
 });

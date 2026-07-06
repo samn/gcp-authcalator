@@ -48,7 +48,7 @@ Options:
   --pam-allowed-policies <ids>  Additional allowed PAM entitlements (comma-separated)
   --pam-location <loc>     PAM entitlement location (default: global)
   --token-ttl-seconds <secs>  Token lifetime in seconds (default: 3600)
-  --pam-grant-ttl-seconds <secs>  PAM grant lifetime in seconds (must exceed the 5-min drain margin; range 301–43200; default: token-ttl-seconds). A longer grant amortises PAM/IAM propagation latency across many token refreshes
+  --pam-grant-ttl-seconds <secs>  PAM grant lifetime in seconds (601–43200 — must exceed 2× the 5-min drain margin; default: token-ttl-seconds). A longer grant amortises PAM/IAM propagation latency across many token refreshes
   --session-ttl-seconds <secs>  Prod session lifetime in seconds (default: 28800 / 8h)
   --operator-socket-path <path>      Operator socket path (auto-approve eligible — see docs)
   --operator-socket-group <name>     Optional: multi-operator mode. Sets mode 0660 with this group; without it, mode 0600 owned by gate UID

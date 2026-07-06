@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Fixed
+
+- **Dev-token fetches from the metadata proxy could hang indefinitely.** The
+  `gcp-metadata-proxy` → `gcp-gate` path (`getToken`, `getNumericProjectId`,
+  `getUniverseDomain`) had no fetch timeout, so a wedged gate socket (half-open
+  TCP, dead gate process with socket file present, NAT/LB idle-drop on the
+  TCP+mTLS path) hung every container command on the OS TCP retransmission
+  timeout (~15 min on Linux). Every other gate fetch in the codebase was
+  already bounded; the dev-token path was the lone gap. These fetches now
+  carry a 30 s `AbortSignal.timeout`, and aborts surface as an actionable
+  `gcp-gate request timed out after 30000ms: <url>` error instead of a bare
+  `DOMException`.
+
+- **`gcp-authcalator approve`/`deny` could hang on a wedged admin socket.**
+  The CLI's fetch to the admin socket had no timeout, so a stalled socket
+  left the approval CLI stuck indefinitely after the pending request itself
+  had already auto-denied — confusing in an already-stressful approval flow.
+  The fetch now carries a 5 s timeout and surfaces
+  `admin socket not responding (timed out after 5s)`. A connection failure
+  (gate not running, or a wrong `admin_socket_path`) likewise surfaces an
+  actionable `could not connect to the admin socket at <path>` message
+  instead of a raw Bun socket error.
+
+- **PAM grant reuse could overstate a reused grant's remaining lifetime.**
+  When PAM returned a grant missing `createTime` or `requestedDuration` (or
+  with an unparseable duration), `computeGrantExpiry`'s fallback
+  (`now()+15min`) was applied to pre-existing grants found via the
+  409-conflict recovery path — potentially reusing a grant whose actual
+  remaining life was below the drain margin, and clamping minted tokens to
+  the over-long fallback rather than the real (shorter) expiry. The scan
+  now classifies a grant whose expiry can't be computed as blocking (force
+  a fresh create after withdraw), not usable. The conservative fallback is
+  retained for freshly-created grants, whose real expiry is bounded by the
+  `requestedDuration` we just sent.
+
+- **PAM grant creation failed opaquely when the gate's requester email
+  couldn't be resolved.** `scanForOpenGrants` called `getRequesterEmail()`
+  at the top of every scan; if `tokeninfo.googleapis.com` was down while
+  ADC itself was fine, the scan failed with a bare
+  `tokeninfo returned <status>` error that looked like a PAM API problem.
+  The lookup failure now surfaces as a distinct
+  `PamRequesterLookupError` naming the underlying cause, so it can be
+  diagnosed correctly. The scan does not fall back to no-filtering (which
+  would risk withdrawing a teammate's grant on shared entitlements).
+
+### Changed
+
+- **`pam_grant_ttl_seconds` minimum raised from 301 s to 601 s** (2× the
+  5-minute drain margin). A 301 s grant is technically valid but "usable"
+  for only 1 s (`hasUsableLifetime` needs `> 5 min`), causing a refresh
+  storm where every request re-rotates the grant. The new 601 s floor still
+  mints ~5 min tokens at the minimum — short but usable. The same 2× floor
+  applies to the effective grant lifetime when `pam_policy` is set and
+  `pam_grant_ttl_seconds` is unset (so `token_ttl_seconds` becomes the grant
+  TTL). Rejected at config-parse time. Range is now 601–43200.
+
 ## [0.12.1] - 2026-06-25
 
 ### Fixed

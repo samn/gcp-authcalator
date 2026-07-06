@@ -292,17 +292,20 @@ describe("ConfigSchema", () => {
     expect(() => ConfigSchema.parse({ pam_grant_ttl_seconds: 30 })).toThrow(z.ZodError);
   });
 
-  // A grant must outlive the 5-minute drain margin, otherwise hasUsableLifetime
-  // is never satisfied and every minted token is clamped to 0s (born expired),
-  // sending the client into a refresh storm. The schema must reject it.
-  test("rejects pam_grant_ttl_seconds at or below the 300s drain margin", () => {
-    expect(() => ConfigSchema.parse({ pam_grant_ttl_seconds: 300 })).toThrow(/drain margin/);
+  // A grant must outlive the 5-minute drain margin by a comfortable margin,
+  // otherwise hasUsableLifetime is satisfied for only seconds and every
+  // minted token is clamped to near-0s (born expired), sending the client
+  // into a refresh storm. The schema floor is 2× the drain margin (600 s):
+  // a minimum-configured grant still mints ~5 min tokens — short but usable.
+  test("rejects pam_grant_ttl_seconds at or below the 600s floor", () => {
+    expect(() => ConfigSchema.parse({ pam_grant_ttl_seconds: 600 })).toThrow(/drain margin/);
+    expect(() => ConfigSchema.parse({ pam_grant_ttl_seconds: 301 })).toThrow(/drain margin/);
     expect(() => ConfigSchema.parse({ pam_grant_ttl_seconds: 120 })).toThrow(/drain margin/);
   });
 
-  test("accepts the smallest grant TTL above the drain margin", () => {
-    const config = ConfigSchema.parse({ pam_grant_ttl_seconds: 301 });
-    expect(config.pam_grant_ttl_seconds).toBe(301);
+  test("accepts the smallest grant TTL above the 600s floor", () => {
+    const config = ConfigSchema.parse({ pam_grant_ttl_seconds: 601 });
+    expect(config.pam_grant_ttl_seconds).toBe(601);
   });
 
   test("does not apply the drain-margin floor to token_ttl_seconds", () => {
@@ -389,9 +392,18 @@ describe("GateConfigSchema", () => {
 
   // The drain-margin floor must also cover the fallback: when pam_policy is set
   // and pam_grant_ttl_seconds is unset, token_ttl_seconds becomes the grant
-  // lifetime, so a sub-margin token TTL must be rejected too — otherwise the
-  // born-expired/refresh-storm failure slips through.
-  test("rejects a sub-margin token_ttl_seconds when pam_policy makes it the grant TTL", () => {
+  // lifetime, so a sub-floor token TTL must be rejected too — otherwise the
+  // born-expired/refresh-storm failure slips through. The floor is 600 s
+  // (2× the 300 s drain margin) so a minimum-configured grant still mints
+  // usable tokens.
+  test("rejects a sub-floor token_ttl_seconds when pam_policy makes it the grant TTL", () => {
+    expect(() =>
+      GateConfigSchema.parse({
+        project_id: "my-proj",
+        pam_policy: "prod-admin",
+        token_ttl_seconds: 600,
+      }),
+    ).toThrow(/drain margin/);
     expect(() =>
       GateConfigSchema.parse({
         project_id: "my-proj",
@@ -399,6 +411,15 @@ describe("GateConfigSchema", () => {
         token_ttl_seconds: 120,
       }),
     ).toThrow(/drain margin/);
+  });
+
+  test("accepts token_ttl_seconds at the smallest value above the floor when pam_policy is set", () => {
+    const config = GateConfigSchema.parse({
+      project_id: "my-proj",
+      pam_policy: "prod-admin",
+      token_ttl_seconds: 601,
+    });
+    expect(config.token_ttl_seconds).toBe(601);
   });
 
   test("allows a sub-margin token_ttl_seconds when no pam_policy is configured", () => {

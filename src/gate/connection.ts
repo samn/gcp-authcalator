@@ -78,3 +78,36 @@ export function connectionFetchOpts(conn: GateConnection): {
     },
   };
 }
+
+/**
+ * Fetch the gate with a backstop timeout, rethrowing an abort as an actionable,
+ * URL-bearing error instead of a bare `DOMException` — mirroring the gate's own
+ * `pamFetch`, so a wedged socket surfaces "gcp-gate request timed out after
+ * Nms: <url>" rather than "The operation timed out". Uses an AbortController +
+ * `clearTimeout` so the timer is released the instant the request settles,
+ * rather than lingering — important on repeatedly-called paths (session
+ * refresh, dev-token fetch).
+ *
+ * Shared by both gate clients (`with-prod` and the metadata proxy); each passes
+ * its own `timeoutMs` sized above the gate's legitimate worst-case wait for that
+ * path, so this never false-aborts a real request.
+ */
+export async function fetchWithGateTimeout(
+  fetchFn: typeof globalThis.fetch,
+  url: string,
+  init: BunRequestInit,
+  timeoutMs: number,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetchFn(url, { ...init, signal: controller.signal });
+  } catch (err) {
+    if (err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError")) {
+      throw new Error(`gcp-gate request timed out after ${timeoutMs}ms: ${url}`, { cause: err });
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}

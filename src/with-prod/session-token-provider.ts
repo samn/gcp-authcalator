@@ -1,9 +1,13 @@
-import { type GateConnection, connectionFetchOpts } from "../gate/connection.ts";
+import {
+  type GateConnection,
+  connectionFetchOpts,
+  fetchWithGateTimeout,
+} from "../gate/connection.ts";
 import { CredentialsExpiredError } from "../gate/credentials-error.ts";
 import { TARGET_PROJECT_HEADER } from "../gate/types.ts";
 import type { CachedToken, TokenProvider } from "../metadata-proxy/types.ts";
 import { createCachingTokenProvider } from "./caching-token-provider.ts";
-import { fetchWithGateTimeout, throwTypedGateError } from "./fetch-prod-token.ts";
+import { throwTypedGateError } from "./fetch-prod-token.ts";
 
 /**
  * Backstop timeout for a session token refresh. No confirmation happens on this

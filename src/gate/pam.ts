@@ -536,7 +536,21 @@ export function createPamModule(
     // blocking the create, and they're the only ones withdraw may touch.
     // Grants with no requester field are skipped: never end a grant we
     // can't attribute to ourselves.
-    const requester = getRequesterEmail ? (await getRequesterEmail()).toLowerCase() : undefined;
+    let requester: string | undefined;
+    if (getRequesterEmail) {
+      let email: string;
+      try {
+        email = await getRequesterEmail();
+      } catch (err) {
+        // The email lookup (typically tokeninfo) failing is independent of
+        // PAM itself — surface it as a distinct, diagnosable error so the
+        // operator doesn't misread it as a PAM API failure. We deliberately
+        // do NOT fall back to no-filtering: on a shared entitlement that
+        // could withdraw a teammate's grant.
+        throw new PamRequesterLookupError(err);
+      }
+      requester = email.toLowerCase();
+    }
     const isOwnGrant = (g: PamGrantResponse): boolean =>
       requester === undefined || g.requester?.toLowerCase() === requester;
 
@@ -572,11 +586,19 @@ export function createPamModule(
           continue;
         }
         const named = g as PamGrantResponse & { name: string };
-        if (isActiveState(g.state) && hasUsableLifetime(computeGrantExpiry(named))) {
+        // Only an active grant whose real expiry we can bound (createTime +
+        // requestedDuration present) and that still clears the drain margin is
+        // reusable. computeGrantExpiry returns null when those fields are
+        // missing/unparseable — a grant we must NOT reuse, since guessing its
+        // expiry could overstate its remaining life and mint tokens that
+        // outlive the grant's real end.
+        const expiry = isActiveState(g.state) ? computeGrantExpiry(named) : null;
+        if (expiry && hasUsableLifetime(expiry)) {
           return { usable: named, blocking, scanned, skippedOtherRequester };
         }
-        // Active-but-expired (state lag) or still pending — either way it
-        // holds the open-grant slot and withdraw can clear it.
+        // Active-but-expired (state lag), still pending, or missing the fields
+        // needed to bound its expiry safely — either way it holds the
+        // open-grant slot and withdraw can clear it.
         blocking.push(named);
       }
 
@@ -649,6 +671,26 @@ export function createPamModule(
    */
   class GrantTerminalStateError extends Error {}
 
+  /**
+   * Thrown when `scanForOpenGrants` cannot resolve the gate's own requester
+   * identity (via `getRequesterEmail`). Distinguished from a generic PAM API
+   * failure so the gate log and client error name the underlying cause
+   * (typically a tokeninfo outage) rather than misdiagnosing it as a PAM-side
+   * problem. The initial `createGrantOnce` doesn't need the email; only the
+   * 409-conflict recovery path does, so this only fires when a conflict
+   * already exists AND the email lookup fails — a narrow but real condition.
+   */
+  class PamRequesterLookupError extends Error {
+    constructor(cause: unknown) {
+      const detail = cause instanceof Error ? cause.message : String(cause);
+      super(
+        `could not resolve the gate's requester email for PAM open-grant scan: ${detail}`,
+        cause instanceof Error ? { cause } : undefined,
+      );
+      this.name = "PamRequesterLookupError";
+    }
+  }
+
   async function pollGrant(grantName: string, signal?: AbortSignal): Promise<PamGrantResponse> {
     const deadline = now() + POLL_TIMEOUT_MS;
     let delay = POLL_INITIAL_MS;
@@ -692,10 +734,21 @@ export function createPamModule(
     );
   }
 
-  function computeGrantExpiry(grant: PamGrantResponse): Date {
-    // Derive expiry from the grant's actual creation time + requested duration.
-    // This is critical for the 409 conflict path where we reuse a pre-existing
-    // grant that may have been created well before this process found it.
+  /**
+   * Derive a grant's real expiry from its `createTime` + `requestedDuration`,
+   * or return `null` when either field is missing/unparseable. This is the
+   * single source of truth for both callers:
+   *
+   * - The open-grant scan (409 conflict path) reuses a pre-existing grant only
+   *   when this returns a real expiry — a `null` result means the grant's
+   *   remaining life can't be bounded, so it must be withdrawn + recreated
+   *   rather than reused (guessing could overstate its life and mint tokens
+   *   that outlive the grant's real end).
+   * - `cacheGrant` (a freshly-created grant) applies a conservative 15-minute
+   *   fallback on `null` — a freshly-created grant's real expiry is bounded by
+   *   the `requestedDuration` we just sent, so the fallback is safe there.
+   */
+  function computeGrantExpiry(grant: PamGrantResponse): Date | null {
     const durationMs = parseDurationSeconds(grant.requestedDuration) * 1000;
     const createMs = grant.createTime ? new Date(grant.createTime).getTime() : NaN;
 
@@ -703,15 +756,17 @@ export function createPamModule(
       return new Date(createMs + durationMs);
     }
 
-    // Fallback: conservative 15-minute TTL when API fields are missing
-    return new Date(now() + 15 * 60 * 1000);
+    return null;
   }
 
   function cacheGrant(entitlementPath: string, grant: PamGrantResponse): CachedGrant {
     const entry: CachedGrant = {
       name: grant.name!,
       state: grant.state!,
-      expiresAt: computeGrantExpiry(grant),
+      // Conservative 15-minute fallback when PAM omits createTime/duration from
+      // the create response — safe here because a freshly-created grant's real
+      // expiry is bounded by the requestedDuration we just sent.
+      expiresAt: computeGrantExpiry(grant) ?? new Date(now() + 15 * 60 * 1000),
     };
     grantCache.set(entitlementPath, entry);
     return entry;
