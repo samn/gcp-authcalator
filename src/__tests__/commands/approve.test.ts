@@ -203,4 +203,86 @@ describe("runApprove — fetch timeout", () => {
     expect(errorMsg).toMatch(/could not connect to the admin socket/);
     expect(errorMsg).toContain("/tmp/test-admin.sock");
   });
+
+  test("prints usage and makes no fetch when no id is given", async () => {
+    let fetchCalls = 0;
+    const fetchFn = (async () => {
+      fetchCalls++;
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof globalThis.fetch;
+
+    const origLog = console.log;
+    const logs: string[] = [];
+    console.log = (msg: unknown) => {
+      logs.push(typeof msg === "string" ? msg : String(msg));
+    };
+    try {
+      await runApprove(makeConfig("/tmp/test-admin.sock"), [], { fetchFn });
+    } finally {
+      console.log = origLog;
+    }
+
+    expect(fetchCalls).toBe(0);
+    expect(logs.join("\n")).toMatch(/Usage: gcp-authcalator approve <id>/);
+  });
+
+  test("reports a 404 as an expired/unknown request and exits 1", async () => {
+    const fetchFn = (async () =>
+      new Response("{}", { status: 404 })) as unknown as typeof globalThis.fetch;
+
+    const origExit = process.exit;
+    const origErr = console.error;
+    const exitCalls: number[] = [];
+    let errorMsg = "";
+    process.exit = ((code?: number) => {
+      exitCalls.push(code ?? 0);
+      throw new Error(`exit:${code ?? 0}`);
+    }) as typeof process.exit;
+    console.error = (msg: unknown) => {
+      errorMsg = typeof msg === "string" ? msg : String(msg);
+    };
+
+    try {
+      await expect(
+        runApprove(makeConfig("/tmp/test-admin.sock"), ["a".repeat(32)], { fetchFn }),
+      ).rejects.toThrow(/exit:1/);
+    } finally {
+      process.exit = origExit;
+      console.error = origErr;
+    }
+
+    expect(exitCalls).toContain(1);
+    expect(errorMsg).toMatch(/not found \(may have expired\)/);
+  });
+
+  test("surfaces a non-ok error body and exits 1", async () => {
+    const fetchFn = (async () =>
+      new Response(JSON.stringify({ error: "already resolved" }), {
+        status: 409,
+      })) as unknown as typeof globalThis.fetch;
+
+    const origExit = process.exit;
+    const origErr = console.error;
+    const exitCalls: number[] = [];
+    let errorMsg = "";
+    process.exit = ((code?: number) => {
+      exitCalls.push(code ?? 0);
+      throw new Error(`exit:${code ?? 0}`);
+    }) as typeof process.exit;
+    console.error = (msg: unknown) => {
+      errorMsg = typeof msg === "string" ? msg : String(msg);
+    };
+
+    try {
+      await expect(
+        runApprove(makeConfig("/tmp/test-admin.sock"), ["a".repeat(32)], { fetchFn }),
+      ).rejects.toThrow(/exit:1/);
+    } finally {
+      process.exit = origExit;
+      console.error = origErr;
+    }
+
+    expect(exitCalls).toContain(1);
+    expect(errorMsg).toMatch(/already resolved/);
+  });
 });

@@ -2,7 +2,7 @@ import { describe, expect, test, afterEach } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { buildGateConnection } from "../../gate/connection.ts";
+import { buildGateConnection, fetchWithGateTimeout } from "../../gate/connection.ts";
 import { ensureTlsFiles, getClientBundleBase64 } from "../../tls/store.ts";
 
 describe("buildGateConnection", () => {
@@ -173,5 +173,45 @@ describe("buildGateConnection", () => {
         { GCP_AUTHCALATOR_TLS_BUNDLE_B64: mismatchedB64 },
       ),
     ).rejects.toThrow(/client certificate signature is invalid/);
+  });
+});
+
+describe("fetchWithGateTimeout", () => {
+  test("returns the response and clears the timer when the fetch settles", async () => {
+    const fetchFn = (async (_url: string, init?: RequestInit) => {
+      // The caller-supplied abort signal must be threaded through.
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      return new Response("ok", { status: 200 });
+    }) as unknown as typeof globalThis.fetch;
+
+    const res = await fetchWithGateTimeout(fetchFn, "http://localhost/token", {}, 30_000);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ok");
+  });
+
+  test("aborts a stalled fetch and rethrows a URL-bearing timeout error", async () => {
+    // A fetch that never settles on its own — only the timeout controller's
+    // abort() unblocks it. This exercises the internal abort callback and the
+    // abort→timeout-error translation.
+    const fetchFn = (async (_url: string, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          reject(new DOMException("The operation was aborted", "AbortError"));
+        });
+      })) as unknown as typeof globalThis.fetch;
+
+    await expect(fetchWithGateTimeout(fetchFn, "http://localhost/token", {}, 10)).rejects.toThrow(
+      /gcp-gate request timed out after 10ms: http:\/\/localhost\/token/,
+    );
+  });
+
+  test("rethrows non-abort fetch errors unchanged", async () => {
+    const fetchFn = (async () => {
+      throw new Error("connection refused");
+    }) as unknown as typeof globalThis.fetch;
+
+    await expect(
+      fetchWithGateTimeout(fetchFn, "http://localhost/token", {}, 30_000),
+    ).rejects.toThrow(/^connection refused$/);
   });
 });
