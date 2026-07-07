@@ -2160,7 +2160,7 @@ describe("scanForOpenGrants requester filtering", () => {
   });
 
   test("does not reuse an own grant whose expiry can't be computed (missing createTime)", async () => {
-    // F3: a pre-existing grant missing `createTime` (or `requestedDuration`)
+    // A pre-existing grant missing `createTime` (or `requestedDuration`)
     // cannot be safely reused — computeGrantExpiry's fallback (now()+15min)
     // can overstate a reused grant's remaining life, leading to tokens that
     // outlive the grant's real end. The scan must classify such a grant as
@@ -2378,7 +2378,7 @@ describe("ensureGrant fetch timeout and rotation budget", () => {
 });
 
 describe("scanForOpenGrants requester-lookup failure", () => {
-  // F4: when getRequesterEmail() throws (e.g. tokeninfo.googleapis.com is down
+  // When getRequesterEmail() throws (e.g. tokeninfo.googleapis.com is down
   // but ADC is fine), the scan must surface a distinct, diagnosable error
   // rather than collapsing into a generic PAM API failure. The initial
   // createGrantOnce doesn't need the email; only the 409-conflict recovery

@@ -100,7 +100,7 @@ describe("approve command (admin socket)", () => {
 
 describe("runApprove — fetch timeout", () => {
   /**
-   * F2: the approve/deny CLI talks to the admin socket with no fetch timeout.
+   * The approve/deny CLI talks to the admin socket with no fetch timeout.
    * A wedged admin socket hangs the approval CLI indefinitely — confusing in
    * an already-stressful approval flow. Verify the fetch carries an
    * AbortSignal and that an abort surfaces an actionable error.
