@@ -2,7 +2,11 @@ import { describe, expect, test, afterEach } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { buildGateConnection, fetchWithGateTimeout } from "../../gate/connection.ts";
+import {
+  buildGateConnection,
+  fetchWithGateTimeout,
+  GateTimeoutError,
+} from "../../gate/connection.ts";
 import { ensureTlsFiles, getClientBundleBase64 } from "../../tls/store.ts";
 
 describe("buildGateConnection", () => {
@@ -199,6 +203,38 @@ describe("fetchWithGateTimeout", () => {
           reject(new DOMException("The operation was aborted", "AbortError"));
         });
       })) as unknown as typeof globalThis.fetch;
+
+    await expect(fetchWithGateTimeout(fetchFn, "http://localhost/token", {}, 10)).rejects.toThrow(
+      /gcp-gate request timed out after 10ms: http:\/\/localhost\/token/,
+    );
+  });
+
+  test("the timeout error is typed as GateTimeoutError", async () => {
+    const fetchFn = (async () => {
+      throw new DOMException("The operation was aborted", "AbortError");
+    }) as unknown as typeof globalThis.fetch;
+
+    await expect(
+      fetchWithGateTimeout(fetchFn, "http://localhost/token", {}, 30_000),
+    ).rejects.toBeInstanceOf(GateTimeoutError);
+  });
+
+  test("bounds the response body read, not just the headers", async () => {
+    // fetch resolves as soon as response headers arrive; a socket that then
+    // stalls mid-body must still be aborted by the same timer, otherwise the
+    // caller's res.json() hangs unbounded — the exact wedge the helper exists
+    // to prevent. The mock's body stream only errors when the helper's abort
+    // signal fires.
+    const fetchFn = (async (_url: string, init?: RequestInit) => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          init?.signal?.addEventListener("abort", () => {
+            controller.error(new DOMException("The operation was aborted", "AbortError"));
+          });
+        },
+      });
+      return new Response(body, { status: 200 });
+    }) as unknown as typeof globalThis.fetch;
 
     await expect(fetchWithGateTimeout(fetchFn, "http://localhost/token", {}, 10)).rejects.toThrow(
       /gcp-gate request timed out after 10ms: http:\/\/localhost\/token/,

@@ -249,25 +249,21 @@ describe("createSessionTokenProvider", () => {
     expect(capturedUrls[0]).toContain("https://localhost:8174/token?session=sess-1");
   });
 
-  test("handles 401 when res.text() rejects (covers catch fallback)", async () => {
+  test("handles a 401 with an empty body (empty-text fallback)", async () => {
     const expired: CachedToken = {
       access_token: "old",
       expires_at: new Date(Date.now() - 1000),
     };
 
-    // Create a mock that returns a 401 with a body that fails to read
-    const fetchFn = (async () => {
-      return {
-        status: 401,
-        ok: false,
-        text: () => Promise.reject(new Error("body already consumed")),
-      } as unknown as Response;
-    }) as unknown as typeof globalThis.fetch;
+    // fetchWithGateTimeout buffers the body, so a body read can no longer
+    // reject downstream; the remaining fallback is a 401 with no body text.
+    const fetchFn = (async () =>
+      new Response(null, { status: 401 })) as unknown as typeof globalThis.fetch;
 
     const provider = createSessionTokenProvider(unixConn, "session-id", expired, { fetchFn });
 
-    // Should still throw a descriptive error, with empty text fallback
-    await expect(provider.getToken()).rejects.toThrow("Prod session expired or revoked");
+    // Should still throw a descriptive error, without a detail suffix
+    await expect(provider.getToken()).rejects.toThrow("Prod session expired or revoked. ");
   });
 
   test("re-fetches when initial token is already expired", async () => {

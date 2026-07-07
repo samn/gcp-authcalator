@@ -16,9 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   TCP+mTLS path) hung every container command on the OS TCP retransmission
   timeout (~15 min on Linux). Every other gate fetch in the codebase was
   already bounded; the dev-token path was the lone gap. These fetches now
-  carry a 30 s `AbortSignal.timeout`, and aborts surface as an actionable
+  carry a 30 s backstop timeout that bounds the whole exchange — including
+  the response-body read, which `fetch` alone leaves unbounded once headers
+  arrive — and aborts surface as an actionable
   `gcp-gate request timed out after 30000ms: <url>` error instead of a bare
-  `DOMException`.
+  `DOMException`. The same body-read bounding now applies to every gate fetch
+  that shares the helper (session refresh, prod-token, and identity fetches).
 
 - **`gcp-authcalator approve`/`deny` could hang on a wedged admin socket.**
   The CLI's fetch to the admin socket had no timeout, so a stalled socket
@@ -28,7 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `admin socket not responding (timed out after 5s)`. A connection failure
   (gate not running, or a wrong `admin_socket_path`) likewise surfaces an
   actionable `could not connect to the admin socket at <path>` message
-  instead of a raw Bun socket error.
+  instead of a raw Bun socket error. A non-JSON response body (e.g. a
+  plain-text 500) no longer crashes the CLI with a raw `SyntaxError`.
 
 - **PAM grant reuse could overstate a reused grant's remaining lifetime.**
   When PAM returned a grant missing `createTime` or `requestedDuration` (or
@@ -39,8 +43,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the over-long fallback rather than the real (shorter) expiry. The scan
   now classifies a grant whose expiry can't be computed as blocking (force
   a fresh create after withdraw), not usable. The conservative fallback is
-  retained for freshly-created grants, whose real expiry is bounded by the
-  `requestedDuration` we just sent.
+  retained for freshly-created grants — now anchored at the moment the grant
+  was requested (not at cache time, which can trail activation by up to two
+  minutes) and capped by the requested duration, so it can never overstate
+  the grant's real life. Durations with fractional seconds (e.g.
+  `3600.000s`, permitted by the protobuf Duration JSON encoding) now parse
+  correctly instead of rendering a healthy grant's expiry uncomputable.
 
 - **PAM grant creation failed opaquely when the gate's requester email
   couldn't be resolved.** `scanForOpenGrants` called `getRequesterEmail()`
@@ -49,8 +57,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `tokeninfo returned <status>` error that looked like a PAM API problem.
   The lookup failure now surfaces as a distinct
   `PamRequesterLookupError` naming the underlying cause, so it can be
-  diagnosed correctly. The scan does not fall back to no-filtering (which
-  would risk withdrawing a teammate's grant on shared entitlements).
+  diagnosed correctly. Expired-ADC failures (`CredentialsExpiredError`) pass
+  through unwrapped so clients keep the typed `credentials_expired` handling
+  and its re-auth guidance. The scan does not fall back to no-filtering
+  (which would risk withdrawing a teammate's grant on shared entitlements).
 
 ### Changed
 
@@ -61,7 +71,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   mints ~5 min tokens at the minimum — short but usable. The same 2× floor
   applies to the effective grant lifetime when `pam_policy` is set and
   `pam_grant_ttl_seconds` is unset (so `token_ttl_seconds` becomes the grant
-  TTL). Rejected at config-parse time. Range is now 601–43200.
+  TTL). Rejected at config-parse time. Range is now 601–43200. **Breaking:**
+  a deployment with a grant TTL in 302–601 s worked before (with frequent
+  refreshes) but now fails at startup — raise the value before upgrading.
 
 ## [0.12.1] - 2026-06-25
 

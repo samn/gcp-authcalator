@@ -63,6 +63,8 @@
 //   coalesce onto one rotation rather than racing.
 // ---------------------------------------------------------------------------
 
+import { CredentialsExpiredError } from "./credentials-error.ts";
+
 const PAM_HOST = "https://privilegedaccessmanager.googleapis.com";
 
 const PAM_API_BASE = `${PAM_HOST}/v1`;
@@ -190,10 +192,16 @@ const FOLDER_ENTITLEMENT_PATH_PATTERN =
 const ORG_ENTITLEMENT_PATH_PATTERN =
   /^organizations\/([0-9]+)\/locations\/([^/]+)\/entitlements\/([^/]+)$/;
 
-/** Parse a GCP duration string (e.g. "3600s") to seconds. Returns 0 on failure. */
+/**
+ * Parse a GCP duration string (e.g. "3600s") to seconds. Returns 0 on failure.
+ * The protobuf Duration JSON encoding permits fractional seconds (e.g.
+ * "3600.000s"), and PAM may echo back a grant's duration in that form — a
+ * strict integer parse would misclassify such a grant as unbounded and force
+ * an unnecessary withdraw + recreate on the 409-recovery path.
+ */
 function parseDurationSeconds(duration?: string): number {
   if (!duration) return 0;
-  const match = /^(\d+)s$/.exec(duration);
+  const match = /^(\d+(?:\.\d+)?)s$/.exec(duration);
   return match ? Number(match[1]) : 0;
 }
 
@@ -379,13 +387,34 @@ export function resolveEntitlementPath(
  *
  * @param getAccessToken - Returns an ADC access token for PAM API calls.
  */
+/**
+ * Thrown when `scanForOpenGrants` cannot resolve the gate's own requester
+ * identity (via `getRequesterEmail`). Distinguished from a generic PAM API
+ * failure so the gate log and client error name the underlying cause
+ * (typically a tokeninfo outage) rather than misdiagnosing it as a PAM-side
+ * problem. The initial `createGrantOnce` doesn't need the email; only the
+ * 409-conflict recovery path does, so this only fires when a conflict
+ * already exists AND the email lookup fails — a narrow but real condition.
+ */
+export class PamRequesterLookupError extends Error {
+  constructor(cause: unknown) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    super(
+      `could not resolve the gate's requester email for PAM open-grant scan: ${detail}`,
+      cause instanceof Error ? { cause } : undefined,
+    );
+    this.name = "PamRequesterLookupError";
+  }
+}
+
 export function createPamModule(
   getAccessToken: () => Promise<string>,
   options: PamModuleOptions = {},
 ): PamModule {
   const fetchFn = options.fetchFn ?? globalThis.fetch;
   const now = options.now ?? Date.now;
-  const grantDuration = `${options.grantDurationSeconds ?? FALLBACK_GRANT_DURATION_SECONDS}s`;
+  const grantDurationSeconds = options.grantDurationSeconds ?? FALLBACK_GRANT_DURATION_SECONDS;
+  const grantDuration = `${grantDurationSeconds}s`;
   const sleep =
     options.sleepFn ?? ((ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms)));
   const getRequesterEmail = options.getRequesterEmail;
@@ -542,8 +571,14 @@ export function createPamModule(
       try {
         email = await getRequesterEmail();
       } catch (err) {
-        // The email lookup (typically tokeninfo) failing is independent of
-        // PAM itself — surface it as a distinct, diagnosable error so the
+        // Expired ADC keeps its typed classification: handlers.ts attaches the
+        // CREDENTIALS_EXPIRED code via a direct instanceof check (no cause
+        // unwrapping), and the with-prod client's reauth guidance hangs off
+        // that code — wrapping here would turn "run gcloud auth
+        // application-default login" into an opaque lookup failure.
+        if (err instanceof CredentialsExpiredError) throw err;
+        // Any other email-lookup failure (typically tokeninfo) is independent
+        // of PAM itself — surface it as a distinct, diagnosable error so the
         // operator doesn't misread it as a PAM API failure. We deliberately
         // do NOT fall back to no-filtering: on a shared entitlement that
         // could withdraw a teammate's grant.
@@ -671,26 +706,6 @@ export function createPamModule(
    */
   class GrantTerminalStateError extends Error {}
 
-  /**
-   * Thrown when `scanForOpenGrants` cannot resolve the gate's own requester
-   * identity (via `getRequesterEmail`). Distinguished from a generic PAM API
-   * failure so the gate log and client error name the underlying cause
-   * (typically a tokeninfo outage) rather than misdiagnosing it as a PAM-side
-   * problem. The initial `createGrantOnce` doesn't need the email; only the
-   * 409-conflict recovery path does, so this only fires when a conflict
-   * already exists AND the email lookup fails — a narrow but real condition.
-   */
-  class PamRequesterLookupError extends Error {
-    constructor(cause: unknown) {
-      const detail = cause instanceof Error ? cause.message : String(cause);
-      super(
-        `could not resolve the gate's requester email for PAM open-grant scan: ${detail}`,
-        cause instanceof Error ? { cause } : undefined,
-      );
-      this.name = "PamRequesterLookupError";
-    }
-  }
-
   async function pollGrant(grantName: string, signal?: AbortSignal): Promise<PamGrantResponse> {
     const deadline = now() + POLL_TIMEOUT_MS;
     let delay = POLL_INITIAL_MS;
@@ -744,9 +759,11 @@ export function createPamModule(
    *   remaining life can't be bounded, so it must be withdrawn + recreated
    *   rather than reused (guessing could overstate its life and mint tokens
    *   that outlive the grant's real end).
-   * - `cacheGrant` (a freshly-created grant) applies a conservative 15-minute
-   *   fallback on `null` — a freshly-created grant's real expiry is bounded by
-   *   the `requestedDuration` we just sent, so the fallback is safe there.
+   * - `cacheGrant` (a freshly-created grant) applies a conservative fallback
+   *   on `null` — a freshly-created grant's real expiry is bounded by the
+   *   `requestedDuration` we just sent, anchored at the moment we sent it, so
+   *   a fallback anchored there and capped by that duration cannot overstate
+   *   the grant's life.
    */
   function computeGrantExpiry(grant: PamGrantResponse): Date | null {
     const durationMs = parseDurationSeconds(grant.requestedDuration) * 1000;
@@ -759,14 +776,23 @@ export function createPamModule(
     return null;
   }
 
-  function cacheGrant(entitlementPath: string, grant: PamGrantResponse): CachedGrant {
+  function cacheGrant(
+    entitlementPath: string,
+    grant: PamGrantResponse,
+    requestedAtMs: number,
+  ): CachedGrant {
     const entry: CachedGrant = {
       name: grant.name!,
       state: grant.state!,
       // Conservative 15-minute fallback when PAM omits createTime/duration from
-      // the create response — safe here because a freshly-created grant's real
-      // expiry is bounded by the requestedDuration we just sent.
-      expiresAt: computeGrantExpiry(grant) ?? new Date(now() + 15 * 60 * 1000),
+      // the create response. It is anchored at the moment we *requested* the
+      // grant, not at cache time — activation can take up to POLL_TIMEOUT_MS,
+      // and anchoring after that delay would overstate the grant's remaining
+      // life — and capped by the duration we requested, since the grant's real
+      // expiry is bounded by createTime + requestedDuration.
+      expiresAt:
+        computeGrantExpiry(grant) ??
+        new Date(requestedAtMs + Math.min(15 * 60 * 1000, grantDurationSeconds * 1000)),
     };
     grantCache.set(entitlementPath, entry);
     return entry;
@@ -858,6 +884,11 @@ export function createPamModule(
     }
     grantCache.delete(entitlementPath);
 
+    // Anchor for cacheGrant's missing-createTime fallback: the grant cannot
+    // have been created before this point, so an expiry derived from here
+    // never overstates its life (activation may add up to POLL_TIMEOUT_MS
+    // between create and cache).
+    const requestedAt = now();
     const grant = await createGrantWithRecovery(entitlementPath, justification, signal);
 
     if (!grant.name) {
@@ -892,7 +923,7 @@ export function createPamModule(
       throw signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason));
     }
 
-    const entry = cacheGrant(entitlementPath, activated);
+    const entry = cacheGrant(entitlementPath, activated, requestedAt);
 
     return {
       name: entry.name,

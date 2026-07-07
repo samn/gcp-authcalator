@@ -162,7 +162,12 @@ describe("runApprove — fetch timeout", () => {
     }
 
     expect(exitCalls).toContain(1);
-    expect(errorMsg).toMatch(/admin socket not responding|timed out/);
+    // Must hit the dedicated timeout branch, not the generic connection-failure
+    // fallback (whose message can also embed "timed out" via the cause's
+    // message) — the fallback's "is gcp-authcalator running?" guidance is
+    // wrong for a present-but-wedged socket.
+    expect(errorMsg).toMatch(/admin socket not responding/);
+    expect(errorMsg).not.toMatch(/could not connect to the admin socket/);
   });
 
   test("surfaces a socket-connection failure as an actionable error and exits 1", async () => {
@@ -284,5 +289,36 @@ describe("runApprove — fetch timeout", () => {
 
     expect(exitCalls).toContain(1);
     expect(errorMsg).toMatch(/already resolved/);
+  });
+
+  test("reports a non-JSON error body as a clean error instead of crashing", async () => {
+    // A handler crash can produce a plain-text 500 (or an empty body); the CLI
+    // must fall back to the HTTP status, not reject with a raw SyntaxError.
+    const fetchFn = (async () =>
+      new Response("Internal Server Error", { status: 500 })) as unknown as typeof globalThis.fetch;
+
+    const origExit = process.exit;
+    const origErr = console.error;
+    const exitCalls: number[] = [];
+    let errorMsg = "";
+    process.exit = ((code?: number) => {
+      exitCalls.push(code ?? 0);
+      throw new Error(`exit:${code ?? 0}`);
+    }) as typeof process.exit;
+    console.error = (msg: unknown) => {
+      errorMsg = typeof msg === "string" ? msg : String(msg);
+    };
+
+    try {
+      await expect(
+        runApprove(makeConfig("/tmp/test-admin.sock"), ["a".repeat(32)], { fetchFn }),
+      ).rejects.toThrow(/exit:1/);
+    } finally {
+      process.exit = origExit;
+      console.error = origErr;
+    }
+
+    expect(exitCalls).toContain(1);
+    expect(errorMsg).toMatch(/admin socket returned HTTP 500/);
   });
 });

@@ -80,13 +80,32 @@ export function connectionFetchOpts(conn: GateConnection): {
 }
 
 /**
+ * Thrown by `fetchWithGateTimeout` when the backstop timer aborts a stalled
+ * gate request. Typed so callers that want their own wording (e.g. the
+ * approve CLI) can distinguish a timeout from a connection failure without
+ * matching on the message.
+ */
+export class GateTimeoutError extends Error {
+  constructor(timeoutMs: number, url: string, cause: Error) {
+    super(`gcp-gate request timed out after ${timeoutMs}ms: ${url}`, { cause });
+    this.name = "GateTimeoutError";
+  }
+}
+
+/**
  * Fetch the gate with a backstop timeout, rethrowing an abort as an actionable,
- * URL-bearing error instead of a bare `DOMException` — mirroring the gate's own
- * `pamFetch`, so a wedged socket surfaces "gcp-gate request timed out after
- * Nms: <url>" rather than "The operation timed out". Uses an AbortController +
- * `clearTimeout` so the timer is released the instant the request settles,
- * rather than lingering — important on repeatedly-called paths (session
- * refresh, dev-token fetch).
+ * URL-bearing `GateTimeoutError` instead of a bare `DOMException` — mirroring
+ * the gate's own `pamFetch`, so a wedged socket surfaces "gcp-gate request
+ * timed out after Nms: <url>" rather than "The operation timed out". Uses an
+ * AbortController + `clearTimeout` so the timer is released the instant the
+ * request settles, rather than lingering — important on repeatedly-called
+ * paths (session refresh, dev-token fetch).
+ *
+ * The response body is buffered here, under the same timer: `fetch` resolves
+ * as soon as response headers arrive, so returning the raw Response would
+ * leave the caller's `res.json()`/`res.text()` unbounded — a socket that
+ * stalls mid-body would hang exactly like the header stall this exists to
+ * prevent. Gate responses are small JSON, so buffering costs nothing.
  *
  * Shared by both gate clients (`with-prod` and the metadata proxy); each passes
  * its own `timeoutMs` sized above the gate's legitimate worst-case wait for that
@@ -101,10 +120,16 @@ export async function fetchWithGateTimeout(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetchFn(url, { ...init, signal: controller.signal });
+    const res = await fetchFn(url, { ...init, signal: controller.signal });
+    const body = await res.arrayBuffer();
+    return new Response(body.byteLength > 0 ? body : null, {
+      status: res.status,
+      statusText: res.statusText,
+      headers: res.headers,
+    });
   } catch (err) {
     if (err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError")) {
-      throw new Error(`gcp-gate request timed out after ${timeoutMs}ms: ${url}`, { cause: err });
+      throw new GateTimeoutError(timeoutMs, url, err);
     }
     throw err;
   } finally {

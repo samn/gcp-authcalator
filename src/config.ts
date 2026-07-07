@@ -96,13 +96,17 @@ const ttlSecondsSchema = z.coerce.number().int().min(60).max(43200).optional();
  */
 const DRAIN_MARGIN_SECONDS = DRAIN_MARGIN_MS / 1000;
 
+/** The 2× drain-margin floor described above, as a single named bound. */
+const PAM_GRANT_TTL_FLOOR_SECONDS = 2 * DRAIN_MARGIN_SECONDS;
+
 /** `pam_grant_ttl_seconds`: shared TTL bounds, plus the drain-margin floor. */
 const pamGrantTtlSecondsSchema = ttlSecondsSchema.refine(
-  (v) => v === undefined || v > DRAIN_MARGIN_SECONDS * 2,
+  (v) => v === undefined || v > PAM_GRANT_TTL_FLOOR_SECONDS,
   {
     message:
-      `pam_grant_ttl_seconds must be greater than ${DRAIN_MARGIN_SECONDS * 2}s (2× the ` +
-      `${DRAIN_MARGIN_SECONDS}s drain margin); a shorter grant would mint already-expired tokens`,
+      `pam_grant_ttl_seconds must be greater than ${PAM_GRANT_TTL_FLOOR_SECONDS}s (2× the ` +
+      `${DRAIN_MARGIN_SECONDS}s drain margin); a shorter grant leaves little or no usable ` +
+      `lifetime after the drain margin and causes token refresh storms`,
   },
 );
 
@@ -219,14 +223,15 @@ export const GateConfigSchema = ConfigSchema.required({
       // default exceeds the floor, so this stays correct regardless of that
       // constant.)
       const effectiveGrantTtl = c.pam_grant_ttl_seconds ?? c.token_ttl_seconds ?? 3600;
-      return effectiveGrantTtl > DRAIN_MARGIN_SECONDS * 2;
+      return effectiveGrantTtl > PAM_GRANT_TTL_FLOOR_SECONDS;
     },
     {
       message:
         `token_ttl_seconds becomes the PAM grant lifetime when pam_grant_ttl_seconds is unset, so ` +
-        `with pam_policy set it must exceed ${DRAIN_MARGIN_SECONDS * 2}s (2× the ${DRAIN_MARGIN_SECONDS}s ` +
-        `drain margin — a shorter grant mints already-expired tokens). ` +
-        `Set pam_grant_ttl_seconds explicitly above ${DRAIN_MARGIN_SECONDS * 2}s.`,
+        `with pam_policy set it must exceed ${PAM_GRANT_TTL_FLOOR_SECONDS}s (2× the ${DRAIN_MARGIN_SECONDS}s ` +
+        `drain margin — a shorter grant leaves little or no usable lifetime after the drain margin ` +
+        `and causes token refresh storms). ` +
+        `Set pam_grant_ttl_seconds explicitly above ${PAM_GRANT_TTL_FLOOR_SECONDS}s.`,
       path: ["token_ttl_seconds"],
     },
   );

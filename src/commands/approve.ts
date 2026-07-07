@@ -1,5 +1,5 @@
 import type { Config } from "../config.ts";
-import type { BunRequestInit } from "../gate/connection.ts";
+import { type BunRequestInit, GateTimeoutError, fetchWithGateTimeout } from "../gate/connection.ts";
 import type { ErrorResponse } from "../gate/types.ts";
 
 interface ResolveResponse {
@@ -56,13 +56,14 @@ async function resolvePending(
 ): Promise<void> {
   let res: Response;
   try {
-    res = await fetchFn(`${baseUrl}/pending/${id}/${action}`, {
-      ...extraOpts,
-      method: "POST",
-      signal: AbortSignal.timeout(ADMIN_FETCH_TIMEOUT_MS),
-    });
+    res = await fetchWithGateTimeout(
+      fetchFn,
+      `${baseUrl}/pending/${id}/${action}`,
+      { ...extraOpts, method: "POST" },
+      ADMIN_FETCH_TIMEOUT_MS,
+    );
   } catch (err) {
-    if (err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError")) {
+    if (err instanceof GateTimeoutError) {
       console.error(
         `error: admin socket not responding (timed out after ${ADMIN_FETCH_TIMEOUT_MS / 1000}s)`,
       );
@@ -87,12 +88,16 @@ async function resolvePending(
   }
 
   if (!res.ok) {
-    const body = (await res.json()) as ErrorResponse;
-    console.error(`error: ${body.error}`);
+    // The body may not be JSON (e.g. a plain-text 500 from the runtime) —
+    // fall back to the HTTP status rather than crashing on the parse.
+    const body = (await res.json().catch(() => null)) as ErrorResponse | null;
+    console.error(`error: ${body?.error ?? `admin socket returned HTTP ${res.status}`}`);
     process.exit(1);
   }
 
-  const body = (await res.json()) as ResolveResponse;
-  const verb = body.status === "approved" ? "Approved" : "Denied";
+  // On a 2xx with an unparseable body, trust the action we just performed.
+  const body = (await res.json().catch(() => null)) as ResolveResponse | null;
+  const status = body?.status ?? (action === "approve" ? "approved" : "denied");
+  const verb = status === "approved" ? "Approved" : "Denied";
   console.log(`${verb} request ${id}.`);
 }

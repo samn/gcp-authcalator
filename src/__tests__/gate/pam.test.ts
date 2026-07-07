@@ -1,5 +1,11 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { resolveEntitlementPath, createPamModule, type PamModule } from "../../gate/pam.ts";
+import {
+  resolveEntitlementPath,
+  createPamModule,
+  PamRequesterLookupError,
+  type PamModule,
+} from "../../gate/pam.ts";
+import { CredentialsExpiredError } from "../../gate/credentials-error.ts";
 
 // ---------------------------------------------------------------------------
 // resolveEntitlementPath
@@ -2211,6 +2217,32 @@ describe("scanForOpenGrants requester filtering", () => {
     expect(withdrawn).toHaveLength(1);
     expect(withdrawn[0]).toContain("own-no-duration");
   });
+
+  test("reuses an own grant whose requestedDuration has fractional seconds", async () => {
+    // The protobuf Duration JSON encoding permits fractional seconds, so PAM
+    // may echo a grant's duration as e.g. "3600.000s". A healthy ACTIVATED
+    // grant formatted that way must be reused, not misread as
+    // expiry-uncomputable and withdrawn (losing an existing approval on
+    // manual-approval entitlements).
+    const currentTime = 10_000_000;
+    const ownFractional = {
+      name: `${entitlementPath}/grants/own-fractional`,
+      state: "ACTIVATED",
+      requester: "me@example.com",
+      createTime: new Date(currentTime).toISOString(),
+      requestedDuration: "3600.000s",
+    };
+    const withdrawn: string[] = [];
+
+    const pam = makeFilteringModule([ownFractional], {
+      currentTime,
+      onWithdraw: (url) => withdrawn.push(url),
+    });
+
+    const result = await pam.ensureGrant(entitlementPath);
+    expect(result.name).toBe(ownFractional.name);
+    expect(withdrawn).toHaveLength(0);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -2462,10 +2494,46 @@ describe("scanForOpenGrants requester-lookup failure", () => {
       await pam.ensureGrant(entitlementPath);
       throw new Error("expected ensureGrant to reject");
     } catch (err) {
-      expect(err).toBeInstanceOf(Error);
+      expect(err).toBeInstanceOf(PamRequesterLookupError);
       const cause = (err as Error & { cause?: unknown }).cause;
       expect(cause).toBeInstanceOf(Error);
       expect((cause as Error).message).toContain("tokeninfo returned 503");
+    }
+  });
+
+  test("passes CredentialsExpiredError through unwrapped", async () => {
+    // Expired ADC keeps its typed classification: the gate's error handler
+    // attaches the credentials_expired code via a direct instanceof check,
+    // and the with-prod client's re-auth guidance hangs off that code.
+    // Wrapping it in PamRequesterLookupError would replace "run gcloud auth
+    // application-default login" with an opaque lookup failure.
+    const currentTime = 10_000_000;
+    const expired = new CredentialsExpiredError("credentials expired — re-run gcloud auth");
+
+    const pam = createPamModule(async () => "token", {
+      fetchFn: (async (url: string, init?: RequestInit) => {
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (method === "POST" && url.endsWith("/grants")) {
+          // Force the 409 path so the scan (and the email lookup) runs.
+          return new Response(JSON.stringify({ error: { message: "Already exists" } }), {
+            status: 409,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        throw new Error(`unexpected fetch: ${method} ${url}`);
+      }) as unknown as typeof globalThis.fetch,
+      now: () => currentTime,
+      getRequesterEmail: async () => {
+        throw expired;
+      },
+    });
+
+    try {
+      await pam.ensureGrant(entitlementPath);
+      throw new Error("expected ensureGrant to reject");
+    } catch (err) {
+      expect(err).toBe(expired);
+      expect(err).not.toBeInstanceOf(PamRequesterLookupError);
     }
   });
 });
