@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- **Stubbed refresh token on the metadata proxy.** The token endpoint's JSON
+  now includes a `refresh_token` field carrying a crypto-random stub minted
+  per proxy instance (never a GCP credential, held in memory only), and a new
+  `POST /token` endpoint emulates the OAuth2 refresh-token grant
+  (`https://oauth2.googleapis.com/token`): presenting the exact issued stub
+  (constant-time comparison) returns the current short-lived access token via
+  the proxy's normal token provider. Processes that authenticated to the proxy
+  (`Metadata-Flavor: Google`; PID-tree validation on `with-prod` temporary
+  proxies, which also covers `POST /token`) can therefore drive a standard
+  refresh flow, while nothing exfiltratable from the container can extend
+  access: the stub is only honored by the issuing proxy on `127.0.0.1`, dies
+  with the proxy process, and all gate-side bounds (session expiry, token TTL,
+  confirmation policy) still apply. The engineer's real ADC refresh token and
+  the prod session ID remain outside the container as before — the only
+  stealable GCP credential is still the temporary OAuth access token. Invalid
+  redemptions return RFC 6749-style errors (`invalid_grant`,
+  `invalid_request`, `unsupported_grant_type`), and refresh responses carry no
+  new `refresh_token`, matching Google's endpoint.
+
 ## [0.12.1] - 2026-06-25
 
 ### Fixed

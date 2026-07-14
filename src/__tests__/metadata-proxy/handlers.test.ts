@@ -3,6 +3,8 @@ import { handleRequest } from "../../metadata-proxy/handlers.ts";
 import type { MetadataProxyDeps, CachedToken } from "../../metadata-proxy/types.ts";
 import { DEFAULT_SCOPES } from "../../config.ts";
 
+const TEST_REFRESH_TOKEN = "gcp-authcalator-stub-test-refresh-token";
+
 function makeDeps(overrides: Partial<MetadataProxyDeps> = {}): MetadataProxyDeps {
   const token: CachedToken = {
     access_token: "test-access-token",
@@ -15,6 +17,7 @@ function makeDeps(overrides: Partial<MetadataProxyDeps> = {}): MetadataProxyDeps
     serviceAccountEmail: "sa@test-project.iam.gserviceaccount.com",
     scopes: DEFAULT_SCOPES,
     startTime: new Date(Date.now() - 60_000),
+    refreshToken: TEST_REFRESH_TOKEN,
     ...overrides,
   };
 }
@@ -141,6 +144,164 @@ describe("GET /computeMetadata/v1/instance/service-accounts/default/token", () =
     expect(res.status).toBe(500);
     const body = (await res.json()) as Record<string, unknown>;
     expect(body.error).toBe("gate unreachable");
+  });
+
+  test("includes the stubbed refresh token", async () => {
+    const res = await handleRequest(
+      metadataRequest("/computeMetadata/v1/instance/service-accounts/default/token"),
+      makeDeps(),
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.refresh_token).toBe(TEST_REFRESH_TOKEN);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /token (OAuth2 refresh-token grant against the stubbed refresh token)
+// ---------------------------------------------------------------------------
+
+describe("POST /token", () => {
+  function refreshRequest(params: Record<string, string>, path = "/token"): Request {
+    return new Request(`http://localhost${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(params).toString(),
+    });
+  }
+
+  test("exchanges the stubbed refresh token for an access token", async () => {
+    const res = await handleRequest(
+      refreshRequest({ grant_type: "refresh_token", refresh_token: TEST_REFRESH_TOKEN }),
+      makeDeps(),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toBe("application/json");
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.access_token).toBe("test-access-token");
+    expect(body.token_type).toBe("Bearer");
+    expect(body.expires_in).toBeGreaterThan(0);
+    expect(body.scope).toBe("https://www.googleapis.com/auth/cloud-platform");
+  });
+
+  test("does not issue a new refresh token on refresh (matches Google)", async () => {
+    const res = await handleRequest(
+      refreshRequest({ grant_type: "refresh_token", refresh_token: TEST_REFRESH_TOKEN }),
+      makeDeps(),
+    );
+
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body).not.toHaveProperty("refresh_token");
+  });
+
+  test("does not require the Metadata-Flavor header (OAuth clients don't send it)", async () => {
+    const req = refreshRequest({
+      grant_type: "refresh_token",
+      refresh_token: TEST_REFRESH_TOKEN,
+    });
+    expect(req.headers.get("Metadata-Flavor")).toBeNull();
+
+    const res = await handleRequest(req, makeDeps());
+    expect(res.status).toBe(200);
+  });
+
+  test("accepts a trailing slash on the path", async () => {
+    const res = await handleRequest(
+      refreshRequest({ grant_type: "refresh_token", refresh_token: TEST_REFRESH_TOKEN }, "/token/"),
+      makeDeps(),
+    );
+    expect(res.status).toBe(200);
+  });
+
+  test("rejects an unknown refresh token with invalid_grant", async () => {
+    const res = await handleRequest(
+      refreshRequest({ grant_type: "refresh_token", refresh_token: "not-the-issued-stub" }),
+      makeDeps(),
+    );
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("invalid_grant");
+  });
+
+  test("rejects a real-looking GCP refresh token with invalid_grant", async () => {
+    const res = await handleRequest(
+      refreshRequest({ grant_type: "refresh_token", refresh_token: "1//0abcdefghijklmnop" }),
+      makeDeps(),
+    );
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("invalid_grant");
+  });
+
+  test("rejects a missing refresh_token with invalid_request", async () => {
+    const res = await handleRequest(refreshRequest({ grant_type: "refresh_token" }), makeDeps());
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("invalid_request");
+    expect(body.error_description).toContain("refresh_token");
+  });
+
+  test("rejects a missing grant_type with invalid_request", async () => {
+    const res = await handleRequest(
+      refreshRequest({ refresh_token: TEST_REFRESH_TOKEN }),
+      makeDeps(),
+    );
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("invalid_request");
+    expect(body.error_description).toContain("grant_type");
+  });
+
+  test("rejects other grant types with unsupported_grant_type", async () => {
+    const res = await handleRequest(
+      refreshRequest({ grant_type: "authorization_code", code: "abc" }),
+      makeDeps(),
+    );
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("unsupported_grant_type");
+  });
+
+  test("rejects a non-form body with invalid_request", async () => {
+    const req = new Request("http://localhost/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: new Uint8Array([0xff, 0xfe, 0xfd]),
+    });
+
+    const res = await handleRequest(req, makeDeps());
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("invalid_request");
+  });
+
+  test("returns 500 when the token provider fails after a valid grant", async () => {
+    const deps = makeDeps({
+      getToken: async () => {
+        throw new Error("gate unreachable");
+      },
+    });
+
+    const res = await handleRequest(
+      refreshRequest({ grant_type: "refresh_token", refresh_token: TEST_REFRESH_TOKEN }),
+      deps,
+    );
+
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("gate unreachable");
+  });
+
+  test("GET /token remains 404 (redemption is POST-only)", async () => {
+    const res = await handleRequest(metadataRequest("/token"), makeDeps());
+    expect(res.status).toBe(404);
   });
 });
 

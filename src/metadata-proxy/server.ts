@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { DEFAULT_SCOPES, type MetadataProxyConfig } from "../config.ts";
 import type { GateConnection } from "../gate/connection.ts";
 import type { MetadataProxyDeps, TokenProvider } from "./types.ts";
@@ -48,6 +49,12 @@ export function startMetadataProxyServer(
   const gateClient = options.tokenProvider ? null : createGateClient(conn, gateClientOpts);
   const provider: TokenProvider = options.tokenProvider ?? gateClient!;
 
+  // Stubbed refresh token: minted fresh per proxy instance, held in memory
+  // only, and honored solely by this proxy's POST /token endpoint. The prefix
+  // makes it self-evidently not a Google credential (real user refresh tokens
+  // start with "1//") — exfiltrating it grants nothing outside this proxy.
+  const refreshToken = `gcp-authcalator-stub-${randomBytes(32).toString("hex")}`;
+
   const deps: MetadataProxyDeps = {
     getToken: provider.getToken,
     getNumericProjectId: gateClient?.getNumericProjectId,
@@ -56,6 +63,7 @@ export function startMetadataProxyServer(
     serviceAccountEmail: config.service_account,
     scopes: effectiveScopes,
     startTime: new Date(),
+    refreshToken,
   };
 
   const ancestorPid = options.allowedAncestorPid;
@@ -126,6 +134,9 @@ export function startMetadataProxyServer(
     console.log("    GET /computeMetadata/v1/instance/service-accounts               → SA listing");
     console.log(
       "    GET /computeMetadata/v1/universe/universe_domain                → universe domain",
+    );
+    console.log(
+      "    POST /token                                                    → OAuth2 refresh-token grant (stubbed)",
     );
   }
 

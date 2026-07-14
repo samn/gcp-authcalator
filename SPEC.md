@@ -223,7 +223,11 @@ GET /computeMetadata/v1/instance
     firebase-admin) detect the proxy as a GCE-style metadata server
 
 GET /computeMetadata/v1/instance/service-accounts/default/token
-  → {"access_token": "ya29...", "expires_in": 3600, "token_type": "Bearer"}
+  → {"access_token": "ya29...", "expires_in": 3600, "token_type": "Bearer",
+     "refresh_token": "gcp-authcalator-stub-<64 hex>"}
+    (refresh_token is a stub minted by this proxy instance — not a GCP
+     credential; real GCE responses omit the field and known clients
+     ignore it)
 
 GET /computeMetadata/v1/project/project-id
   → project id
@@ -242,9 +246,18 @@ GET /computeMetadata/v1/universe/universe_domain
 
 GET /  (metadata server detection ping)
   → 200 OK with Metadata-Flavor: Google header
+
+POST /token  (OAuth2 token endpoint emulation, mirrors oauth2.googleapis.com)
+  ← grant_type=refresh_token&refresh_token=<stub>  (form-encoded)
+  → {"access_token": "ya29...", "expires_in": 3600,
+     "scope": "<space-delimited scopes>", "token_type": "Bearer"}
+  → 400 {"error": "invalid_grant" | "invalid_request" |
+         "unsupported_grant_type", "error_description": "..."}
 ```
 
 Validates the `Metadata-Flavor: Google` request header (standard metadata server security). Fetches dev-scoped tokens from `gcp-gate` via the socket, caches until 5 minutes before expiry.
+
+**Stubbed refresh token.** Each proxy instance mints a crypto-random refresh token at startup (`gcp-authcalator-stub-` + 32-byte hex, in-memory only) and returns it in the token endpoint's JSON. `POST /token` redeems exactly that stub — compared in constant time — for the current short-lived access token via the proxy's normal token provider, so gate-side bounds (session expiry, token TTL, confirmation policy) all still apply. This gives container processes that authenticated to the proxy (Metadata-Flavor header; PID validation on `with-prod` temporary proxies, which covers `POST /token` too) a standard OAuth2 refresh flow without placing a real refresh credential in the container: the stub is worthless outside the issuing proxy (bound to `127.0.0.1`, dies with the process, unknown to GCP), cannot extend a prod session, and the engineer's ADC refresh token and the gate session ID stay where they were (host-side gate and `with-prod` parent process respectively). `POST /token` itself does not require the `Metadata-Flavor` header — real OAuth clients don't send one; possession of the stub is the credential. Refresh responses carry no new `refresh_token`, matching Google's endpoint.
 
 **Started by** the devcontainer post start script as a background process.
 

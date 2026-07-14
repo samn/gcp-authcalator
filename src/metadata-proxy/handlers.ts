@@ -1,5 +1,10 @@
-import type { TokenResponse } from "../gate/types.ts";
-import type { MetadataProxyDeps } from "./types.ts";
+import { createHash, timingSafeEqual } from "node:crypto";
+import type {
+  MetadataProxyDeps,
+  MetadataTokenResponse,
+  OAuthErrorResponse,
+  OAuthRefreshResponse,
+} from "./types.ts";
 
 const METADATA_FLAVOR_HEADER = "Metadata-Flavor";
 const METADATA_FLAVOR_VALUE = "Google";
@@ -25,11 +30,20 @@ function jsonResponse(body: unknown, status = 200): Response {
  *
  * - `/` — detection ping (always 200, no header check)
  * - `/computeMetadata/v1/...` — requires `Metadata-Flavor: Google` header
- * - Non-GET → 405
+ * - `POST /token` — OAuth2 refresh-token grant against the stubbed refresh token
+ * - Other non-GET → 405
  * - Unknown path → 404
  */
 export async function handleRequest(req: Request, deps: MetadataProxyDeps): Promise<Response> {
   const url = new URL(req.url, "http://localhost");
+
+  // OAuth2 token-endpoint emulation (mirrors https://oauth2.googleapis.com/token).
+  // No Metadata-Flavor check: real OAuth clients don't send the header, and the
+  // stubbed refresh token — issued only through the header-gated (and, under
+  // with-prod, PID-validated) metadata token endpoint — is the credential here.
+  if (req.method === "POST" && url.pathname.replace(/\/+$/, "") === "/token") {
+    return handleOAuthRefresh(req, deps);
+  }
 
   if (req.method !== "GET") {
     return jsonResponse({ error: "Method not allowed" }, 405);
@@ -106,9 +120,77 @@ async function handleToken(deps: MetadataProxyDeps): Promise<Response> {
     const cached = await deps.getToken();
     const expiresIn = Math.max(0, Math.floor((cached.expires_at.getTime() - Date.now()) / 1000));
 
-    const body: TokenResponse = {
+    const body: MetadataTokenResponse = {
       access_token: cached.access_token,
       expires_in: expiresIn,
+      token_type: "Bearer",
+      refresh_token: deps.refreshToken,
+    };
+
+    return jsonResponse(body);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    return jsonResponse({ error: message }, 500);
+  }
+}
+
+function oauthError(error: OAuthErrorResponse["error"], description: string): Response {
+  const body: OAuthErrorResponse = { error, error_description: description };
+  return jsonResponse(body, 400);
+}
+
+/**
+ * Constant-time string comparison. Hashing both sides first avoids
+ * timingSafeEqual's equal-length requirement without leaking length.
+ */
+function safeEqual(a: string, b: string): boolean {
+  const hashA = createHash("sha256").update(a).digest();
+  const hashB = createHash("sha256").update(b).digest();
+  return timingSafeEqual(hashA, hashB);
+}
+
+/**
+ * Handles POST /token — the OAuth2 refresh-token grant, emulating
+ * https://oauth2.googleapis.com/token.
+ *
+ * Accepts only `grant_type=refresh_token` with this proxy instance's stubbed
+ * refresh token, and exchanges it for the current short-lived access token
+ * from the token provider (which refreshes via the gate as needed, so all
+ * gate-side bounds — session expiry, token TTL, confirmation policy — still
+ * apply). Errors follow RFC 6749 §5.2. Like Google's endpoint, the response
+ * carries no refresh_token.
+ */
+async function handleOAuthRefresh(req: Request, deps: MetadataProxyDeps): Promise<Response> {
+  const contentType = (req.headers.get("Content-Type") ?? "").split(";")[0]!.trim();
+  if (contentType !== "application/x-www-form-urlencoded") {
+    return oauthError("invalid_request", "request body must be application/x-www-form-urlencoded");
+  }
+  const form = new URLSearchParams(await req.text());
+
+  const grantType = form.get("grant_type");
+  if (grantType === null || grantType.length === 0) {
+    return oauthError("invalid_request", "grant_type parameter is required");
+  }
+  if (grantType !== "refresh_token") {
+    return oauthError("unsupported_grant_type", "only grant_type refresh_token is supported");
+  }
+
+  const refreshToken = form.get("refresh_token");
+  if (refreshToken === null || refreshToken.length === 0) {
+    return oauthError("invalid_request", "refresh_token parameter is required");
+  }
+  if (!safeEqual(refreshToken, deps.refreshToken)) {
+    return oauthError("invalid_grant", "refresh token was not issued by this metadata proxy");
+  }
+
+  try {
+    const cached = await deps.getToken();
+    const expiresIn = Math.max(0, Math.floor((cached.expires_at.getTime() - Date.now()) / 1000));
+
+    const body: OAuthRefreshResponse = {
+      access_token: cached.access_token,
+      expires_in: expiresIn,
+      scope: deps.scopes.join(" "),
       token_type: "Bearer",
     };
 

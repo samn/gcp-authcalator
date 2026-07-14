@@ -395,6 +395,112 @@ describe("startMetadataProxyServer", () => {
     expect(await res.text()).toBe("Forbidden");
   });
 
+  test("issues a stubbed refresh token that redeems for an access token via POST /token", async () => {
+    const port = nextPort++;
+    const config = makeConfig(port);
+
+    result = startMetadataProxyServer(config, {
+      gateClientOptions: { fetchFn: mockGateFetch("my-dev-token") },
+      quiet: true,
+    });
+
+    const tokenRes = await fetch(
+      `http://127.0.0.1:${port}/computeMetadata/v1/instance/service-accounts/default/token`,
+      { headers: { "Metadata-Flavor": "Google" } },
+    );
+    expect(tokenRes.status).toBe(200);
+    const tokenBody = (await tokenRes.json()) as { refresh_token: string };
+    expect(tokenBody.refresh_token).toStartWith("gcp-authcalator-stub-");
+
+    const refreshRes = await fetch(`http://127.0.0.1:${port}/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: tokenBody.refresh_token,
+      }).toString(),
+    });
+    expect(refreshRes.status).toBe(200);
+    const refreshBody = (await refreshRes.json()) as Record<string, unknown>;
+    expect(refreshBody.access_token).toBe("my-dev-token");
+    expect(refreshBody.token_type).toBe("Bearer");
+    expect(refreshBody).not.toHaveProperty("refresh_token");
+  });
+
+  test("mints a distinct stubbed refresh token per proxy instance", async () => {
+    const portA = nextPort++;
+    const portB = nextPort++;
+
+    result = startMetadataProxyServer(makeConfig(portA), {
+      gateClientOptions: { fetchFn: mockGateFetch("tok") },
+      quiet: true,
+    });
+    const other = startMetadataProxyServer(makeConfig(portB), {
+      gateClientOptions: { fetchFn: mockGateFetch("tok") },
+      quiet: true,
+    });
+
+    try {
+      const getStub = async (port: number) => {
+        const res = await fetch(
+          `http://127.0.0.1:${port}/computeMetadata/v1/instance/service-accounts/default/token`,
+          { headers: { "Metadata-Flavor": "Google" } },
+        );
+        const body = (await res.json()) as { refresh_token: string };
+        return body.refresh_token;
+      };
+
+      const stubA = await getStub(portA);
+      const stubB = await getStub(portB);
+      expect(stubA).not.toBe(stubB);
+
+      // A's stub is worthless against B — it only refreshes at its issuer.
+      const crossRes = await fetch(`http://127.0.0.1:${portB}/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          refresh_token: stubA,
+        }).toString(),
+      });
+      expect(crossRes.status).toBe(400);
+      const crossBody = (await crossRes.json()) as Record<string, unknown>;
+      expect(crossBody.error).toBe("invalid_grant");
+    } finally {
+      other.stop();
+    }
+  });
+
+  test("PID validation: rejects POST /token from non-descendant", async () => {
+    const port = nextPort++;
+    const config = makeConfig(port);
+
+    const customProvider: TokenProvider = {
+      getToken: async () => ({
+        access_token: "should-not-reach",
+        expires_at: new Date(Date.now() + 3600_000),
+      }),
+    };
+
+    // Use an impossible ancestor PID that no process descends from
+    result = startMetadataProxyServer(config, {
+      tokenProvider: customProvider,
+      allowedAncestorPid: 2147483647,
+      quiet: true,
+    });
+
+    const res = await fetch(`http://127.0.0.1:${port}/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: "gcp-authcalator-stub-whatever",
+      }).toString(),
+    });
+    expect(res.status).toBe(403);
+    expect(await res.text()).toBe("Forbidden");
+  });
+
   test("quiet: true suppresses startup logs", async () => {
     const port = nextPort++;
     const config = makeConfig(port);
