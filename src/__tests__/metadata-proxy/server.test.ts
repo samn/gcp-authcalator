@@ -42,6 +42,18 @@ function mockGateFetch(
   }) as unknown as typeof globalThis.fetch;
 }
 
+/** POST a form-encoded refresh-token grant to a proxy's /token endpoint. */
+function postRefresh(port: number, refreshToken: string): Promise<Response> {
+  return fetch(`http://127.0.0.1:${port}/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+    }).toString(),
+  });
+}
+
 function makeConfig(port: number): MetadataProxyConfig {
   return {
     project_id: "test-project",
@@ -412,14 +424,7 @@ describe("startMetadataProxyServer", () => {
     const tokenBody = (await tokenRes.json()) as { refresh_token: string };
     expect(tokenBody.refresh_token).toStartWith("gcp-authcalator-stub-");
 
-    const refreshRes = await fetch(`http://127.0.0.1:${port}/token`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: tokenBody.refresh_token,
-      }).toString(),
-    });
+    const refreshRes = await postRefresh(port, tokenBody.refresh_token);
     expect(refreshRes.status).toBe(200);
     const refreshBody = (await refreshRes.json()) as Record<string, unknown>;
     expect(refreshBody.access_token).toBe("my-dev-token");
@@ -455,14 +460,7 @@ describe("startMetadataProxyServer", () => {
       expect(stubA).not.toBe(stubB);
 
       // A's stub is worthless against B — it only refreshes at its issuer.
-      const crossRes = await fetch(`http://127.0.0.1:${portB}/token`, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({
-          grant_type: "refresh_token",
-          refresh_token: stubA,
-        }).toString(),
-      });
+      const crossRes = await postRefresh(portB, stubA);
       expect(crossRes.status).toBe(400);
       const crossBody = (await crossRes.json()) as Record<string, unknown>;
       expect(crossBody.error).toBe("invalid_grant");
@@ -489,14 +487,7 @@ describe("startMetadataProxyServer", () => {
       quiet: true,
     });
 
-    const res = await fetch(`http://127.0.0.1:${port}/token`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: "gcp-authcalator-stub-whatever",
-      }).toString(),
-    });
+    const res = await postRefresh(port, "gcp-authcalator-stub-whatever");
     expect(res.status).toBe(403);
     expect(await res.text()).toBe("Forbidden");
   });

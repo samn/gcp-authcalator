@@ -164,10 +164,14 @@ describe("GET /computeMetadata/v1/instance/service-accounts/default/token", () =
 
 describe("POST /token", () => {
   function refreshRequest(params: Record<string, string>, path = "/token"): Request {
+    const body = new URLSearchParams(params).toString();
     return new Request(`http://localhost${path}`, {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams(params).toString(),
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Content-Length": String(Buffer.byteLength(body)),
+      },
+      body,
     });
   }
 
@@ -196,6 +200,79 @@ describe("POST /token", () => {
     expect(body).not.toHaveProperty("refresh_token");
   });
 
+  test("responses carry Cache-Control: no-store and no Metadata-Flavor header (RFC 6749 §5.1)", async () => {
+    const success = await handleRequest(
+      refreshRequest({ grant_type: "refresh_token", refresh_token: TEST_REFRESH_TOKEN }),
+      makeDeps(),
+    );
+    expect(success.headers.get("Cache-Control")).toBe("no-store");
+    expect(success.headers.get("Pragma")).toBe("no-cache");
+    expect(success.headers.get("Metadata-Flavor")).toBeNull();
+
+    const error = await handleRequest(
+      refreshRequest({ grant_type: "refresh_token", refresh_token: "wrong" }),
+      makeDeps(),
+    );
+    expect(error.headers.get("Cache-Control")).toBe("no-store");
+    expect(error.headers.get("Metadata-Flavor")).toBeNull();
+  });
+
+  test("accepts a case-variant media type (RFC 9110: media types are case-insensitive)", async () => {
+    const body = new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: TEST_REFRESH_TOKEN,
+    }).toString();
+    const req = new Request("http://localhost/token", {
+      method: "POST",
+      headers: {
+        "Content-Type": "Application/x-www-form-URLENCODED; charset=UTF-8",
+        "Content-Length": String(Buffer.byteLength(body)),
+      },
+      body,
+    });
+
+    const res = await handleRequest(req, makeDeps());
+    expect(res.status).toBe(200);
+  });
+
+  test("rejects a missing Content-Length (chunked bodies) with invalid_request", async () => {
+    const body = new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: TEST_REFRESH_TOKEN,
+    }).toString();
+    const req = new Request("http://localhost/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body,
+    });
+
+    const res = await handleRequest(req, makeDeps());
+    expect(res.status).toBe(400);
+    const resBody = (await res.json()) as Record<string, unknown>;
+    expect(resBody.error).toBe("invalid_request");
+    expect(resBody.error_description).toContain("Content-Length");
+  });
+
+  test("rejects an oversized Content-Length with invalid_request", async () => {
+    const body = new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: TEST_REFRESH_TOKEN,
+    }).toString();
+    const req = new Request("http://localhost/token", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Content-Length": "100000000",
+      },
+      body,
+    });
+
+    const res = await handleRequest(req, makeDeps());
+    expect(res.status).toBe(400);
+    const resBody = (await res.json()) as Record<string, unknown>;
+    expect(resBody.error).toBe("invalid_request");
+  });
+
   test("does not require the Metadata-Flavor header (OAuth clients don't send it)", async () => {
     const req = refreshRequest({
       grant_type: "refresh_token",
@@ -207,12 +284,12 @@ describe("POST /token", () => {
     expect(res.status).toBe(200);
   });
 
-  test("accepts a trailing slash on the path", async () => {
+  test("is exact-path like the real endpoint: POST /token/ returns 405", async () => {
     const res = await handleRequest(
       refreshRequest({ grant_type: "refresh_token", refresh_token: TEST_REFRESH_TOKEN }, "/token/"),
       makeDeps(),
     );
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(405);
   });
 
   test("rejects an unknown refresh token with invalid_grant", async () => {
@@ -282,7 +359,7 @@ describe("POST /token", () => {
     expect(body.error).toBe("invalid_request");
   });
 
-  test("returns 500 when the token provider fails after a valid grant", async () => {
+  test("returns 503 temporarily_unavailable when the token provider fails after a valid grant", async () => {
     const deps = makeDeps({
       getToken: async () => {
         throw new Error("gate unreachable");
@@ -294,9 +371,12 @@ describe("POST /token", () => {
       deps,
     );
 
-    expect(res.status).toBe(500);
+    // The error member is a registered OAuth code (RFC 6749 §5.2), not prose —
+    // the provider failure goes in error_description.
+    expect(res.status).toBe(503);
     const body = (await res.json()) as Record<string, unknown>;
-    expect(body.error).toBe("gate unreachable");
+    expect(body.error).toBe("temporarily_unavailable");
+    expect(body.error_description).toBe("gate unreachable");
   });
 
   test("GET /token remains 404 (redemption is POST-only)", async () => {

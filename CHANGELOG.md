@@ -23,10 +23,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   with the proxy process, and all gate-side bounds (session expiry, token TTL,
   confirmation policy) still apply. The engineer's real ADC refresh token and
   the prod session ID remain outside the container as before — the only
-  stealable GCP credential is still the temporary OAuth access token. Invalid
-  redemptions return RFC 6749-style errors (`invalid_grant`,
-  `invalid_request`, `unsupported_grant_type`), and refresh responses carry no
-  new `refresh_token`, matching Google's endpoint.
+  stealable GCP credential is still the temporary OAuth access token. The
+  endpoint is exact-path and, being header-free, deliberately strict: request
+  bodies must be form-encoded with a declared `Content-Length` of at most
+  8 KB (so it cannot be used to force large body buffering; chunked bodies
+  are rejected). Invalid redemptions return RFC 6749-style errors
+  (`invalid_grant`, `invalid_request`, `unsupported_grant_type`), provider
+  failures return `503 temporarily_unavailable`, and refresh responses set
+  `Cache-Control: no-store` and carry no new `refresh_token`, matching
+  Google's endpoint. Note for Node users: `google-auth-library`'s Compute
+  client propagates the stub into `client.credentials` and its `'tokens'`
+  event, so apps persisting tokens through that hook will store the stub
+  alongside the access token; Python/Go google-auth, gcloud, and
+  `gcp-metadata` drop the extra field.
 
 ## [0.12.1] - 2026-06-25
 

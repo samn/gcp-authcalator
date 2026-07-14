@@ -11,6 +11,13 @@ const METADATA_FLAVOR_VALUE = "Google";
 
 const METADATA_HEADERS = { [METADATA_FLAVOR_HEADER]: METADATA_FLAVOR_VALUE };
 
+/**
+ * Maximum accepted POST /token body size. A legitimate refresh-grant body is
+ * ~150 bytes; the cap keeps the one endpoint reachable without the
+ * Metadata-Flavor header from being used to force large body buffering.
+ */
+const MAX_OAUTH_BODY_BYTES = 8192;
+
 function textResponse(body: string, status = 200): Response {
   return new Response(body, {
     status,
@@ -38,10 +45,12 @@ export async function handleRequest(req: Request, deps: MetadataProxyDeps): Prom
   const url = new URL(req.url, "http://localhost");
 
   // OAuth2 token-endpoint emulation (mirrors https://oauth2.googleapis.com/token).
+  // Exact-path like the real endpoint — every OAuth client uses a fixed token
+  // URI, and a wider match would only grow the unauthenticated surface.
   // No Metadata-Flavor check: real OAuth clients don't send the header, and the
   // stubbed refresh token — issued only through the header-gated (and, under
   // with-prod, PID-validated) metadata token endpoint — is the credential here.
-  if (req.method === "POST" && url.pathname.replace(/\/+$/, "") === "/token") {
+  if (req.method === "POST" && url.pathname === "/token") {
     return handleOAuthRefresh(req, deps);
   }
 
@@ -115,28 +124,65 @@ export async function handleRequest(req: Request, deps: MetadataProxyDeps): Prom
   return textResponse("Not found", 404);
 }
 
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : "Unknown error";
+}
+
+/**
+ * Fetch the current access token from the provider and compute its remaining
+ * lifetime. Shared by the GCE token endpoint and the OAuth refresh grant so
+ * the expiry math on the two token-serving paths cannot drift.
+ */
+async function currentToken(
+  deps: MetadataProxyDeps,
+): Promise<{ access_token: string; expires_in: number }> {
+  const cached = await deps.getToken();
+  return {
+    access_token: cached.access_token,
+    expires_in: Math.max(0, Math.floor((cached.expires_at.getTime() - Date.now()) / 1000)),
+  };
+}
+
 async function handleToken(deps: MetadataProxyDeps): Promise<Response> {
   try {
-    const cached = await deps.getToken();
-    const expiresIn = Math.max(0, Math.floor((cached.expires_at.getTime() - Date.now()) / 1000));
+    const { access_token, expires_in } = await currentToken(deps);
 
     const body: MetadataTokenResponse = {
-      access_token: cached.access_token,
-      expires_in: expiresIn,
+      access_token,
+      expires_in,
       token_type: "Bearer",
       refresh_token: deps.refreshToken,
     };
 
     return jsonResponse(body);
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    return jsonResponse({ error: message }, 500);
+    return jsonResponse({ error: errorMessage(err) }, 500);
   }
 }
 
-function oauthError(error: OAuthErrorResponse["error"], description: string): Response {
+/**
+ * OAuth token-endpoint responses must not be cached (RFC 6749 §5.1/§5.2:
+ * Cache-Control: no-store) and, unlike the metadata endpoints, carry no
+ * Metadata-Flavor header — the emulated oauth2.googleapis.com doesn't either.
+ */
+function oauthJsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+      Pragma: "no-cache",
+    },
+  });
+}
+
+function oauthError(
+  error: OAuthErrorResponse["error"],
+  description: string,
+  status = 400,
+): Response {
   const body: OAuthErrorResponse = { error, error_description: description };
-  return jsonResponse(body, 400);
+  return oauthJsonResponse(body, status);
 }
 
 /**
@@ -161,14 +207,39 @@ function safeEqual(a: string, b: string): boolean {
  * carries no refresh_token.
  */
 async function handleOAuthRefresh(req: Request, deps: MetadataProxyDeps): Promise<Response> {
-  const contentType = (req.headers.get("Content-Type") ?? "").split(";")[0]!.trim();
+  const contentType = (req.headers.get("Content-Type") ?? "").split(";")[0]!.trim().toLowerCase();
   if (contentType !== "application/x-www-form-urlencoded") {
     return oauthError("invalid_request", "request body must be application/x-www-form-urlencoded");
   }
-  const form = new URLSearchParams(await req.text());
+
+  // Cap the body before reading it. This endpoint is reachable without the
+  // Metadata-Flavor header, so an unbounded read would let any local process
+  // force the proxy to buffer arbitrarily large bodies (chunked uploads are
+  // not limited by Bun's maxRequestBodySize). A legitimate refresh request is
+  // ~150 bytes; requiring a small declared Content-Length also rejects
+  // chunked bodies, which no real OAuth client sends.
+  const contentLengthHeader = req.headers.get("Content-Length");
+  const contentLength = contentLengthHeader === null ? NaN : Number(contentLengthHeader);
+  if (
+    !Number.isInteger(contentLength) ||
+    contentLength < 0 ||
+    contentLength > MAX_OAUTH_BODY_BYTES
+  ) {
+    return oauthError(
+      "invalid_request",
+      `request must declare Content-Length of at most ${MAX_OAUTH_BODY_BYTES} bytes`,
+    );
+  }
+
+  let form: URLSearchParams;
+  try {
+    form = new URLSearchParams(await req.text());
+  } catch {
+    return oauthError("invalid_request", "could not read request body");
+  }
 
   const grantType = form.get("grant_type");
-  if (grantType === null || grantType.length === 0) {
+  if (!grantType) {
     return oauthError("invalid_request", "grant_type parameter is required");
   }
   if (grantType !== "refresh_token") {
@@ -176,7 +247,7 @@ async function handleOAuthRefresh(req: Request, deps: MetadataProxyDeps): Promis
   }
 
   const refreshToken = form.get("refresh_token");
-  if (refreshToken === null || refreshToken.length === 0) {
+  if (!refreshToken) {
     return oauthError("invalid_request", "refresh_token parameter is required");
   }
   if (!safeEqual(refreshToken, deps.refreshToken)) {
@@ -184,20 +255,20 @@ async function handleOAuthRefresh(req: Request, deps: MetadataProxyDeps): Promis
   }
 
   try {
-    const cached = await deps.getToken();
-    const expiresIn = Math.max(0, Math.floor((cached.expires_at.getTime() - Date.now()) / 1000));
+    const { access_token, expires_in } = await currentToken(deps);
 
     const body: OAuthRefreshResponse = {
-      access_token: cached.access_token,
-      expires_in: expiresIn,
+      access_token,
+      expires_in,
       scope: deps.scopes.join(" "),
       token_type: "Bearer",
     };
 
-    return jsonResponse(body);
+    return oauthJsonResponse(body);
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    return jsonResponse({ error: message }, 500);
+    // The error member of an OAuth token response is a registered code
+    // (RFC 6749 §5.2), not prose — put the provider failure in the description.
+    return oauthError("temporarily_unavailable", errorMessage(err), 503);
   }
 }
 
@@ -214,8 +285,7 @@ async function handleNumericProjectId(deps: MetadataProxyDeps): Promise<Response
     const numericId = await deps.getNumericProjectId();
     return textResponse(numericId);
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    return jsonResponse({ error: message }, 500);
+    return jsonResponse({ error: errorMessage(err) }, 500);
   }
 }
 
@@ -228,8 +298,7 @@ async function handleUniverseDomain(deps: MetadataProxyDeps): Promise<Response> 
     const domain = await deps.getUniverseDomain();
     return textResponse(domain);
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    return jsonResponse({ error: message }, 500);
+    return jsonResponse({ error: errorMessage(err) }, 500);
   }
 }
 

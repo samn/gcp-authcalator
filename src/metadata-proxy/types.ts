@@ -22,16 +22,13 @@ export interface MetadataTokenResponse extends TokenResponse {
  * https://oauth2.googleapis.com/token, which does not return a new
  * refresh_token on refresh grants.
  */
-export interface OAuthRefreshResponse {
-  access_token: string;
-  expires_in: number;
+export interface OAuthRefreshResponse extends TokenResponse {
   scope: string;
-  token_type: "Bearer";
 }
 
 /** OAuth2 error response per RFC 6749 §5.2. */
 export interface OAuthErrorResponse {
-  error: "invalid_request" | "invalid_grant" | "unsupported_grant_type";
+  error: "invalid_request" | "invalid_grant" | "unsupported_grant_type" | "temporarily_unavailable";
   error_description: string;
 }
 

@@ -226,8 +226,10 @@ GET /computeMetadata/v1/instance/service-accounts/default/token
   → {"access_token": "ya29...", "expires_in": 3600, "token_type": "Bearer",
      "refresh_token": "gcp-authcalator-stub-<64 hex>"}
     (refresh_token is a stub minted by this proxy instance — not a GCP
-     credential; real GCE responses omit the field and known clients
-     ignore it)
+     credential; real GCE responses omit the field. google-auth for
+     Python/Go, gcloud, and gcp-metadata drop it; Node's
+     google-auth-library propagates it into client.credentials and its
+     'tokens' event — see below)
 
 GET /computeMetadata/v1/project/project-id
   → project id
@@ -248,16 +250,20 @@ GET /  (metadata server detection ping)
   → 200 OK with Metadata-Flavor: Google header
 
 POST /token  (OAuth2 token endpoint emulation, mirrors oauth2.googleapis.com)
-  ← grant_type=refresh_token&refresh_token=<stub>  (form-encoded)
+  ← grant_type=refresh_token&refresh_token=<stub>
+    (form-encoded, exact path, Content-Length required and ≤ 8192 bytes)
   → {"access_token": "ya29...", "expires_in": 3600,
      "scope": "<space-delimited scopes>", "token_type": "Bearer"}
+    (responses carry Cache-Control: no-store per RFC 6749 §5.1)
   → 400 {"error": "invalid_grant" | "invalid_request" |
          "unsupported_grant_type", "error_description": "..."}
+  → 503 {"error": "temporarily_unavailable",
+         "error_description": "..."}  (token provider / gate failure)
 ```
 
 Validates the `Metadata-Flavor: Google` request header (standard metadata server security). Fetches dev-scoped tokens from `gcp-gate` via the socket, caches until 5 minutes before expiry.
 
-**Stubbed refresh token.** Each proxy instance mints a crypto-random refresh token at startup (`gcp-authcalator-stub-` + 32-byte hex, in-memory only) and returns it in the token endpoint's JSON. `POST /token` redeems exactly that stub — compared in constant time — for the current short-lived access token via the proxy's normal token provider, so gate-side bounds (session expiry, token TTL, confirmation policy) all still apply. This gives container processes that authenticated to the proxy (Metadata-Flavor header; PID validation on `with-prod` temporary proxies, which covers `POST /token` too) a standard OAuth2 refresh flow without placing a real refresh credential in the container: the stub is worthless outside the issuing proxy (bound to `127.0.0.1`, dies with the process, unknown to GCP), cannot extend a prod session, and the engineer's ADC refresh token and the gate session ID stay where they were (host-side gate and `with-prod` parent process respectively). `POST /token` itself does not require the `Metadata-Flavor` header — real OAuth clients don't send one; possession of the stub is the credential. Refresh responses carry no new `refresh_token`, matching Google's endpoint.
+**Stubbed refresh token.** Each proxy instance mints a crypto-random refresh token at startup (`gcp-authcalator-stub-` + 32-byte hex; the proxy holds it in memory only) and returns it in the token endpoint's JSON. `POST /token` redeems exactly that stub — compared in constant time — for the current short-lived access token via the proxy's normal token provider, so gate-side bounds (session expiry, token TTL, confirmation policy) all still apply. This gives container processes that authenticated to the proxy (Metadata-Flavor header; PID validation on `with-prod` temporary proxies, which covers `POST /token` too) a standard OAuth2 refresh flow without placing a real refresh credential in the container: the stub is worthless outside the issuing proxy (bound to `127.0.0.1`, dies with the process, unknown to GCP), cannot extend a prod session, and the engineer's ADC refresh token and the gate session ID stay where they were (host-side gate and `with-prod` parent process respectively). `POST /token` itself does not require the `Metadata-Flavor` header — real OAuth clients don't send one; possession of the stub is the credential. Because the endpoint is header-free, it is deliberately strict everywhere else: exact path only, `application/x-www-form-urlencoded` (case-insensitive media type), and a declared `Content-Length` of at most 8192 bytes (`MAX_OAUTH_BODY_BYTES` in `src/metadata-proxy/handlers.ts`) so it cannot be used to force large body buffering; chunked bodies are rejected. Refresh responses carry no new `refresh_token` and set `Cache-Control: no-store`, matching Google's endpoint; provider failures return `503 temporarily_unavailable` rather than leaking raw error prose into the RFC 6749 `error` code field. Client caveat: Node's `google-auth-library` Compute client copies the full token JSON into `client.credentials` and re-emits it on its `'tokens'` event, so an app persisting tokens through that hook writes the stub to disk alongside the shorter-lived access token, where it remains redeemable at the issuing proxy's `POST /token` for that proxy's lifetime. google-auth for Python/Go, gcloud, and `gcp-metadata` extract only the known fields and drop the stub.
 
 **Started by** the devcontainer post start script as a background process.
 

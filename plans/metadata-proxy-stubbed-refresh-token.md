@@ -38,9 +38,11 @@ GET /computeMetadata/v1/instance/service-accounts/default/token
 
 Issuance therefore requires the same authentication as any token request:
 the `Metadata-Flavor: Google` header, plus PID-tree validation on `with-prod`
-temporary proxies. Known metadata consumers (google-auth for Python/Node/Go,
-gcloud, gcp-metadata) ignore unknown fields, so the extra field is inert for
-clients that don't want it.
+temporary proxies. google-auth for Python/Go, gcloud, and gcp-metadata drop
+the unknown field; Node's google-auth-library propagates it into
+`client.credentials` and its `'tokens'` event, so apps persisting tokens
+through that hook store the stub alongside the access token (documented as a
+caveat in README/SPEC).
 
 **Redemption** — a new OAuth2-style token endpoint, mirroring
 `https://oauth2.googleapis.com/token`:
@@ -59,10 +61,16 @@ grant_type=refresh_token&refresh_token=<stub>
 
 - Stub comparison is constant-time (SHA-256 both sides + `timingSafeEqual`).
 - The response deliberately does **not** include a `refresh_token`
-  (matches Google's refresh-grant behavior).
+  (matches Google's refresh-grant behavior) and sets `Cache-Control:
+no-store` per RFC 6749 §5.1.
 - No `Metadata-Flavor` header requirement — real OAuth clients don't send
   one, and possession of the stub already proves the caller obtained it
-  through the authenticated channel.
+  through the authenticated channel. Because the endpoint is header-free it
+  is strict everywhere else: exact path, case-insensitive form media type,
+  and a declared `Content-Length` ≤ 8 KB (rejects chunked/oversized bodies
+  so it can't be used to force large body buffering).
+- Provider failures return `503 temporarily_unavailable` (the RFC 6749
+  `error` member is a registered code, not prose).
 - PID validation applies (it wraps every request in `server.fetch`).
 
 ## Security properties
