@@ -22,6 +22,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   requests), and it returns `404` when the proxy is backed by a custom token
   provider rather than a gate client.
 
+### Changed
+
+- **Upgraded dependencies and toolchain.** `google-auth-library`
+  10.7.0 → 10.9.0, `smol-toml` 1.6.1 → 1.7.0, `oxlint` 1.69.0 → 1.75.0,
+  `oxfmt` 0.54.0 → 0.60.0, and TypeScript 6.0.3 → 7.0.2 (the native compiler).
+  The `prek` toolchain pin moves 0.4.4 → 0.4.10. No source changes were
+  required; typecheck, lint, format, and the full test suite all pass. The one
+  historical plan document that embeds raw terminal control characters
+  (`plans/code-review-findings-2026-06-09.md`) is now excluded from `oxfmt`,
+  which in 0.60 would otherwise rewrite those bytes to the Unicode replacement
+  character.
+
 ## [0.12.1] - 2026-06-25
 
 ### Fixed
