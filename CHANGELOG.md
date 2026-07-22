@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [0.13.0] - 2026-07-22
+
 ### Added
 
 - **`metadata-proxy` now exposes the gate's `/identity` route.** A new
