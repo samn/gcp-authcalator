@@ -5,5 +5,11 @@
   "trailingComma": "all",
   "printWidth": 100,
   "tabWidth": 2,
-  "ignorePatterns": ["node_modules", "dist", "out", "bun.lock"]
+  "ignorePatterns": [
+    "node_modules",
+    "dist",
+    "out",
+    "bun.lock",
+    "plans/code-review-findings-2026-06-09.md"
+  ]
 }
