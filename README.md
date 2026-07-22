@@ -367,6 +367,7 @@ Set `GCE_METADATA_HOST=127.0.0.1:8173 GCE_METADATA_IP=127.0.0.1:8173 GCE_METADAT
 | Path                                                               | Response                               | `Metadata-Flavor: Google` required? |
 | ------------------------------------------------------------------ | -------------------------------------- | ----------------------------------- |
 | `GET /`                                                            | `200 ok` (detection ping)              | No                                  |
+| `GET /identity`                                                    | Authenticated user email JSON          | Yes                                 |
 | `GET /computeMetadata/v1/instance`                                 | Directory listing for GCE detection    | Yes                                 |
 | `GET /computeMetadata/v1/instance/service-accounts/default/token`  | Token JSON                             | Yes                                 |
 | `GET /computeMetadata/v1/project/project-id`                       | Plain text project ID                  | Yes                                 |
@@ -380,6 +381,8 @@ Set `GCE_METADATA_HOST=127.0.0.1:8173 GCE_METADATA_IP=127.0.0.1:8173 GCE_METADAT
 Endpoints returning "JSON or directory listing" respond with JSON when `?recursive=true` is passed, and a text directory listing otherwise. This matches real GCE metadata server behavior.
 
 Service account paths that use an email identifier (e.g., `.../service-accounts/sa@project.iam.gserviceaccount.com/token`) are automatically aliased to `default`, since the proxy serves a single set of credentials. This ensures compatibility with `gcloud` and other client libraries that resolve accounts by email.
+
+`GET /identity` proxies the gate's [`/identity`](#gate--host-side-token-daemon) route, returning the authenticated engineer's email as JSON (`{ "email": "..." }`). This lets container-side tooling — for example telemetry that must attribute activity to a real person — discover the human behind the downscoped service account. It is intentionally **not** the GCE `.../service-accounts/default/identity` path (which is reserved for OIDC identity tokens and is not supported); it lives at the top level, mirroring the gate. Because it returns the engineer's real email (PII), it requires the `Metadata-Flavor: Google` header like the other data-returning endpoints — the header blocks header-less "simple" requests (a browser or an SSRF-prone local service) from reading it. When the proxy is backed by a custom token provider rather than a gate client, the endpoint returns `404`.
 
 The proxy fetches tokens from the `gate` daemon via a Unix socket (local) or TCP+mTLS (remote) and caches them locally, re-fetching when less than 5 minutes of lifetime remain. The transport is determined automatically based on whether `--gate-url` or `GCP_AUTHCALATOR_GATE_URL` is configured.
 

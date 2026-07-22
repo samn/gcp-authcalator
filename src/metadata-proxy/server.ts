@@ -52,6 +52,7 @@ export function startMetadataProxyServer(
     getToken: provider.getToken,
     getNumericProjectId: gateClient?.getNumericProjectId,
     getUniverseDomain: gateClient?.getUniverseDomain,
+    getIdentity: gateClient?.getIdentity,
     projectId: config.project_id,
     serviceAccountEmail: config.service_account,
     scopes: effectiveScopes,
@@ -126,6 +127,9 @@ export function startMetadataProxyServer(
     console.log("    GET /computeMetadata/v1/instance/service-accounts               → SA listing");
     console.log(
       "    GET /computeMetadata/v1/universe/universe_domain                → universe domain",
+    );
+    console.log(
+      "    GET /identity                                                → authenticated user email",
     );
   }
 

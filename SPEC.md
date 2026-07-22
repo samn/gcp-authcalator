@@ -242,9 +242,19 @@ GET /computeMetadata/v1/universe/universe_domain
 
 GET /  (metadata server detection ping)
   → 200 OK with Metadata-Flavor: Google header
+
+GET /identity  (authenticated user identity, proxied from gcp-gate)
+  → {"email": "engineer@example.com"}
+    Non-GCE endpoint (the standard .../default/identity path is reserved for
+    OIDC identity tokens). Lets container-side tooling — e.g. telemetry that
+    must attribute activity to a real person — discover the human behind the
+    downscoped service account. Returns the engineer's real email (PII), so it
+    requires the Metadata-Flavor: Google header like the data endpoints; 404
+    when the proxy is backed by a custom token provider instead of a gate
+    client.
 ```
 
-Validates the `Metadata-Flavor: Google` request header (standard metadata server security). Fetches dev-scoped tokens from `gcp-gate` via the socket, caches until 5 minutes before expiry.
+Validates the `Metadata-Flavor: Google` request header (standard metadata server security) on all `/computeMetadata/` paths and on `/identity` (which returns PII); only the non-sensitive detection ping (`/`) is exempt, matching real metadata-server behavior for the root ping. Fetches dev-scoped tokens from `gcp-gate` via the socket, caches until 5 minutes before expiry.
 
 **Started by** the devcontainer post start script as a background process.
 

@@ -114,6 +114,7 @@ export async function checkGateSocket(
  * - Caches tokens in memory; re-fetches when remaining lifetime < 5 minutes
  * - Caches the numeric project ID permanently (immutable value)
  * - Caches the universe domain permanently (immutable value)
+ * - Caches the authenticated identity email permanently (stable per daemon)
  * - Accepts an optional fetchFn for test injection
  */
 export function createGateClient(
@@ -126,6 +127,7 @@ export function createGateClient(
   let tokenCache: CachedToken | null = null;
   let numericProjectIdCache: string | null = null;
   let universeDomainCache: string | null = null;
+  let identityCache: string | null = null;
 
   function isCacheValid(cached: CachedToken | null): cached is CachedToken {
     if (!cached) return false;
@@ -207,5 +209,27 @@ export function createGateClient(
     return universeDomainCache;
   }
 
-  return { getToken, getNumericProjectId, getUniverseDomain };
+  async function getIdentity(): Promise<string> {
+    if (identityCache) {
+      return identityCache;
+    }
+
+    const res = await fetchFn(`${baseUrl}/identity`, extraOpts);
+
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`gcp-gate returned ${res.status}: ${text}`);
+    }
+
+    const body = (await res.json()) as { email?: string };
+
+    if (!body.email) {
+      throw new Error("gcp-gate returned no email");
+    }
+
+    identityCache = body.email;
+    return identityCache;
+  }
+
+  return { getToken, getNumericProjectId, getUniverseDomain, getIdentity };
 }

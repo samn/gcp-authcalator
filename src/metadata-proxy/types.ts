@@ -15,6 +15,8 @@ export interface TokenProvider {
 export interface GateClient extends TokenProvider {
   getNumericProjectId: () => Promise<string>;
   getUniverseDomain: () => Promise<string>;
+  /** The authenticated engineer's email, resolved via the gate's `/identity`. */
+  getIdentity: () => Promise<string>;
 }
 
 /**
@@ -25,6 +27,12 @@ export interface MetadataProxyDeps {
   getToken: () => Promise<CachedToken>;
   getNumericProjectId?: () => Promise<string>;
   getUniverseDomain?: () => Promise<string>;
+  /**
+   * Resolves the authenticated engineer's email from the gate's `/identity`
+   * route. Optional: only wired when a gate client backs the proxy (a custom
+   * `tokenProvider` has no identity source), in which case the endpoint 404s.
+   */
+  getIdentity?: () => Promise<string>;
   projectId: string;
   serviceAccountEmail: string | undefined;
   scopes: string[];
