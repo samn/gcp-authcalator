@@ -14,6 +14,7 @@ function mockGateFetch(
   expiresIn = 3600,
   projectNumber = "123456789012",
   universeDomain = "googleapis.com",
+  identityEmail = "engineer@example.com",
 ): typeof globalThis.fetch {
   return ((input: string | URL | Request) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -28,6 +29,14 @@ function mockGateFetch(
     if (url.includes("/universe-domain")) {
       return Promise.resolve(
         new Response(JSON.stringify({ universe_domain: universeDomain }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    }
+    if (url.includes("/identity")) {
+      return Promise.resolve(
+        new Response(JSON.stringify({ email: identityEmail }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         }),
@@ -163,6 +172,56 @@ describe("startMetadataProxyServer", () => {
     expect(res.headers.get("Content-Type")).toBe("text/plain");
     const body = await res.text();
     expect(body).toBe("custom.googleapis.com");
+  });
+
+  test("serves identity endpoint via gate client", async () => {
+    const port = nextPort++;
+    const config = makeConfig(port);
+
+    result = startMetadataProxyServer(config, {
+      gateClientOptions: {
+        fetchFn: mockGateFetch("tok", 3600, "123456789012", "googleapis.com", "sam@upstream.tech"),
+      },
+    });
+
+    const res = await fetch(`http://127.0.0.1:${port}/identity`, {
+      headers: { "Metadata-Flavor": "Google" },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toBe("application/json");
+    const body = (await res.json()) as { email: string };
+    expect(body.email).toBe("sam@upstream.tech");
+  });
+
+  test("identity returns 403 when Metadata-Flavor header is missing", async () => {
+    const port = nextPort++;
+    const config = makeConfig(port);
+
+    result = startMetadataProxyServer(config, {
+      gateClientOptions: { fetchFn: mockGateFetch("tok") },
+    });
+
+    const res = await fetch(`http://127.0.0.1:${port}/identity`);
+    expect(res.status).toBe(403);
+  });
+
+  test("identity returns 404 when using custom tokenProvider", async () => {
+    const port = nextPort++;
+    const config = makeConfig(port);
+
+    const customProvider: TokenProvider = {
+      getToken: async () => ({
+        access_token: "custom-token",
+        expires_at: new Date(Date.now() + 3600_000),
+      }),
+    };
+
+    result = startMetadataProxyServer(config, { tokenProvider: customProvider });
+
+    const res = await fetch(`http://127.0.0.1:${port}/identity`, {
+      headers: { "Metadata-Flavor": "Google" },
+    });
+    expect(res.status).toBe(404);
   });
 
   test("universe_domain returns 404 when using custom tokenProvider", async () => {

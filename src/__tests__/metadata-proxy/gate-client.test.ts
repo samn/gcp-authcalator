@@ -235,6 +235,77 @@ describe("createGateClient — getNumericProjectId", () => {
   });
 });
 
+describe("createGateClient — getIdentity", () => {
+  function mockIdentityFetch(email: string): {
+    fetchFn: typeof globalThis.fetch;
+    callCount: () => number;
+  } {
+    let count = 0;
+    const fetchFn = (async (input: string | URL | Request) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      count++;
+      if (url.includes("/identity")) {
+        return new Response(JSON.stringify({ email }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(
+        JSON.stringify({ access_token: "tok", expires_in: 3600, token_type: "Bearer" }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as unknown as typeof globalThis.fetch;
+    return { fetchFn, callCount: () => count };
+  }
+
+  test("fetches identity email from gate daemon", async () => {
+    const { fetchFn } = mockIdentityFetch("engineer@example.com");
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
+
+    const result = await client.getIdentity();
+    expect(result).toBe("engineer@example.com");
+  });
+
+  test("caches identity email on subsequent calls", async () => {
+    const { fetchFn, callCount } = mockIdentityFetch("engineer@example.com");
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
+
+    const first = await client.getIdentity();
+    const second = await client.getIdentity();
+
+    expect(first).toBe("engineer@example.com");
+    expect(second).toBe("engineer@example.com");
+    expect(callCount()).toBe(1);
+  });
+
+  test("throws on non-OK response", async () => {
+    const fetchFn = mockFetchError(500, '{"error":"internal"}');
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
+
+    await expect(client.getIdentity()).rejects.toThrow("gcp-gate returned 500");
+  });
+
+  test("throws when response has no email", async () => {
+    const fetchFn = (async () =>
+      new Response(JSON.stringify({ something: "else" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })) as unknown as typeof globalThis.fetch;
+
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
+
+    await expect(client.getIdentity()).rejects.toThrow("no email");
+  });
+
+  test("fetches identity using TCP connection", async () => {
+    const { fetchFn } = mockIdentityFetch("engineer@example.com");
+    const client = createGateClient(tcpConn(), { fetchFn });
+
+    const result = await client.getIdentity();
+    expect(result).toBe("engineer@example.com");
+  });
+});
+
 describe("checkGateSocket", () => {
   let tmpDir: string;
 

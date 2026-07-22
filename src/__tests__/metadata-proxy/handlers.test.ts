@@ -145,6 +145,79 @@ describe("GET /computeMetadata/v1/instance/service-accounts/default/token", () =
 });
 
 // ---------------------------------------------------------------------------
+// GET /identity (authenticated user email, proxied from the gate)
+// ---------------------------------------------------------------------------
+
+describe("GET /identity", () => {
+  test("returns the authenticated user's email as JSON", async () => {
+    const deps = makeDeps({ getIdentity: async () => "engineer@example.com" });
+    const res = await handleRequest(metadataRequest("/identity"), deps);
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toBe("application/json");
+    expect(res.headers.get("Metadata-Flavor")).toBe("Google");
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.email).toBe("engineer@example.com");
+  });
+
+  test("returns 403 when Metadata-Flavor header is missing", async () => {
+    // makeRequest sends no Metadata-Flavor header (unlike metadataRequest).
+    // /identity returns PII, so it enforces the header like the data endpoints.
+    const deps = makeDeps({ getIdentity: async () => "engineer@example.com" });
+    const res = await handleRequest(makeRequest("/identity"), deps);
+    expect(res.status).toBe(403);
+    expect(await res.text()).toContain("Metadata-Flavor");
+  });
+
+  test("returns 403 when Metadata-Flavor header has the wrong value", async () => {
+    const deps = makeDeps({ getIdentity: async () => "engineer@example.com" });
+    const res = await handleRequest(
+      makeRequest("/identity", "GET", { "Metadata-Flavor": "Wrong" }),
+      deps,
+    );
+    expect(res.status).toBe(403);
+  });
+
+  test("returns 404 when getIdentity is not configured", async () => {
+    const deps = makeDeps({ getIdentity: undefined });
+    const res = await handleRequest(metadataRequest("/identity"), deps);
+    expect(res.status).toBe(404);
+  });
+
+  test("returns 500 when the gate identity lookup fails", async () => {
+    const deps = makeDeps({
+      getIdentity: async () => {
+        throw new Error("gate unreachable");
+      },
+    });
+    const res = await handleRequest(metadataRequest("/identity"), deps);
+
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("gate unreachable");
+  });
+
+  test("handles non-Error thrown values", async () => {
+    const deps = makeDeps({
+      getIdentity: async () => {
+        throw "string-error"; // eslint-disable-line no-throw-literal
+      },
+    });
+    const res = await handleRequest(metadataRequest("/identity"), deps);
+
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("Unknown error");
+  });
+
+  test("returns 405 for non-GET methods", async () => {
+    const deps = makeDeps({ getIdentity: async () => "engineer@example.com" });
+    const res = await handleRequest(metadataRequest("/identity", "POST"), deps);
+    expect(res.status).toBe(405);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // GET /computeMetadata/v1/project/project-id
 // ---------------------------------------------------------------------------
 

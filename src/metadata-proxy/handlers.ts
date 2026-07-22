@@ -1,4 +1,4 @@
-import type { TokenResponse } from "../gate/types.ts";
+import type { IdentityResponse, TokenResponse } from "../gate/types.ts";
 import type { MetadataProxyDeps } from "./types.ts";
 
 const METADATA_FLAVOR_HEADER = "Metadata-Flavor";
@@ -24,6 +24,8 @@ function jsonResponse(body: unknown, status = 200): Response {
  * Pure request handler for the GCE metadata server emulator.
  *
  * - `/` — detection ping (always 200, no header check)
+ * - `/identity` — authenticated engineer's email, proxied from the gate
+ *   (requires the `Metadata-Flavor: Google` header, like the data endpoints)
  * - `/computeMetadata/v1/...` — requires `Metadata-Flavor: Google` header
  * - Non-GET → 405
  * - Unknown path → 404
@@ -41,6 +43,23 @@ export async function handleRequest(req: Request, deps: MetadataProxyDeps): Prom
       status: 200,
       headers: { ...METADATA_HEADERS },
     });
+  }
+
+  // Authenticated-user identity — proxies the gate's `/identity` so tooling in
+  // the container can discover the real engineer behind the downscoped service
+  // account (e.g. telemetry that must attribute activity to a person). This is
+  // NOT a GCE metadata path — the standard `.../default/identity` endpoint is
+  // reserved for OIDC identity tokens — so it lives at the top level, mirroring
+  // the gate's route. It returns the engineer's real email (PII), so it enforces
+  // the same `Metadata-Flavor: Google` header as the token/email endpoints: the
+  // header is the metadata server's anti-SSRF/CSRF barrier (header-less "simple"
+  // requests from an in-container browser or SSRF-prone local service cannot set
+  // it). Only the non-sensitive detection ping (`/`) is exempt.
+  if (url.pathname === "/identity") {
+    if (req.headers.get(METADATA_FLAVOR_HEADER) !== METADATA_FLAVOR_VALUE) {
+      return textResponse("Missing Metadata-Flavor:Google header.", 403);
+    }
+    return handleUserIdentity(deps);
   }
 
   // All /computeMetadata/* paths require the Metadata-Flavor header
@@ -112,6 +131,31 @@ async function handleToken(deps: MetadataProxyDeps): Promise<Response> {
       token_type: "Bearer",
     };
 
+    return jsonResponse(body);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    return jsonResponse({ error: message }, 500);
+  }
+}
+
+/**
+ * Handles GET /identity
+ *
+ * Returns the authenticated engineer's email as JSON (`{ "email": "..." }`),
+ * mirroring the gate's `/identity` response. Tooling uses this to attribute
+ * activity to the real person rather than the downscoped service account.
+ *
+ * - No gate client (custom tokenProvider) → 404 (no identity source)
+ * - Gate lookup fails                     → 500
+ */
+async function handleUserIdentity(deps: MetadataProxyDeps): Promise<Response> {
+  if (!deps.getIdentity) {
+    return textResponse("Not found", 404);
+  }
+
+  try {
+    const email = await deps.getIdentity();
+    const body: IdentityResponse = { email };
     return jsonResponse(body);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- **`metadata-proxy` now exposes the gate's `/identity` route.** A new
+  container-side `GET /identity` endpoint proxies the gate's `/identity` and
+  returns the authenticated engineer's email as JSON (`{ "email": "..." }`),
+  so tooling inside the dev container — such as telemetry that must attribute
+  activity to a real person — can discover the human behind the downscoped
+  service account. It is deliberately a top-level route (mirroring the gate),
+  not the GCE `.../service-accounts/default/identity` path, which is reserved
+  for OIDC identity tokens. Because it returns the engineer's real email (PII),
+  it requires the `Metadata-Flavor: Google` header like the other
+  data-returning endpoints (the header blocks header-less "simple" browser/SSRF
+  requests), and it returns `404` when the proxy is backed by a custom token
+  provider rather than a gate client.
+
 ## [0.12.1] - 2026-06-25
 
 ### Fixed
