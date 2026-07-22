@@ -156,6 +156,57 @@ Download a prebuilt binary from the [GitHub Releases](https://github.com/samn/gc
 
 Each release includes SHA256 checksums for verification.
 
+### Docker image
+
+Every release publishes a lightweight, multi-arch (`linux/amd64`, `linux/arm64`)
+image built on a minimal [distroless](https://github.com/GoogleContainerTools/distroless)
+base to GitHub Container Registry:
+
+```bash
+docker pull ghcr.io/samn/gcp-authcalator:latest
+# or pin a version: ghcr.io/samn/gcp-authcalator:0.12.1
+```
+
+The `ENTRYPOINT` is the `gcp-authcalator` binary, so arguments are passed
+straight through:
+
+```bash
+docker run --rm ghcr.io/samn/gcp-authcalator:latest --version
+```
+
+Tags follow the release version: `latest`, `X`, `X.Y`, and `X.Y.Z`.
+
+#### Customizing the container user
+
+The image runs as the unprivileged distroless `nonroot` user (uid `65532`) by
+default. Override the user without rebuilding using Docker's `--user` flag (or
+the equivalent `containerUser` / `remoteUser` in `devcontainer.json`):
+
+```bash
+docker run --rm --user 1000:1000 ghcr.io/samn/gcp-authcalator:latest --version
+```
+
+If you build your own image, set the `CONTAINER_USER` build argument instead
+(a `root`/`nonroot` name, or any numeric `uid[:gid]`):
+
+```bash
+docker build --build-arg CONTAINER_USER=1000:1000 -t gcp-authcalator .
+```
+
+#### Adding the binary to a devcontainer
+
+Because the binary is fully static, the simplest way to wire it into an
+existing devcontainer is to copy it from the published image in your
+`.devcontainer/Dockerfile` — no download step, checksum, or extra base layer:
+
+```dockerfile
+COPY --from=ghcr.io/samn/gcp-authcalator:latest \
+     /usr/local/bin/gcp-authcalator /usr/local/bin/gcp-authcalator
+```
+
+Then start `metadata-proxy` from a lifecycle script as shown in
+[Devcontainer setup](#devcontainer-setup).
+
 ### From source
 
 ```bash
