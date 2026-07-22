@@ -53,7 +53,13 @@
    - Generate SHA256 checksums
    - Create a GitHub Release with the changelog entry as the body
    - Attach the binaries and checksums as release assets
-   - Build and push a multi-arch Docker image (`linux/amd64`, `linux/arm64`) to `ghcr.io/samn/gcp-authcalator`
+   - Build and push a lightweight, multi-arch Docker image (`linux/amd64`, `linux/arm64`) to `ghcr.io/samn/gcp-authcalator`, tagged `latest`, `X`, `X.Y`, and `X.Y.Z`
+
+The Docker image is built from the root `Dockerfile` on a distroless base and
+runs as the unprivileged `nonroot` user (uid 65532) by default. The user is
+customizable via the `CONTAINER_USER` build argument (set in `release.yml`) or
+at run time with `docker run --user`. See the [Docker image](../README.md#docker-image)
+section of the README for consumer-facing details.
 
 ## Version format
 

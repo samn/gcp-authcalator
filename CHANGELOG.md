@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- **Customizable container user.** The released Docker image now accepts a
+  `CONTAINER_USER` build argument so the binary can run as a `root`/`nonroot`
+  name or any numeric `uid[:gid]`, making it easier to match a devcontainer's
+  expected user. It still defaults to the unprivileged distroless `nonroot`
+  user (uid 65532), and the user can also be overridden at run time with
+  `docker run --user` without rebuilding.
+
+### Changed
+
+- Documentation: added a **Docker image** section to the README covering the
+  published `ghcr.io/samn/gcp-authcalator` image, tag scheme, customizing the
+  container user, and copying the static binary into a devcontainer via
+  `COPY --from`.
+
 ## [0.12.1] - 2026-06-25
 
 ### Fixed
