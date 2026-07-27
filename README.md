@@ -343,12 +343,26 @@ Both `/token` and `/token?level=prod` accept an optional `scopes` query paramete
 
 1. Shows a desktop confirmation dialog (`osascript` on macOS, `zenity` on Linux)
 2. Falls back to a terminal prompt if no GUI is available
-3. Falls back to a pending approval queue for CLI-based approval (see `approve` command)
+3. Falls back to a pending approval queue for CLI-based approval (see `pending` / `approve`)
 4. Denies access if no interactive method is available and the request times out (120 seconds)
 
 Prod token requests are rate-limited: one confirmation dialog at a time, a 1-second cooldown after denial, and a maximum of 20 attempts per minute.
 
-**Audit logging:** All token requests are logged as JSON lines to the runtime directory's `audit.log` (`$XDG_RUNTIME_DIR/audit.log` or `~/.gcp-authcalator/audit.log`).
+**The dialog shows the reported command in full.** When `with-prod` reports the
+command it is wrapping (via `X-Wrapped-Command`), every argument is listed on
+its own numbered line in a scrollable view — nothing is hidden behind an
+ellipsis, because an argument you cannot read is one you cannot meaningfully
+approve. On Linux this is a `zenity --text-info` dialog with an "I have read the
+full command" checkbox that must be ticked before **Allow** is enabled; on macOS
+it is an AppleScript list where **Allow** stays disabled until you select a
+line. Both dialogs receive the command over stdin rather than on the command
+line, so it is not visible in the host process table. The terminal prompt
+prints every argument and requires you to type `yes` in full (it re-prompts
+once if you answer something else). Arguments that look like secrets are still redacted to `***` first, and a
+handful of size caps apply (512 arguments, 2000 characters per argument, 32 KiB
+total) — when one fires, the dialog says so and how much it withheld.
+
+**Audit logging:** All token requests are logged as JSON lines to the runtime directory's `audit.log` (`$XDG_RUNTIME_DIR/audit.log` or `~/.gcp-authcalator/audit.log`). Prod entries carry both `command` (an 80-character summary) and `command_argv` (the complete redacted argument list), so an approval can be reconstructed after the fact.
 
 ### `metadata-proxy` — Container-side metadata emulator
 
@@ -429,21 +443,32 @@ This command:
 
 The temporary proxy uses PID-based process restriction — only the wrapped command and its descendants can request tokens from it. The session ID (which authorizes token refresh) stays in the `with-prod` process and never reaches the subprocess — an attacker inside the subprocess cannot refresh tokens independently.
 
-### `approve` / `deny` — CLI approval of pending requests
+### `pending` / `approve` / `deny` — CLI approval of pending requests
 
-Approves or denies pending prod access requests on the gate server. This is the CLI fallback for environments where GUI dialogs and terminal prompts are unavailable (headless servers, containers without a display, CI).
+Inspects, approves, or denies pending prod access requests on the gate server. This is the CLI fallback for environments where GUI dialogs and terminal prompts are unavailable (headless servers, containers without a display, CI).
 
 ```bash
-# Approve a request by ID (printed by with-prod when waiting for approval):
+# List queued requests, each with its command in full:
+gcp-authcalator pending
+
+# Show one request (ID printed by with-prod when waiting for approval):
+gcp-authcalator pending <id>
+
+# Approve a request by ID — prints the full command, then asks for confirmation:
 gcp-authcalator approve <id>
+
+# Approve without the interactive prompt (required when not on a TTY):
+gcp-authcalator approve <id> --yes
 
 # Deny a request by ID:
 gcp-authcalator deny <id>
 ```
 
-When the gate's confirmation module cannot show a GUI dialog or terminal prompt, it queues the request and prints the request ID to stderr with instructions. If no approval has arrived within 10 seconds, the `with-prod` command also prints the pending ID with the `gcp-authcalator approve <id>` hint, so you can approve it manually. Requests auto-deny after 120 seconds if not resolved.
+`approve` always prints the request's complete argument list before it resolves anything, then asks you to type `yes`. On a non-TTY it refuses outright unless `--yes` is passed, so nothing is ever approved without the command having been shown. `deny` skips the confirmation — the failure mode worth guarding against is a blind yes.
 
-Both commands connect to the gate's **admin socket** (separate from the main socket, not mounted into devcontainers). They do not require `--project-id` — only `--admin-socket-path` is needed (defaults to `$XDG_RUNTIME_DIR/gcp-authcalator-admin/admin.sock`).
+When the gate's confirmation module cannot show a GUI dialog or terminal prompt, it queues the request and prints the request ID to stderr with instructions. If no approval has arrived within 10 seconds, the `with-prod` command also prints the pending ID with the `gcp-authcalator pending <id>` hint, so you can review and approve it manually. Requests auto-deny after 120 seconds if not resolved.
+
+All three commands connect to the gate's **admin socket** (separate from the main socket, not mounted into devcontainers) — which is also why the process that requested prod access cannot read back the command the operator is being shown. They do not require `--project-id` — only `--admin-socket-path` is needed (defaults to `$XDG_RUNTIME_DIR/gcp-authcalator-admin/admin.sock`).
 
 ### `init-tls` — TLS certificate management
 
@@ -662,6 +687,7 @@ gcp-authcalator is designed for environments where a coding agent (or other untr
 - **Cross-user isolation.** The main Unix socket is set to `0660` (group-readable by the gate UID's primary group) in a `0750` directory; the privileged operator socket is `0600` (owner-only) in the same directory. On modern Linux distros (UPG), the gate UID's primary group contains only the gate UID itself, so this is _effectively_ `0600` end-to-end. To grant a different-UID agent access to the main socket (e.g. a `the-robot` user in a dev container), add that user to the gate UID's primary group; the kernel still blocks access to the operator socket because its file mode is `0600`. The `$XDG_RUNTIME_DIR` directory itself is left at the system-managed `0700` per the XDG spec — group access requires placing `socket_path` in a gate-managed directory like `~/.gcp-authcalator/`. `with-prod`'s per-invocation sandbox dir (where ephemeral gcloud config and token files live) is resolved separately from the gate's runtime dir (`$XDG_RUNTIME_DIR` → `$XDG_CACHE_HOME/gcp-authcalator` → `~/.cache/gcp-authcalator`), so the agent's sandbox stays in its own private, owned space even when the gate's `~/.gcp-authcalator/` is shared via symlink. **For strongest isolation, run coding agents as a separate OS user _not_ in the gate's primary group** — they will be unable to access the main socket at all.
 - **Mutual TLS for remote transport.** When using TCP for remote devcontainers, both gate and the client verify each other's identity via self-signed certificates. The gate only listens on localhost (port forwarding is required for remote access). The `gate_url` config option enforces `https://` — plaintext `http://` connections are rejected at config parse time.
 - **Human-in-the-loop for production access.** Prod tokens require explicit confirmation via a desktop dialog (`osascript` on macOS, `zenity` on Linux), terminal prompt, or CLI approval (`gcp-authcalator approve`) on the host. If no method resolves within 120 seconds, access is denied.
+- **Informed consent.** Every approval surface shows the reported command in full, one argument per line. Nothing is elided silently: the size caps that bound dialog growth each state what they withheld. The reported command is still caller-supplied and advisory — a compromised container can lie about what it intends to run — so this protects the honest-client case, where the risk is an operator approving a payload they were structurally unable to see.
 - **Rate limiting** prevents automated brute-forcing of the confirmation flow: one dialog at a time, a 1-second cooldown after denial, and a maximum of 20 attempts per minute.
 
 **Best-effort protections** (defense in depth against same-user attacks):

@@ -5,6 +5,7 @@ import {
 } from "../gate/connection.ts";
 import { CREDENTIALS_EXPIRED_CODE, CredentialsExpiredError } from "../gate/credentials-error.ts";
 import { SESSION_NOT_PERMITTED_CODE, TARGET_PROJECT_HEADER } from "../gate/types.ts";
+import { encodeCommandHeader } from "../gate/summarize-command.ts";
 
 // ---------------------------------------------------------------------------
 // Backstop timeouts for talking to the gate
@@ -141,7 +142,8 @@ export async function fetchProdAccessToken(
 
   const headers: Record<string, string> = {};
   if (options.command && options.command.length > 0) {
-    headers["X-Wrapped-Command"] = JSON.stringify(options.command);
+    const encoded = encodeCommandHeader(options.command);
+    if (encoded) headers["X-Wrapped-Command"] = encoded;
   }
   if (options.pendingId) {
     headers["X-Pending-Id"] = options.pendingId;
@@ -249,7 +251,8 @@ export async function createProdSession(
 
   const headers: Record<string, string> = {};
   if (options.command && options.command.length > 0) {
-    headers["X-Wrapped-Command"] = JSON.stringify(options.command);
+    const encoded = encodeCommandHeader(options.command);
+    if (encoded) headers["X-Wrapped-Command"] = encoded;
   }
   if (options.pendingId) {
     headers["X-Pending-Id"] = options.pendingId;

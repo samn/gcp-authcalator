@@ -434,6 +434,8 @@ export async function startGateServer(
   console.log("    DELETE /session              → revoke prod session");
   console.log("    GET /health                  → health check");
   console.log("  endpoints (admin socket):");
+  console.log("    GET /pending                 → list pending requests");
+  console.log("    GET /pending/:id             → pending request with full command");
   console.log("    POST /pending/:id/approve    → approve pending request");
   console.log("    POST /pending/:id/deny       → deny pending request");
   console.log("    GET /health                  → health check");

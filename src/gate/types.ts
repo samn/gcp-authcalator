@@ -6,6 +6,7 @@ import type { ProdRateLimiter } from "./rate-limit.ts";
 import type { PamGrantResult } from "./pam.ts";
 import type { SessionManager } from "./session.ts";
 import type { PendingQueue } from "./pending.ts";
+import type { CommandDisplay } from "./summarize-command.ts";
 
 /** A cached GCP access token with its expiry time. */
 export interface CachedToken {
@@ -90,6 +91,16 @@ export interface AuditEntry {
    */
   command?: string;
   /**
+   * The same command as `command`, but complete: every redacted argv element,
+   * one per array entry. `command` is truncated to 80 characters for
+   * readability, which destroys exactly the tail an attacker would hide a
+   * payload in — this field is what makes an approval reconstructable after
+   * the fact. Subject to the display caps in `describeCommand`.
+   */
+  command_argv?: string[];
+  /** Present and true only when `command_argv` hit one of those caps. */
+  command_truncated?: boolean;
+  /**
    * Caller-supplied target GCP project (from `X-Target-Project`). Recorded
    * verbatim so the audit trail shows which project a multi-project caller
    * was acting against. Not validated by the gate — the security boundary is
@@ -117,7 +128,7 @@ export interface GateDeps {
   getUniverseDomain: () => Promise<string>;
   confirmProdAccess: (
     email: string,
-    command?: string,
+    command?: CommandDisplay,
     pamPolicy?: string,
     pendingId?: string,
   ) => Promise<boolean>;

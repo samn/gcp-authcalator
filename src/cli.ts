@@ -8,7 +8,7 @@ import { runWithProd } from "./commands/with-prod.ts";
 import { runKubeToken } from "./commands/kube-token.ts";
 import { runKubeSetup } from "./commands/kube-setup.ts";
 import { runInitTls } from "./commands/init-tls.ts";
-import { runApprove } from "./commands/approve.ts";
+import { runApprove, runPending } from "./commands/approve.ts";
 import { captureAndDeleteTlsBundleEnv } from "./tls/bundle.ts";
 
 // Run before any code below that may spawn a subprocess (e.g. getCommitSha).
@@ -23,6 +23,7 @@ Commands:
   gate              Start the host-side token daemon
   metadata-proxy    Start the GCE metadata server emulator
   with-prod         Wrap a command with prod credentials
+  pending           List pending prod access requests, or show one in full
   approve           Approve a pending prod access request by ID
   deny              Deny a pending prod access request
   init-tls          Generate TLS certificates for remote devcontainer support
@@ -57,6 +58,7 @@ Options:
   --quota-project <id>     with-prod: GOOGLE_CLOUD_QUOTA_PROJECT for the wrapped command (default: the target project)
   --no-quota-project       with-prod: don't manage GOOGLE_CLOUD_QUOTA_PROJECT (leave the inherited value untouched)
   -e, --env <KEY=VALUE>    Extra env var for with-prod subprocess (repeatable, supports \${VAR} substitution)
+  --yes                    approve only: skip the interactive confirmation (required when not on a TTY)
   -c, --config <path>      Path to TOML config file
   -h, --help               Show this help message
   -v, --version            Show version
@@ -79,6 +81,8 @@ Examples:
   gcp-authcalator metadata-proxy --config config.toml
   gcp-authcalator with-prod -- python some/script.py
   gcp-authcalator with-prod --project alt-project -- python some/script.py
+  gcp-authcalator pending
+  gcp-authcalator pending <id>
   gcp-authcalator approve <id>
   gcp-authcalator deny <id>
   gcp-authcalator kube-setup`;
@@ -87,6 +91,7 @@ const SUBCOMMANDS = [
   "gate",
   "metadata-proxy",
   "with-prod",
+  "pending",
   "approve",
   "deny",
   "init-tls",
@@ -135,6 +140,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       "quota-project": { type: "string" },
       "no-quota-project": { type: "boolean" },
       env: { type: "string", short: "e", multiple: true },
+      yes: { type: "boolean" },
       config: { type: "string", short: "c" },
       help: { type: "boolean", short: "h" },
       version: { type: "boolean", short: "v" },
@@ -199,13 +205,19 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     return;
   }
 
-  if (subcommand === "approve" || subcommand === "deny") {
+  if (subcommand === "approve" || subcommand === "deny" || subcommand === "pending") {
     try {
       const { env: _envPairs, ...scalarVals } = values;
       const approveConfig = loadConfig(mapCliArgs(scalarVals), values.config);
-      const isDeny = subcommand === "deny";
       const id = positionals[1];
-      await runApprove(approveConfig, id ? [id] : [], { deny: isDeny });
+      if (subcommand === "pending") {
+        await runPending(approveConfig, id ? [id] : []);
+      } else {
+        await runApprove(approveConfig, id ? [id] : [], {
+          deny: subcommand === "deny",
+          yes: values.yes,
+        });
+      }
     } catch (err) {
       if (err instanceof z.ZodError) {
         console.error(`error: invalid configuration for '${subcommand}'`);

@@ -27,7 +27,7 @@ service_account = "dev-runner@my-gcp-project.iam.gserviceaccount.com"
 # user to the gate UID's primary group.
 # socket_path = "/run/user/1000/gcp-authcalator.sock"
 
-# Path to the admin socket for approve/deny commands (not mounted into containers)
+# Path to the admin socket for pending/approve/deny commands (not mounted into containers)
 # Default: $XDG_RUNTIME_DIR/gcp-authcalator-admin/admin.sock
 # (or ~/.gcp-authcalator/gcp-authcalator-admin/admin.sock if XDG_RUNTIME_DIR is unset)
 # admin_socket_path = "/run/user/1000/gcp-authcalator-admin/admin.sock"
