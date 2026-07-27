@@ -162,11 +162,14 @@ describe("runApprove and runPending", () => {
     }
   });
 
-  function setup() {
+  function setup(options: { timeoutMs?: number; withQueue?: boolean } = {}) {
     const dir = mkdtempSync(join(tmpdir(), "approve-run-test-"));
     const adminSocketPath = join(dir, "admin.sock");
-    const queue = createPendingQueue({ timeoutMs: 30000, now: () => Date.now() });
-    const deps = makeDeps({ pendingQueue: queue });
+    const queue = createPendingQueue({
+      timeoutMs: options.timeoutMs ?? 30000,
+      now: () => Date.now(),
+    });
+    const deps = makeDeps(options.withQueue === false ? {} : { pendingQueue: queue });
 
     server = Bun.serve({
       unix: adminSocketPath,
@@ -177,6 +180,14 @@ describe("runApprove and runPending", () => {
 
     const config = { admin_socket_path: adminSocketPath } as Config;
     return { config, queue };
+  }
+
+  /** Serve a fixed response on an admin socket, for cases the real gate can't produce. */
+  function setupStub(handler: (req: Request) => Response) {
+    const dir = mkdtempSync(join(tmpdir(), "approve-stub-test-"));
+    const adminSocketPath = join(dir, "admin.sock");
+    server = Bun.serve({ unix: adminSocketPath, fetch: handler });
+    return { config: { admin_socket_path: adminSocketPath } as Config };
   }
 
   /** Everything printed to stdout during the call, joined. */
@@ -326,6 +337,123 @@ describe("runApprove and runPending", () => {
     const errors = errorSpy.mock.calls.flat().join(" ");
     expect(errors).toContain("no queued request");
     expect(errors).toContain("desktop dialog");
+  });
+
+  test("prints usage when no ID is given", async () => {
+    const { config } = setup();
+    await runApprove(config, [], {});
+
+    expect(output()).toContain("Usage: gcp-authcalator approve <id>");
+    expect(output()).toContain("gcp-authcalator pending");
+  });
+
+  test("shows requests that reported no command", async () => {
+    const { config, queue } = setup();
+    const promise = queue.enqueue("user@example.com");
+
+    await runPending(config, []);
+    expect(output()).toContain("(none reported)");
+
+    queue.denyAll();
+    await promise;
+  });
+
+  test("surfaces a non-404 error from the gate when listing", async () => {
+    const { config } = setup({ withQueue: false });
+
+    await expect(runPending(config, [])).rejects.toThrow("process.exit");
+    expect(errorSpy.mock.calls.flat().join(" ")).toContain("Pending queue not enabled");
+  });
+
+  test("surfaces a non-404 error from the gate when approving", async () => {
+    const { config } = setup({ withQueue: false });
+
+    await expect(runApprove(config, ["7".repeat(32)], { yes: true })).rejects.toThrow(
+      "process.exit",
+    );
+    expect(errorSpy.mock.calls.flat().join(" ")).toContain("Pending queue not enabled");
+  });
+
+  test("reports a request that expired between listing and resolving", async () => {
+    // The gate prunes expired entries before serving them, so the only way to
+    // see this is a gate whose clock ran ahead of ours — model it directly.
+    const { config } = setupStub(() =>
+      Response.json({
+        id: "8".repeat(32),
+        email: "user@example.com",
+        createdAt: new Date(Date.now() - 300_000).toISOString(),
+        expiresAt: new Date(Date.now() - 180_000).toISOString(),
+      }),
+    );
+
+    await expect(runApprove(config, ["8".repeat(32)], { isTTY: true })).rejects.toThrow(
+      "process.exit",
+    );
+    expect(errorSpy.mock.calls.flat().join(" ")).toContain("already expired");
+  });
+
+  test("reports a request that vanished before the resolve POST", async () => {
+    const { config } = setupStub((req) =>
+      new URL(req.url).pathname.endsWith("/approve")
+        ? Response.json({ error: "Request not found or expired" }, { status: 404 })
+        : Response.json({
+            id: "9".repeat(32),
+            email: "user@example.com",
+            createdAt: new Date().toISOString(),
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          }),
+    );
+
+    await expect(runApprove(config, ["9".repeat(32)], { yes: true })).rejects.toThrow(
+      "process.exit",
+    );
+    expect(errorSpy.mock.calls.flat().join(" ")).toContain("not found (may have expired)");
+  });
+
+  describe("the real stdin reader", () => {
+    /** Feed the production readLine (no injected reader) once it is listening. */
+    async function answer(text: string): Promise<void> {
+      await new Promise((r) => setTimeout(r, 20));
+      process.stdin.emit("data", text);
+    }
+
+    test("approves when the operator types yes on stdin", async () => {
+      const { config, queue } = setup();
+      const id = "a".repeat(32);
+      const promise = queue.enqueue("user@example.com", describeCommand(argv), undefined, id);
+
+      const run = runApprove(config, [id], { isTTY: true });
+      await answer("yes\n");
+      await run;
+
+      expect(await promise).toBe(true);
+    });
+
+    test("aborts when the operator types something else on stdin", async () => {
+      const { config, queue } = setup();
+      const id = "b".repeat(32);
+      const promise = queue.enqueue("user@example.com", describeCommand(argv), undefined, id);
+
+      const run = runApprove(config, [id], { isTTY: true });
+      await answer("no\n");
+      await expect(run).rejects.toThrow("process.exit");
+
+      expect(queue.list()).toHaveLength(1);
+      queue.denyAll();
+      expect(await promise).toBe(false);
+    });
+
+    test("gives up on its own when the request's window closes", async () => {
+      // A short-lived request stands in for an operator who spends the whole
+      // window reading: the reader must abandon rather than block forever.
+      const { config, queue } = setup({ timeoutMs: 400 });
+      const id = "c".repeat(32);
+      const promise = queue.enqueue("user@example.com", describeCommand(argv), undefined, id);
+
+      await expect(runApprove(config, [id], { isTTY: true })).rejects.toThrow("process.exit");
+      expect(errorSpy.mock.calls.flat().join(" ")).toContain("expired while waiting");
+      expect(await promise).toBe(false);
+    });
   });
 
   test("deny resolves without a confirmation prompt", async () => {
