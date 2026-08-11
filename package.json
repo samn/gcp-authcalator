@@ -23,7 +23,7 @@
   },
   "dependencies": {
     "@peculiar/x509": "^2.0.0",
-    "google-auth-library": "^10.9.0",
+    "google-auth-library": "^10.9.1",
     "reflect-metadata": "^0.2.2",
     "smol-toml": "^1.7.0",
     "zod": "^4.4.3"
