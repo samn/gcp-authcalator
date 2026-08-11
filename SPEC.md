@@ -166,21 +166,23 @@ A small HTTP server using the `google-auth-library` library. Runs on the host ma
 
 **Admin socket API** (separate Unix socket, not mounted into containers):
 
-| Endpoint                    | Behavior                        |
-| --------------------------- | ------------------------------- |
-| `POST /pending/:id/approve` | Approve a pending request by ID |
-| `POST /pending/:id/deny`    | Deny a pending request by ID    |
-| `GET /health`               | Health check                    |
+| Endpoint                    | Behavior                                          |
+| --------------------------- | ------------------------------------------------- |
+| `GET /pending`              | List pending requests, each with its full command |
+| `GET /pending/:id`          | One pending request by ID, with its full command  |
+| `POST /pending/:id/approve` | Approve a pending request by ID                   |
+| `POST /pending/:id/deny`    | Deny a pending request by ID                      |
+| `GET /health`               | Health check                                      |
 
 Both token endpoints accept an optional `scopes` query parameter (comma-separated) to request tokens with specific OAuth scopes (e.g., `GET /token?scopes=https://www.googleapis.com/auth/sqlservice.login`). Defaults to `cloud-platform`.
 
 **Request headers** consumed by the prod-path endpoints (`POST /session`, `GET /token?level=prod`, `GET /token?session=...`):
 
-| Header              | Purpose                                                                                                                                                                                                                      |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `X-Wrapped-Command` | JSON-array of the command being wrapped; surfaced in the confirmation dialog and audit log. Length-bounded and redacted before display.                                                                                      |
-| `X-Pending-Id`      | 32-hex client-generated ID for the CLI approval fallback (`gcp-authcalator approve <id>`). Rejected on the operator socket's auto-approve path.                                                                              |
-| `X-Target-Project`  | Caller-supplied GCP project this request is targeting (sent by `with-prod --project=...`). Audit-only: echoed into the audit entry's `target_project` field, never validated against an allowlist. Empty values are ignored. |
+| Header              | Purpose                                                                                                                                                                                                                                                                                                                                                                                  |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `X-Wrapped-Command` | JSON-array of the command being wrapped; surfaced **in full** in the confirmation dialog, and in the audit log as both an 80-char `command` summary and the complete `command_argv`. Redacted per argument before display. Bounded by the HTTP server's header limit; display caps (512 args / 2000 chars per arg / 32 KiB total) each announce themselves rather than eliding silently. |
+| `X-Pending-Id`      | 32-hex client-generated ID for the CLI approval fallback (`gcp-authcalator approve <id>`). Rejected on the operator socket's auto-approve path.                                                                                                                                                                                                                                          |
+| `X-Target-Project`  | Caller-supplied GCP project this request is targeting (sent by `with-prod --project=...`). Audit-only: echoed into the audit entry's `target_project` field, never validated against an allowlist. Empty values are ignored.                                                                                                                                                             |
 
 **PAM entitlement scoping.** `pam_policy` accepts four forms: a short ID (expanded against the gate's `project_id` + `pam_location`), a full project-scoped path (`projects/{project}/locations/{loc}/entitlements/{id}` — must match `project_id`), a full folder-scoped path (`folders/{folder}/locations/{loc}/entitlements/{id}`), or a full organization-scoped path (`organizations/{org}/locations/{loc}/entitlements/{id}`). Folder- and org-scoped paths are accepted verbatim; the `project_id` config field plays no role in their resolution. These are the multi-project setup: one PAM grant covers every project beneath the folder or org, and `with-prod --project=...` selects which project a given invocation acts against without changing the entitlement.
 
@@ -192,6 +194,43 @@ Both token endpoints accept an optional `scopes` query parameter (comma-separate
 2. Fallback: terminal prompt on the host (if TTY is available)
 3. Fallback: pending approval queue for CLI-based approval via `gcp-authcalator approve` (120-second timeout)
 4. Deny by default if no interactive method is available and the request times out
+
+**Command disclosure.** A truncated command is an unreviewable one — the tail is
+exactly where a hostile caller would put `--command=curl … | sh`. So when
+`X-Wrapped-Command` is present, every surface renders the full redacted argv,
+one numbered line per element, and each surface requires a deliberate act before
+approval rather than a reflexive one:
+
+| Surface        | Rendering                                                                             | Deliberate act                                                                                      |
+| -------------- | ------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Linux GUI      | `zenity --text-info`, body piped on **stdin** (never argv or a temp file), scrollable | `--checkbox="I have read the full command"` gates Allow                                             |
+| macOS GUI      | `choose from list`, argv as list rows, script piped on **stdin** (`osascript -`)      | `default items {}` + omitted `empty selection allowed` keep Allow disabled until a line is selected |
+| Terminal       | Every line printed to stdout; scrollback is the scroll affordance                     | Must type `yes`, not `y` (re-prompts once before denying)                                           |
+| CLI (headless) | `gcp-authcalator pending [id]`; `approve` prints the command before resolving         | Types `yes`, or passes `--yes` off-TTY                                                              |
+
+Neither GUI path can be truncated by the caller, and `describeCommand`
+(`src/gate/summarize-command.ts`) strips control characters **per element**, so
+an embedded newline cannot forge an extra numbered line in the list. Both GUI
+paths feed the dialog over stdin rather than argv, so the command is not
+readable from the host process table while the dialog is open.
+
+A parent-side deadline (65 s) bounds the whole interaction — armed before the
+stdin write, so a child that never drains stdin cannot wedge the flush itself.
+This matters most for `choose from list`, which AppleScript gives no timeout of
+its own; a wedged dialog would hold the rate limiter's single-flight lock
+indefinitely. A GUI binary that _rejects_ our options (detected on stderr) is
+treated as unavailable rather than as a denial, so an older zenity falls
+through to the terminal prompt and pending queue instead of silently denying
+every prod request on that host.
+
+**Header bound.** `X-Wrapped-Command` is encoded by `encodeCommandHeader` under
+a byte budget (`MAX_COMMAND_HEADER_BYTES`) chosen to sit well below the HTTP
+server's header limit. Above that limit an oversized header is either rejected
+with 431 or — worse, and measured on Bun's client — silently omitted, which
+would present the operator with an unlabelled prod-grant dialog. When the
+budget trims the argv, a marker element states how many arguments were dropped,
+so the operator sees a claim about what is missing rather than a shorter
+command.
 
 **Rate limiting:** Single-flight lock (one dialog at a time), 1-second cooldown after denial, maximum 20 attempts per minute. This prevents automated brute-forcing of the confirmation flow.
 
@@ -297,16 +336,21 @@ The actual implementation adds several security hardening measures beyond this p
 
 Usage: `with-prod -- python some/script.py`, `with-prod -- gcloud sql instances list`, `with-prod -- alembic upgrade head`
 
-### 5. `approve` / `deny` -- CLI Approval of Pending Requests
+### 5. `pending` / `approve` / `deny` -- CLI Approval of Pending Requests
 
-When the gate's confirmation module cannot show a GUI dialog or terminal prompt (headless environments, containers without a display), prod access requests are queued as pending. The `approve` and `deny` commands connect to the gate's admin socket and provide CLI-based approval:
+When the gate's confirmation module cannot show a GUI dialog or terminal prompt (headless environments, containers without a display), prod access requests are queued as pending. These commands connect to the gate's admin socket and provide CLI-based approval:
 
-- `gcp-authcalator approve <id>` — Approve a pending request by its 32-character hex ID (128 bits)
+- `gcp-authcalator pending [id]` — List queued requests, or show one, with the command in full
+- `gcp-authcalator approve <id> [--yes]` — Approve a pending request by its 32-character hex ID (128 bits)
 - `gcp-authcalator deny <id>` — Deny a pending request
 
-The `with-prod` command generates and prints the pending ID before requesting a session, so you can approve it immediately. Pending requests auto-deny after 120 seconds (2x the GUI dialog timeout, to allow time for terminal switching). The gate logs request IDs and approval instructions to stderr when a request is queued.
+`approve` fetches and prints the request's complete argument list before it POSTs the resolve, then requires the operator to type `yes`; off a TTY it exits non-zero unless `--yes` is given. The pending queue therefore stores the whole `CommandDisplay`, not just the 80-character summary — the summary alone would put the CLI path back in the position of approving what it cannot see.
 
-Both commands connect to the gate's **admin socket** (separate from the main socket, not mounted into devcontainers). They do not require `--project-id` — only `--admin-socket-path` is needed (defaults to `$XDG_RUNTIME_DIR/gcp-authcalator-admin/admin.sock`).
+The admin socket serves `GET /pending` and `GET /pending/:id` for this. Placing them there rather than on the main socket is deliberate: the socket is not mounted into devcontainers, so the process that requested prod access cannot read back what the operator is being shown.
+
+The `with-prod` command generates and prints the pending ID before requesting a session, so you can review and approve it immediately. Pending requests auto-deny after 120 seconds (2x the GUI dialog timeout, to allow time for terminal switching). The gate logs request IDs and approval instructions to stderr when a request is queued.
+
+All three commands connect to the gate's **admin socket** (separate from the main socket, not mounted into devcontainers). They do not require `--project-id` — only `--admin-socket-path` is needed (defaults to `$XDG_RUNTIME_DIR/gcp-authcalator-admin/admin.sock`).
 
 ### 6. `init-tls` -- TLS Certificate Management
 

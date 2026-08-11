@@ -7,6 +7,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Security
+
+- **The prod approval dialog now shows the reported command in full.**
+  Previously every approval surface received only an 80-character summary with
+  the remainder replaced by an ellipsis, so a caller could put a benign-looking
+  prefix in the first 80 characters and hide the payload — say
+  `--command=curl … | sh` — where the operator could not see it. The dialog now
+  lists every redacted argument on its own numbered line in a scrollable view.
+  Size caps still bound how large a dialog can grow (512 arguments, 2000
+  characters per argument, 32 KiB total), but each one states in the dialog
+  that it fired and how much it withheld, so no content disappears silently.
+  This addresses the honest-client case; `X-Wrapped-Command` remains
+  caller-supplied and advisory, so a compromised container can still misreport
+  what it intends to run.
+- **The audit log records the complete command.** Prod entries gain
+  `command_argv` (the full redacted argument list) alongside the existing
+  80-character `command` summary, plus `command_truncated` when a display cap
+  fired. Previously the truncated summary was all that was retained, so what
+  was actually approved could not be reconstructed after the fact.
+- **Approving from the CLI can no longer happen blind.** The `approve <id>`
+  command now prints the request's full command before it resolves anything and
+  requires the operator to type `yes`; off a TTY it refuses unless `--yes` is
+  passed.
+
+### Added
+
+- **`gcp-authcalator pending [<id>]`** lists queued prod access requests, or
+  shows one, with the command in full. Backed by new admin-socket endpoints
+  `GET /pending` and `GET /pending/:id`. These live on the admin socket, which
+  is not mounted into devcontainers, so the process that requested prod access
+  cannot read back what the operator is being shown.
+- **`--yes` flag for `approve`**, to skip the interactive confirmation in
+  scripted or headless use.
+
+### Changed
+
+- **Confirmation dialogs use scrollable widgets when a command is reported.**
+  On Linux this is `zenity --text-info` with an "I have read the full command"
+  checkbox that gates the Allow button. On macOS it is an AppleScript
+  `choose from list` with `default items {}` and no `empty selection allowed`,
+  so Allow stays disabled until the operator selects a line — preserving the
+  "Return cannot approve by accident" property that `display dialog`'s
+  `default button "Deny"` provided. Both dialogs receive the command on stdin
+  rather than in argv, so it is not readable from the host process table while
+  the dialog is open. When no command is reported, both platforms keep the
+  previous compact dialog.
+- **A GUI binary that rejects our options is treated as unavailable, not as a
+  denial.** zenity exits 1 both for "user pressed Deny" and for "I don't
+  understand `--checkbox`", so the exit code alone would have made an older
+  zenity silently deny every prod request with no fallback. The option-parse
+  case is now detected on stderr and falls through to the terminal prompt and
+  pending queue.
+- **`X-Wrapped-Command` is bounded at the sending end.** An oversized header is
+  either rejected with 431 or, on Bun's client, silently omitted — which would
+  have shown the operator an unlabelled "grant prod access?" dialog. The client
+  now trims the argv to a byte budget and appends a marker stating how many
+  arguments it dropped.
+- **The `approve` confirmation is bounded by the request's own expiry** and the
+  CLI shows how many seconds are left, so time spent reading a long command
+  can't land a `yes` on an already-expired request.
+- **`approve` distinguishes a missing route from a missing request.** A gate
+  daemon predating `GET /pending/:id` now says so, instead of reporting the
+  request as expired.
+- **The session-refresh audit entry keeps only the command summary.** That path
+  has no rate limiter and makes no consent decision, so writing the full argv
+  there let a session holder append tens of KiB of caller-controlled text to
+  `audit.log` per refresh.
+- **The terminal prompt requires typing `yes` in full** when a command is
+  shown, rather than accepting a bare `y`. It prints every argument first, and
+  re-prompts once rather than treating a habitual `y` as a denial that discards
+  the whole invocation.
+- **Dialogs are bounded by a parent-side 65-second deadline** in addition to
+  their native timeouts, armed before the stdin write so a child that never
+  drains stdin cannot wedge the flush itself. AppleScript's `choose from list`
+  has no timeout of its own, and a dialog that never returned would hold the
+  prod rate limiter's single-flight lock indefinitely.
+
 ## [0.13.0] - 2026-07-22
 
 ### Added

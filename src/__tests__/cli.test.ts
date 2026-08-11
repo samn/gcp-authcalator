@@ -35,6 +35,7 @@ describe("--help", () => {
     expect(stdout).toContain("gate");
     expect(stdout).toContain("metadata-proxy");
     expect(stdout).toContain("with-prod");
+    expect(stdout).toContain("pending");
     expect(stdout).toContain("approve");
     expect(stdout).toContain("deny");
     expect(stdout).toContain("version");

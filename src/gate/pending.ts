@@ -7,6 +7,7 @@
 // ---------------------------------------------------------------------------
 
 import { randomBytes } from "node:crypto";
+import type { CommandDisplay } from "./summarize-command.ts";
 
 /** Validates a client-provided pending ID: must be exactly 32 lowercase hex chars. */
 const PENDING_ID_RE = /^[a-f0-9]{32}$/;
@@ -17,8 +18,12 @@ export interface PendingRequest {
   id: string;
   /** Engineer's email requesting prod access. */
   email: string;
-  /** Summarized command, if available. */
-  command?: string;
+  /**
+   * The reported command in full, if available. Held whole — not just the
+   * one-line summary — so `gcp-authcalator pending` can show the operator
+   * everything they are being asked to approve.
+   */
+  command?: CommandDisplay;
   /** PAM policy, if applicable. */
   pamPolicy?: string;
   /** When this request was enqueued. */
@@ -37,7 +42,12 @@ export interface PendingQueueOptions {
 export interface PendingQueue {
   /** Enqueue a confirmation request. Returns a promise that resolves when approved, denied, or timed out.
    *  If clientId is provided, it must be exactly 32 lowercase hex chars and not already in use. */
-  enqueue(email: string, command?: string, pamPolicy?: string, clientId?: string): Promise<boolean>;
+  enqueue(
+    email: string,
+    command?: CommandDisplay,
+    pamPolicy?: string,
+    clientId?: string,
+  ): Promise<boolean>;
   /** List all currently pending requests. */
   list(): PendingRequest[];
   /** Approve a pending request by ID. Returns false if not found or expired. */
@@ -63,7 +73,7 @@ export function createPendingQueue(options: PendingQueueOptions = {}): PendingQu
 
   function enqueue(
     email: string,
-    command?: string,
+    command?: CommandDisplay,
     pamPolicy?: string,
     clientId?: string,
   ): Promise<boolean> {
@@ -96,13 +106,16 @@ export function createPendingQueue(options: PendingQueueOptions = {}): PendingQu
     });
 
     const timeoutSecs = Math.ceil(timeoutMs / 1000);
-    const detail = command ? ` (${command})` : "";
+    // Only the summary goes to stderr — the full command would flood the log.
+    // `gcp-authcalator pending` is where the operator reads the whole thing.
+    const detail = command ? ` (${command.summary})` : "";
     const pam = pamPolicy ? ` [PAM: ${pamPolicy}]` : "";
     console.error(
       `gate: pending approval ${id} — ${email}${detail}${pam} — expires in ${timeoutSecs}s`,
     );
     console.error(
-      `gate: run 'gcp-authcalator approve ${id}' to approve, or 'gcp-authcalator deny ${id}' to deny`,
+      `gate: run 'gcp-authcalator pending ${id}' to see the full command, ` +
+        `'gcp-authcalator approve ${id}' to approve, or 'gcp-authcalator deny ${id}' to deny`,
     );
 
     return promise;

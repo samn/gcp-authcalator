@@ -13,7 +13,7 @@ import {
 } from "./types.ts";
 import { CredentialsExpiredError } from "./credentials-error.ts";
 import { DRAIN_MARGIN_MS } from "./pam.ts";
-import { parseCommandHeader, summarizeCommand } from "./summarize-command.ts";
+import { describeCommand, parseCommandHeader } from "./summarize-command.ts";
 
 const JSON_HEADERS = { "Content-Type": "application/json" };
 
@@ -175,9 +175,14 @@ async function handleSessionTokenRefresh(
   }
 
   const commandArr = parseCommandHeader(req.headers.get("X-Wrapped-Command"));
-  const commandSummary = commandArr ? summarizeCommand(commandArr) : undefined;
+  const command = commandArr ? describeCommand(commandArr) : undefined;
   const targetProject = readTargetProjectHeader(req);
 
+  // Only the summary here, deliberately — no `command_argv`. This path has no
+  // rate limiter and makes no consent decision, so the full argv buys nothing
+  // an operator would read, while letting a session holder append tens of KiB
+  // of caller-controlled text to audit.log per refresh until the disk fills
+  // and the gate's own audit writes start failing.
   const auditBase: Pick<
     AuditEntry,
     "endpoint" | "level" | "session_id" | "pam_policy" | "socket" | "command" | "target_project"
@@ -187,7 +192,7 @@ async function handleSessionTokenRefresh(
     session_id: sessionId,
     pam_policy: session.pamPolicy,
     socket: ctx.socket,
-    command: commandSummary,
+    command: command?.summary,
     target_project: targetProject,
   };
 
@@ -363,7 +368,8 @@ async function acquireProdAccess(
   }
 
   const commandArr = parseCommandHeader(req.headers.get("X-Wrapped-Command"));
-  const commandSummary = commandArr ? summarizeCommand(commandArr) : undefined;
+  const command = commandArr ? describeCommand(commandArr) : undefined;
+  const commandSummary = command?.summary;
   const targetProject = readTargetProjectHeader(req);
 
   const auditBase: Pick<
@@ -374,6 +380,8 @@ async function acquireProdAccess(
     | "token_ttl_seconds"
     | "socket"
     | "command"
+    | "command_argv"
+    | "command_truncated"
     | "target_project"
   > = {
     endpoint: opts.auditEndpoint,
@@ -382,6 +390,8 @@ async function acquireProdAccess(
     token_ttl_seconds: opts.ttlSeconds,
     socket: ctx.socket,
     command: commandSummary,
+    command_argv: command?.argv,
+    command_truncated: command?.capped ? true : undefined,
     target_project: targetProject,
   };
 
@@ -444,7 +454,7 @@ async function acquireProdAccess(
     if (autoApprove) {
       approved = true;
     } else {
-      approved = await deps.confirmProdAccess(email, commandSummary, effectivePamPolicy, pendingId);
+      approved = await deps.confirmProdAccess(email, command, effectivePamPolicy, pendingId);
     }
     if (!approved) {
       deps.prodRateLimiter.release("denied");
@@ -698,6 +708,32 @@ function handleRevokeSession(url: URL, deps: GateDeps, ctx: RequestContext): Res
   });
 
   return jsonResponse({ status: "revoked" });
+}
+
+/**
+ * List pending requests, or one by ID, with their full reported command.
+ *
+ * Admin socket only. That socket is not mounted into the devcontainer, so the
+ * process that asked for prod access cannot read back what the operator is
+ * being shown.
+ */
+export function handleListPending(deps: GateDeps, id?: string): Response {
+  if (!deps.pendingQueue) {
+    return jsonResponse({ error: "Pending queue not enabled" }, 501);
+  }
+
+  // list() prunes expired entries, so a lookup through it can't surface one.
+  const requests = deps.pendingQueue.list();
+
+  if (id !== undefined) {
+    const match = requests.find((request) => request.id === id);
+    if (!match) {
+      return jsonResponse({ error: "Request not found or expired" }, 404);
+    }
+    return jsonResponse(match);
+  }
+
+  return jsonResponse({ pending: requests });
 }
 
 export function handleResolvePending(

@@ -255,7 +255,13 @@ export async function runWithProd(
   // APPROVE_HINT_DELAY_MS — otherwise it's noise in the common (fast) path.
   const hintTimer = setTimeout(() => {
     console.error(
-      `with-prod: if no prompt appears, approve with: gcp-authcalator approve ${pendingId}`,
+      // Only mention `pending` as the no-dialog path: the gate queues a
+      // request only when it has no GUI or TTY prompt available, so on a
+      // desktop host this ID was never queued and `pending <id>` would report
+      // it missing while the dialog is still open and waiting.
+      `with-prod: still waiting for approval — check for a dialog on the host.\n` +
+        `with-prod: if no prompt appears, review and approve with: ` +
+        `gcp-authcalator pending ${pendingId} && gcp-authcalator approve ${pendingId}`,
     );
   }, APPROVE_HINT_DELAY_MS);
   hintTimer.unref?.(); // never keep the event loop alive for the hint alone

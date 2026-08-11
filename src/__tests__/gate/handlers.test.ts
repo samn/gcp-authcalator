@@ -5,6 +5,7 @@ import type { AuditEntry, CachedToken } from "../../gate/types.ts";
 import type { ProdRateLimiter } from "../../gate/rate-limit.ts";
 import { createSessionManager } from "../../gate/session.ts";
 import { createPendingQueue } from "../../gate/pending.ts";
+import { describeCommand, type CommandDisplay } from "../../gate/summarize-command.ts";
 import { makeGateDeps as makeDeps, makeRequest, withFakeNow } from "./test-helpers.ts";
 
 /** A rate limiter that always blocks. */
@@ -424,8 +425,8 @@ describe("GET /token?level=prod", () => {
     expect(releases).toEqual(["error"]);
   });
 
-  test("passes command summary to confirmProdAccess when header is present", async () => {
-    let capturedCommand: string | undefined;
+  test("passes the full command to confirmProdAccess when header is present", async () => {
+    let capturedCommand: CommandDisplay | undefined;
     const deps = makeDeps({
       confirmProdAccess: async (_email, command) => {
         capturedCommand = command;
@@ -438,11 +439,12 @@ describe("GET /token?level=prod", () => {
     };
     await handleRequest(makeRequest("/token?level=prod", "GET", headers), deps);
 
-    expect(capturedCommand).toBe("gcloud compute instances list");
+    expect(capturedCommand?.summary).toBe("gcloud compute instances list");
+    expect(capturedCommand?.argv).toEqual(["gcloud", "compute", "instances", "list"]);
   });
 
   test("passes undefined command when header is missing", async () => {
-    let capturedCommand: string | undefined = "should-be-replaced";
+    let capturedCommand: CommandDisplay | undefined = describeCommand(["should-be-replaced"]);
     const deps = makeDeps({
       confirmProdAccess: async (_email, command) => {
         capturedCommand = command;
@@ -456,7 +458,7 @@ describe("GET /token?level=prod", () => {
   });
 
   test("passes undefined command when header contains invalid JSON", async () => {
-    let capturedCommand: string | undefined = "should-be-replaced";
+    let capturedCommand: CommandDisplay | undefined = describeCommand(["should-be-replaced"]);
     const deps = makeDeps({
       confirmProdAccess: async (_email, command) => {
         capturedCommand = command;
@@ -470,8 +472,8 @@ describe("GET /token?level=prod", () => {
     expect(capturedCommand).toBeUndefined();
   });
 
-  test("summarizes long commands with truncation", async () => {
-    let capturedCommand: string | undefined;
+  test("truncates the summary of a long command but keeps every argument", async () => {
+    let capturedCommand: CommandDisplay | undefined;
     const deps = makeDeps({
       confirmProdAccess: async (_email, command) => {
         capturedCommand = command;
@@ -486,8 +488,11 @@ describe("GET /token?level=prod", () => {
     await handleRequest(makeRequest("/token?level=prod", "GET", headers), deps);
 
     expect(capturedCommand).toBeDefined();
-    expect(capturedCommand!.length).toBeLessThanOrEqual(80);
-    expect(capturedCommand!.startsWith("mybinary")).toBe(true);
+    expect(capturedCommand!.summary.length).toBeLessThanOrEqual(80);
+    expect(capturedCommand!.summary.startsWith("mybinary")).toBe(true);
+    // The dialog gets everything the summary had to drop.
+    expect(capturedCommand!.argv).toEqual(["mybinary", ...longArgs]);
+    expect(capturedCommand!.capped).toBe(false);
   });
 
   test("records command summary in granted audit entry", async () => {
@@ -505,6 +510,8 @@ describe("GET /token?level=prod", () => {
     expect(logs).toHaveLength(1);
     expect(logs[0]!.result).toBe("granted");
     expect(logs[0]!.command).toBe("gcloud compute instances list");
+    expect(logs[0]!.command_argv).toEqual(["gcloud", "compute", "instances", "list"]);
+    expect(logs[0]!.command_truncated).toBeUndefined();
   });
 
   test("records command summary in denied audit entry", async () => {
@@ -520,10 +527,11 @@ describe("GET /token?level=prod", () => {
     expect(logs).toHaveLength(1);
     expect(logs[0]!.result).toBe("denied");
     expect(logs[0]!.command).toBe("bq query --nouse_legacy_sql");
+    expect(logs[0]!.command_argv).toEqual(["bq", "query", "--nouse_legacy_sql"]);
   });
 
   test("redacts sensitive-looking values in command", async () => {
-    let capturedCommand: string | undefined;
+    let capturedCommand: CommandDisplay | undefined;
     const deps = makeDeps({
       confirmProdAccess: async (_email, command) => {
         capturedCommand = command;
@@ -538,8 +546,11 @@ describe("GET /token?level=prod", () => {
     await handleRequest(makeRequest("/token?level=prod", "GET", headers), deps);
 
     expect(capturedCommand).toBeDefined();
-    expect(capturedCommand).toContain("***");
-    expect(capturedCommand).not.toContain(token);
+    expect(capturedCommand!.summary).toContain("***");
+    expect(capturedCommand!.summary).not.toContain(token);
+    // Redaction must survive into the full view too, or the dialog would leak
+    // the very secret the summary hides.
+    expect(capturedCommand!.argv).toEqual(["curl", "-H", "***"]);
   });
 });
 

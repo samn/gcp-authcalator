@@ -1,17 +1,28 @@
 import { describe, expect, test } from "bun:test";
 import { createPendingQueue } from "../../gate/pending.ts";
+import { describeCommand, type CommandDisplay } from "../../gate/summarize-command.ts";
+
+/** Build a CommandDisplay the way the gate does, from a raw argv. */
+function display(...argv: string[]): CommandDisplay {
+  const result = describeCommand(argv);
+  if (!result) throw new Error("describeCommand returned undefined");
+  return result;
+}
 
 describe("createPendingQueue", () => {
   const baseOpts = { timeoutMs: 5000, now: () => 1_000_000 };
 
   test("enqueue returns a promise that resolves to true when approved", async () => {
     const queue = createPendingQueue(baseOpts);
-    const promise = queue.enqueue("user@example.com", "gcloud compute instances list");
+    const promise = queue.enqueue(
+      "user@example.com",
+      display("gcloud", "compute", "instances", "list"),
+    );
     const pending = queue.list();
 
     expect(pending).toHaveLength(1);
     expect(pending[0]!.email).toBe("user@example.com");
-    expect(pending[0]!.command).toBe("gcloud compute instances list");
+    expect(pending[0]!.command?.summary).toBe("gcloud compute instances list");
 
     queue.approve(pending[0]!.id);
     expect(await promise).toBe(true);
@@ -36,8 +47,8 @@ describe("createPendingQueue", () => {
 
   test("list returns all pending requests", () => {
     const queue = createPendingQueue(baseOpts);
-    queue.enqueue("a@example.com", "cmd1");
-    queue.enqueue("b@example.com", "cmd2", "pam-policy");
+    queue.enqueue("a@example.com", display("cmd1"));
+    queue.enqueue("b@example.com", display("cmd2"), "pam-policy");
 
     const pending = queue.list();
     expect(pending).toHaveLength(2);
@@ -126,7 +137,7 @@ describe("createPendingQueue", () => {
   test("accepts a valid client-provided ID", async () => {
     const queue = createPendingQueue(baseOpts);
     const clientId = "a".repeat(32);
-    const promise = queue.enqueue("user@example.com", "cmd", undefined, clientId);
+    const promise = queue.enqueue("user@example.com", display("cmd"), undefined, clientId);
     const [req] = queue.list();
 
     expect(req!.id).toBe(clientId);
@@ -169,11 +180,11 @@ describe("createPendingQueue", () => {
 
   test("enqueue preserves optional fields", () => {
     const queue = createPendingQueue(baseOpts);
-    queue.enqueue("user@example.com", "terraform apply", "prod-db-admin");
+    queue.enqueue("user@example.com", display("terraform", "apply"), "prod-db-admin");
     const [req] = queue.list();
 
     expect(req!.email).toBe("user@example.com");
-    expect(req!.command).toBe("terraform apply");
+    expect(req!.command?.summary).toBe("terraform apply");
     expect(req!.pamPolicy).toBe("prod-db-admin");
   });
 
