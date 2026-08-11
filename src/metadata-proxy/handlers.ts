@@ -33,6 +33,7 @@ function jsonResponse(body: unknown, status = 200): Response {
  * Pure request handler for the GCE metadata server emulator.
  *
  * - `/` — detection ping (always 200, no header check)
+ * - `/session-health` — non-mutating check of the provider's gate authority
  * - `/identity` — authenticated engineer's email, proxied from the gate
  *   (requires the `Metadata-Flavor: Google` header, like the data endpoints)
  * - `/computeMetadata/v1/...` — requires `Metadata-Flavor: Google` header
@@ -69,6 +70,17 @@ export async function handleRequest(req: Request, deps: MetadataProxyDeps): Prom
       return textResponse("Missing Metadata-Flavor:Google header.", 403);
     }
     return handleUserIdentity(deps);
+  }
+
+  // Private proxy-control route used by nested with-prod detection. Unlike the
+  // root ping and constant metadata fields, this reaches the provider's gate
+  // authority. For session providers it validates the exact session ID without
+  // minting a token or touching PAM.
+  if (url.pathname === "/session-health") {
+    if (req.headers.get(METADATA_FLAVOR_HEADER) !== METADATA_FLAVOR_VALUE) {
+      return textResponse("Missing Metadata-Flavor:Google header.", 403);
+    }
+    return handleSessionHealth(deps);
   }
 
   // All /computeMetadata/* paths require the Metadata-Flavor header
@@ -129,6 +141,20 @@ export async function handleRequest(req: Request, deps: MetadataProxyDeps): Prom
   }
 
   return textResponse("Not found", 404);
+}
+
+async function handleSessionHealth(deps: MetadataProxyDeps): Promise<Response> {
+  if (!deps.checkHealth) {
+    return textResponse("Not found", 404);
+  }
+
+  try {
+    await deps.checkHealth();
+    return jsonResponse({ status: "ok" });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    return jsonResponse({ error: message }, 503);
+  }
 }
 
 async function handleToken(deps: MetadataProxyDeps): Promise<Response> {

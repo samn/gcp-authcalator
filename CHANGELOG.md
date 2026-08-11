@@ -110,6 +110,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Nested `with-prod` no longer reuses an expired or orphaned parent proxy.**
+  The parent proxy now validates its exact gate session through a non-mutating
+  health route before a nested command reuses it. A session that expired, was
+  revoked, or disappeared when the gate restarted falls back to normal session
+  creation without probing `/token` or triggering PAM work.
 - **Gate requests can no longer wait indefinitely after receiving HTTP
   headers.** Authentication, PAM, metadata, admin, and `with-prod` requests
   now keep their application deadline active until the complete small response

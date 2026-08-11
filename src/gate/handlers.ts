@@ -73,9 +73,10 @@ export async function handleRequest(
 ): Promise<Response> {
   const url = new URL(req.url, "http://localhost");
 
-  // /session accepts POST (create) and DELETE (revoke)
+  // /session accepts POST (create), GET (validate), and DELETE (revoke).
   if (url.pathname === "/session") {
     if (req.method === "POST") return handleCreateSession(req, url, deps, ctx);
+    if (req.method === "GET") return handleValidateSession(url, deps, ctx);
     if (req.method === "DELETE") return handleRevokeSession(url, deps, ctx);
     return jsonResponse({ error: "Method not allowed" }, 405);
   }
@@ -98,6 +99,30 @@ export async function handleRequest(
     default:
       return jsonResponse({ error: "Not found" }, 404);
   }
+}
+
+/** Validate a prod session without minting a token or renewing PAM. */
+function handleValidateSession(url: URL, deps: GateDeps, ctx: RequestContext): Response {
+  if (ctx.trusted) {
+    return jsonResponse(
+      {
+        error: "Session validation not permitted on operator socket",
+        code: SESSION_NOT_PERMITTED_CODE,
+      },
+      403,
+    );
+  }
+
+  const sessionId = url.searchParams.get("id");
+  if (!sessionId) {
+    return jsonResponse({ error: "Missing session id" }, 400);
+  }
+
+  if (!deps.sessionManager.validate(sessionId)) {
+    return jsonResponse({ error: "Session expired or invalid" }, 401);
+  }
+
+  return jsonResponse({ status: "active" });
 }
 
 /** Parse and validate the token_ttl_seconds query param. Returns the value or an error Response. */

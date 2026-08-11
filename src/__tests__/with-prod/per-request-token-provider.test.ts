@@ -42,6 +42,22 @@ describe("createPerRequestTokenProvider", () => {
     expect(callCount()).toBe(0);
   });
 
+  test("health check verifies the gate without requesting a prod token", async () => {
+    const { fetchFn, capturedUrls } = mockFetch([{ status: 200, body: { status: "ok" } }]);
+    const provider = createPerRequestTokenProvider(unixConn, validInitialToken, { fetchFn });
+
+    await provider.checkHealth?.();
+
+    expect(capturedUrls).toEqual(["http://localhost/health"]);
+  });
+
+  test("health check rejects an unhealthy gate even while its token is cached", async () => {
+    const { fetchFn } = mockFetch([{ status: 503 }]);
+    const provider = createPerRequestTokenProvider(unixConn, validInitialToken, { fetchFn });
+
+    await expect(provider.checkHealth!()).rejects.toThrow("health check returned 503");
+  });
+
   test("re-fetches via fetchProdToken when cache expires", async () => {
     const expiringToken: CachedToken = {
       access_token: "old-token",

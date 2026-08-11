@@ -525,6 +525,7 @@ export async function startGateServer(
   console.log("    GET /project-number          → numeric project ID");
   console.log("    GET /universe-domain         → GCP universe domain");
   console.log("    POST /session                → create prod session (with confirmation)");
+  console.log("    GET /session?id=...          → validate prod session");
   console.log("    DELETE /session              → revoke prod session");
   console.log("    GET /health                  → health check");
   console.log("  endpoints (admin socket):");
@@ -537,6 +538,7 @@ export async function startGateServer(
     console.log("  endpoints (operator socket):");
     console.log("    GET /token?level=prod        → prod token (auto-approve if allowlisted)");
     console.log("    POST /session                → 403 (sessions disabled)");
+    console.log("    GET /session?id=...          → 403 (sessions disabled)");
     console.log("    GET /token?session=...       → 403 (sessions disabled)");
     console.log("    (other endpoints same as main socket)");
   }

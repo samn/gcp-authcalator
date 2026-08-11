@@ -1454,8 +1454,8 @@ describe("POST /session", () => {
     expect(logs[0]!.target_project).toBeUndefined();
   });
 
-  test("returns 405 for GET method", async () => {
-    const res = await handleRequest(makeRequest("/session", "GET"), makeDeps());
+  test("returns 405 for unsupported method", async () => {
+    const res = await handleRequest(makeRequest("/session", "PATCH"), makeDeps());
     expect(res.status).toBe(405);
   });
 
@@ -1556,6 +1556,70 @@ describe("POST /session", () => {
 
     expect(session).not.toBeNull();
     expect(session!.commandSummary).toBe("gcloud auth list");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /session?id=<id> (non-mutating session validation)
+// ---------------------------------------------------------------------------
+
+describe("GET /session", () => {
+  test("reports an existing session as active without minting a token", async () => {
+    const sessionManager = createSessionManager();
+    const session = sessionManager.create({
+      email: "eng@example.com",
+      ttlSeconds: 3600,
+      sessionLifetimeSeconds: 28800,
+    });
+    let mintCalls = 0;
+    const deps = makeDeps({
+      sessionManager,
+      mintProdToken: async () => {
+        mintCalls++;
+        return { access_token: "unused", expires_at: new Date(Date.now() + 3600_000) };
+      },
+    });
+
+    const res = await handleRequest(makeRequest(`/session?id=${session.id}`), deps);
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: "active" });
+    expect(mintCalls).toBe(0);
+  });
+
+  test("returns 401 for an expired or unknown session", async () => {
+    const res = await handleRequest(makeRequest(`/session?id=${"0".repeat(64)}`), makeDeps());
+    expect(res.status).toBe(401);
+  });
+
+  test("returns 401 after an existing session expires", async () => {
+    let now = 1_000_000;
+    const sessionManager = createSessionManager({ now: () => now });
+    const session = sessionManager.create({
+      email: "eng@example.com",
+      ttlSeconds: 3600,
+      sessionLifetimeSeconds: 300,
+    });
+    now += 300_000;
+
+    const res = await handleRequest(
+      makeRequest(`/session?id=${session.id}`),
+      makeDeps({ sessionManager }),
+    );
+    expect(res.status).toBe(401);
+  });
+
+  test("returns 400 when the session ID is missing", async () => {
+    const res = await handleRequest(makeRequest("/session"), makeDeps());
+    expect(res.status).toBe(400);
+  });
+
+  test("rejects validation on the operator socket", async () => {
+    const res = await handleRequest(makeRequest(`/session?id=${"0".repeat(64)}`), makeDeps(), {
+      trusted: true,
+      socket: "operator",
+    });
+    expect(res.status).toBe(403);
   });
 });
 

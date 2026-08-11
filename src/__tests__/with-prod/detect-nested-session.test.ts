@@ -8,6 +8,7 @@ import {
 function mockProxyFetch(overrides?: {
   rootStatus?: number;
   rootHeaders?: Record<string, string>;
+  sessionHealthStatus?: number;
   tokenStatus?: number;
   tokenBody?: Record<string, unknown>;
   emailStatus?: number;
@@ -25,6 +26,12 @@ function mockProxyFetch(overrides?: {
       return new Response("ok", {
         status: overrides?.rootStatus ?? 200,
         headers: overrides?.rootHeaders ?? { "Metadata-Flavor": "Google" },
+      });
+    }
+    if (path === "/session-health") {
+      return new Response(JSON.stringify({ status: "ok" }), {
+        status: overrides?.sessionHealthStatus ?? 200,
+        headers: { "Content-Type": "application/json" },
       });
     }
     if (path === "/computeMetadata/v1/instance/service-accounts/default/token") {
@@ -93,6 +100,31 @@ describe("detectNestedSession", () => {
       mockProxyFetch({ rootHeaders: {} }),
     );
     expect(result).toBeNull();
+  });
+
+  test("returns null when the parent gate session is expired or orphaned", async () => {
+    const result = await detectNestedSession(
+      { [PROD_SESSION_ENV_VAR]: "127.0.0.1:54321" },
+      mockProxyFetch({ sessionHealthStatus: 503 }),
+    );
+    expect(result).toBeNull();
+  });
+
+  test("validates authority before reading stable metadata", async () => {
+    const paths: string[] = [];
+    const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      paths.push(new URL(url).pathname);
+      return mockProxyFetch()(input, init);
+    }) as unknown as typeof globalThis.fetch;
+
+    await detectNestedSession({ [PROD_SESSION_ENV_VAR]: "127.0.0.1:54321" }, fetchFn);
+    expect(paths).toEqual([
+      "/",
+      "/session-health",
+      "/computeMetadata/v1/instance/service-accounts/default/email",
+      "/computeMetadata/v1/project/project-id",
+    ]);
   });
 
   test("does not invoke the token endpoint as a health check", async () => {

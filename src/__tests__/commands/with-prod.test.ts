@@ -72,6 +72,7 @@ function mockCombinedFetch(opts?: {
   /** Proxy health check responses */
   proxyRootStatus?: number;
   proxyRootHeaders?: Record<string, string>;
+  proxySessionHealthStatus?: number;
   proxyTokenStatus?: number;
   proxyTokenBody?: Record<string, unknown>;
   proxyEmailStatus?: number;
@@ -94,6 +95,12 @@ function mockCombinedFetch(opts?: {
         return new Response("ok", {
           status: opts?.proxyRootStatus ?? 200,
           headers: opts?.proxyRootHeaders ?? { "Metadata-Flavor": "Google" },
+        });
+      }
+      if (path === "/session-health") {
+        return new Response(JSON.stringify({ status: "ok" }), {
+          status: opts?.proxySessionHealthStatus ?? 200,
+          headers: { "Content-Type": "application/json" },
         });
       }
       if (path === "/computeMetadata/v1/instance/service-accounts/default/token") {
@@ -1715,6 +1722,33 @@ describe("runWithProd nested sessions", () => {
     const env = getCapturedEnv();
     expect(env.GCE_METADATA_HOST).toMatch(/^127\.0\.0\.1:\d+$/);
     expect(env.GCE_METADATA_HOST).not.toBe("127.0.0.1:54321");
+  });
+
+  test("falls back to normal flow when the parent session is no longer valid", async () => {
+    process.env[PROD_SESSION_ENV_VAR] = "127.0.0.1:54321";
+
+    const mockFetchFn = mockCombinedFetch({ proxySessionHealthStatus: 503 });
+    const { mockSpawnFn, getCapturedEnv } = mockSpawnCapture();
+
+    try {
+      await runWithProd(
+        {
+          project_id: "my-proj",
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
+        },
+        ["echo", "test"],
+        { fetchOptions: { fetchFn: mockFetchFn }, spawnFn: mockSpawnFn },
+      );
+    } catch {
+      // process.exit mock throws
+    }
+
+    const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
+    expect(errorOutput).toContain("prod access acquired");
+    expect(errorOutput).not.toContain("reusing existing prod session");
+    expect(getCapturedEnv().GCE_METADATA_HOST).not.toBe("127.0.0.1:54321");
   });
 
   test("falls back to normal flow when project-id differs from parent session", async () => {

@@ -46,6 +46,27 @@ describe("createSessionTokenProvider", () => {
     expect(callCount()).toBe(0);
   });
 
+  test("health check validates the exact session without minting a token", async () => {
+    const { fetchFn, capturedUrls } = mockFetch([{ status: 200, body: { status: "active" } }]);
+    const provider = createSessionTokenProvider(unixConn, "session-id", validInitialToken, {
+      fetchFn,
+    });
+
+    await provider.checkHealth?.();
+
+    expect(capturedUrls).toEqual(["http://localhost/session?id=session-id"]);
+    expect(capturedUrls[0]).not.toContain("/token");
+  });
+
+  test("health check rejects an expired session even while its token is cached", async () => {
+    const { fetchFn } = mockFetch([{ status: 401, body: { error: "Session expired or invalid" } }]);
+    const provider = createSessionTokenProvider(unixConn, "session-id", validInitialToken, {
+      fetchFn,
+    });
+
+    await expect(provider.checkHealth!()).rejects.toThrow("session health check returned 401");
+  });
+
   test("attaches a backstop abort signal to the session refresh request", async () => {
     // A silent refresh hang stalls the wrapped command; the refresh must carry
     // a timeout signal so a wedged gate surfaces as an error instead.

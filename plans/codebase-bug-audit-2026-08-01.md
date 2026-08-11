@@ -42,6 +42,9 @@ PAM grant activation.
 
 ### Confirmed and fixed
 
+- Review follow-up: nested-session reuse now validates the backing gate session
+  through a non-mutating proxy/provider check. Expired, revoked, or gate-restart
+  orphaned sessions fall back to normal acquisition without token minting or PAM.
 - Gate/client deadlines now cover response bodies, compose outside the
   operation they guard, and surface typed, actionable timeout errors. Bun's
   shorter transport idle timeout is disabled only where an application
@@ -110,20 +113,13 @@ the hold plus the 5-minute drain margin still leaves a useful token lifetime.
 ### Checks run so far
 
 - `git diff --check` — pass
+- `mise exec -- bun run format` — pass
 - `mise exec -- bun run lint` — pass
 - `mise exec -- bun run typecheck` — pass
 - Focused PAM tests — 120 pass
 - Focused TLS tests — 85 pass
 - Focused gate/client tests — 164 pass
 - Focused sanitization/command tests — 57 pass
-- Unrestricted full integration run — 1223 pass, 0 assertion failures; it
-  exposed one per-file function-coverage failure in
-  `session-token-provider.ts` (75% functions despite 100% lines). The
-  unreachable buffered-body fallback was removed, and the focused file now
-  reports 100% function and line coverage.
-
-The final format/lint/typecheck/full-test pass remains to be rerun after the PAM
-readiness-default decision. Full server tests require a sandbox exception for
-local port and Unix-socket binding; the earlier sandboxed failures were
-`EROFS`/bind denials before the tested code ran, not assertions in the
-implementation.
+- Final unrestricted integration run after review fixes — 1240 pass, 0 fail,
+  99.12% function coverage, and 98.74% line coverage. Full server tests require
+  a sandbox exception for local port and Unix-socket binding.

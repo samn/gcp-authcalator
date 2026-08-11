@@ -315,7 +315,7 @@ gcp-authcalator gate \
 
 **Optional:** `--gate-tls-port` enables a TCP listener with mutual TLS, allowing remote devcontainers to connect. TLS certificates must be generated first with `gcp-authcalator init-tls` and are stored in `~/.gcp-authcalator/tls/`.
 
-**PAM (Privileged Access Manager) integration:** When `--pam-policy` is configured, prod token requests trigger a temporary [PAM grant](https://cloud.google.com/iam/docs/pam-overview) before minting the token. This allows the engineer's ADC to be downscoped by default, with just-in-time escalation for production access. The `--pam-allowed-policies` flag defines additional entitlements that callers may request via `?pam_policy=<id>` query parameter. Grants are withdrawn (`grants:withdraw`, the requester's own operation) on a best-effort basis when they are rotated and when the gate shuts down — the engineer only needs PAM requester access on the entitlement, not the admin-level `grants.revoke` permission.
+**PAM (Privileged Access Manager) integration:** When `--pam-policy` is configured, an approved prod request starts temporary [PAM grant](https://cloud.google.com/iam/docs/pam-overview) acquisition and OAuth token minting concurrently, then returns the token only after both succeed. This allows the engineer's ADC to be downscoped by default, with just-in-time escalation for production access. The `--pam-allowed-policies` flag defines additional entitlements that callers may request via `?pam_policy=<id>` query parameter. Grants are withdrawn (`grants:withdraw`, the requester's own operation) on a best-effort basis when they are rotated and when the gate shuts down — the engineer only needs PAM requester access on the entitlement, not the admin-level `grants.revoke` permission.
 
 Cached grants rotate with 5 minutes remaining, at the same boundary used to clamp minted token expiry. This guarantees that rotation does not withdraw IAM access while a token minted under the old grant can still be valid. The adaptive client refresh margin keeps short remaining token lifetimes useful without moving that safety boundary earlier. Grant expiry is calculated from PAM's `auditTrail.accessGrantTime` (or activated timeline event) plus the requested duration, rather than assuming access began at request creation. `createTime`, then a request-start estimate for an incomplete fresh response, are conservative fallbacks. Existing grants with no bounded expiry or marked `externallyModified` are not reused. Concurrent rotations coalesce, and a timed-out rotation is generation-fenced so it cannot later overwrite or withdraw state adopted by its replacement. Create retries reuse PAM's `requestId` idempotency key, preventing an ambiguous timeout from creating duplicate grants. Shutdown rejects new rotations, aborts admitted work, and spends at most 10 seconds dispatching withdrawals for grants it can prove it owns. The configured grant lifetime must therefore be at least 301 seconds; a longer grant amortises PAM/IAM propagation latency across multiple token refreshes without extending any individual token past the 5-minute drain boundary.
 
@@ -327,6 +327,7 @@ Cached grants rotate with 5 minutes remaining, at the same boundary used to clam
 | `GET /token?level=prod`   | Prompts, then returns the engineer's token and email                   |
 | `GET /token?session=<id>` | Refreshes a token within a pre-approved prod session                   |
 | `POST /session`           | Creates a prod session (with confirmation), returns session ID + token |
+| `GET /session?id=<id>`    | Validates a prod session without minting a token                       |
 | `DELETE /session?id=<id>` | Revokes a prod session                                                 |
 | `GET /identity`           | Returns the authenticated user's email                                 |
 | `GET /project-number`     | Returns the numeric GCP project ID                                     |
@@ -387,6 +388,7 @@ Set `GCE_METADATA_HOST=127.0.0.1:8173 GCE_METADATA_IP=127.0.0.1:8173 GCE_METADAT
 | Path                                                               | Response                               | `Metadata-Flavor: Google` required? |
 | ------------------------------------------------------------------ | -------------------------------------- | ----------------------------------- |
 | `GET /`                                                            | `200 ok` (detection ping)              | No                                  |
+| `GET /session-health`                                              | `with-prod` backing-authority check    | Yes                                 |
 | `GET /identity`                                                    | Authenticated user email JSON          | Yes                                 |
 | `GET /computeMetadata/v1/instance`                                 | Directory listing for GCE detection    | Yes                                 |
 | `GET /computeMetadata/v1/instance/service-accounts/default/token`  | Token JSON                             | Yes                                 |
@@ -401,6 +403,12 @@ Set `GCE_METADATA_HOST=127.0.0.1:8173 GCE_METADATA_IP=127.0.0.1:8173 GCE_METADAT
 Endpoints returning "JSON or directory listing" respond with JSON when `?recursive=true` is passed, and a text directory listing otherwise. This matches real GCE metadata server behavior.
 
 Service account paths that use an email identifier (e.g., `.../service-accounts/sa@project.iam.gserviceaccount.com/token`) are automatically aliased to `default`, since the proxy serves a single set of credentials. Only the exact `default` segment and email-shaped identifiers are accepted as aliases; lookalikes such as `default-prod` remain unknown paths. This ensures compatibility with `gcloud` and other client libraries that resolve accounts by email without accidentally routing arbitrary identifiers to the credential endpoint.
+
+`GET /session-health` is a private control route used by nested `with-prod`.
+For a session-backed proxy it validates the exact session at the gate without
+minting a token or renewing PAM; for operator-socket per-request mode it checks
+gate reachability. Providers without a non-mutating authority check return
+`404`.
 
 `GET /identity` proxies the gate's [`/identity`](#gate--host-side-token-daemon) route, returning the authenticated engineer's email as JSON (`{ "email": "..." }`). This lets container-side tooling — for example telemetry that must attribute activity to a real person — discover the human behind the downscoped service account. It is intentionally **not** the GCE `.../service-accounts/default/identity` path (which is reserved for OIDC identity tokens and is not supported); it lives at the top level, mirroring the gate. Because it returns the engineer's real email (PII), it requires the `Metadata-Flavor: Google` header like the other data-returning endpoints — the header blocks header-less "simple" requests (a browser or an SSRF-prone local service) from reading it. When the proxy is backed by a custom token provider rather than a gate client, the endpoint returns `404`.
 
@@ -454,9 +462,11 @@ Before opening an approval request, `with-prod` gives the gate transport a
 bad remote address fails promptly instead of consuming the full acquisition
 deadline. Every longer gate request is separately bounded and includes the
 complete response body, not only receipt of HTTP headers. Nested `with-prod`
-detection checks the parent proxy's stable email and project metadata; it does
-not probe the token endpoint, because doing so could start an unnecessary PAM
-rotation merely to decide whether the parent is healthy. Once a session has
+detection first asks the parent proxy to validate its backing gate session,
+then checks stable email and project metadata. The authority check does not
+probe the token endpoint, so it cannot start an unnecessary PAM rotation merely
+to decide whether the parent is healthy. An expired session or a gate restart
+therefore falls back to normal session creation. Once a session has
 been acquired, setup and teardown form one cleanup transaction: an error still
 restores the umask, stops any temporary proxy, removes token-bearing files, and
 awaits best-effort session revocation.
@@ -785,7 +795,7 @@ All other setup requirements from the single-operator section still apply.
 
 **What auto-approve does NOT do:**
 
-- It does **not** issue sessions. `POST /session` and `GET /token?session=…` return 403 on the operator socket. There is no 8-hour bearer-token refresh credential to steal.
+- It does **not** issue sessions. `POST /session`, `GET /session?id=…`, and `GET /token?session=…` return 403 on the operator socket. There is no 8-hour bearer-token refresh credential to steal.
 - It does **not** affect the main socket. Agent flows are unchanged: dev tokens are served immediately as before; prod requests still trigger the standard confirmation dialog.
 - It does **not** loosen the existing PAM allowlist. `auto_approve_pam_policies` is required to be a subset of `pam_allowed_policies`. Out-of-allowlist requests on the operator socket return a clean 403 — they do not fall through to a prompt.
 - It does **not** carve out a separate rate-limit budget. The operator socket shares the existing 20/minute prod limiter with the main socket, so a flooding agent surfaces as a real rate-limit signal.

@@ -51,6 +51,7 @@ export function startMetadataProxyServer(
 
   const deps: MetadataProxyDeps = {
     getToken: provider.getToken,
+    checkHealth: provider.checkHealth,
     getNumericProjectId: gateClient?.getNumericProjectId,
     getUniverseDomain: gateClient?.getUniverseDomain,
     getIdentity: gateClient?.getIdentity,
@@ -139,6 +140,9 @@ export function startMetadataProxyServer(
     );
     console.log(
       "    GET /computeMetadata/v1/instance/service-accounts/default/token → access token",
+    );
+    console.log(
+      "    GET /session-health                                          → authority check",
     );
     console.log("    GET /computeMetadata/v1/project/project-id                    → project ID");
     console.log(

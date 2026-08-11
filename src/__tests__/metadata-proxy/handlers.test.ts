@@ -218,6 +218,51 @@ describe("GET /identity", () => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /session-health (non-mutating backing-authority check)
+// ---------------------------------------------------------------------------
+
+describe("GET /session-health", () => {
+  test("returns 200 when the provider authority is valid", async () => {
+    let checks = 0;
+    const res = await handleRequest(
+      metadataRequest("/session-health"),
+      makeDeps({
+        checkHealth: async () => {
+          checks++;
+        },
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(checks).toBe(1);
+  });
+
+  test("returns 503 when the provider session is invalid", async () => {
+    const res = await handleRequest(
+      metadataRequest("/session-health"),
+      makeDeps({
+        checkHealth: async () => {
+          throw new Error("Session expired or invalid");
+        },
+      }),
+    );
+    expect(res.status).toBe(503);
+  });
+
+  test("returns 404 when the provider cannot check authority", async () => {
+    const res = await handleRequest(metadataRequest("/session-health"), makeDeps());
+    expect(res.status).toBe(404);
+  });
+
+  test("requires the Metadata-Flavor header", async () => {
+    const res = await handleRequest(
+      makeRequest("/session-health"),
+      makeDeps({ checkHealth: async () => {} }),
+    );
+    expect(res.status).toBe(403);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // GET /computeMetadata/v1/project/project-id
 // ---------------------------------------------------------------------------
 

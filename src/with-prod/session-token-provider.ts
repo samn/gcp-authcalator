@@ -15,6 +15,7 @@ import { fetchWithGateTimeout, throwTypedGateError } from "./fetch-prod-token.ts
  * wrapped command, while never aborting a legitimately slow PAM rotation.
  */
 const SESSION_REFRESH_TIMEOUT_MS = 510_000;
+const SESSION_HEALTH_TIMEOUT_MS = 3_000;
 
 export interface SessionTokenProviderOptions {
   /** Override fetch for testing. */
@@ -51,7 +52,7 @@ export function createSessionTokenProvider(
     ? { [TARGET_PROJECT_HEADER]: options.targetProject }
     : undefined;
 
-  return createCachingTokenProvider(initialToken, options.onRefresh, async () => {
+  const provider = createCachingTokenProvider(initialToken, options.onRefresh, async () => {
     const url = `${baseUrl}/token?session=${encodeURIComponent(sessionId)}`;
     const res = await fetchWithGateTimeout(
       fetchFn,
@@ -95,4 +96,19 @@ export function createSessionTokenProvider(
       expires_at: new Date(Date.now() + (body.expires_in ?? 3600) * 1000),
     };
   });
+
+  return {
+    ...provider,
+    async checkHealth(): Promise<void> {
+      const res = await fetchWithGateTimeout(
+        fetchFn,
+        `${baseUrl}/session?id=${encodeURIComponent(sessionId)}`,
+        extraOpts,
+        SESSION_HEALTH_TIMEOUT_MS,
+      );
+      if (!res.ok) {
+        throw new Error(`gcp-gate session health check returned ${res.status}`);
+      }
+    },
+  };
 }

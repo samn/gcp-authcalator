@@ -366,6 +366,30 @@ describe("startMetadataProxyServer", () => {
     expect(body.access_token).toBe("custom-provider-token");
   });
 
+  test("wires a custom provider's non-mutating authority check", async () => {
+    const port = nextPort++;
+    const config = makeConfig(port);
+    let checks = 0;
+
+    const customProvider: TokenProvider = {
+      getToken: async () => ({
+        access_token: "custom-provider-token",
+        expires_at: new Date(Date.now() + 3600_000),
+      }),
+      checkHealth: async () => {
+        checks++;
+      },
+    };
+
+    result = startMetadataProxyServer(config, { tokenProvider: customProvider });
+
+    const res = await fetch(`http://127.0.0.1:${port}/session-health`, {
+      headers: { "Metadata-Flavor": "Google" },
+    });
+    expect(res.status).toBe(200);
+    expect(checks).toBe(1);
+  });
+
   test("port 0 assigns a random port", async () => {
     const config: MetadataProxyConfig = {
       project_id: "test-project",
