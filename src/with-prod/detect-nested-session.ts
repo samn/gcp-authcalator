@@ -36,8 +36,11 @@ function isLoopbackHost(metadataHost: string): boolean {
 /**
  * Check if we are already inside a with-prod session with a live proxy.
  *
- * Returns session info if the parent proxy is alive and serving valid tokens,
- * or `null` if we should fall through to the normal (new session) flow.
+ * Returns session info if the parent proxy is alive and serving its stable
+ * identity/project metadata, or `null` if normal new-session flow is needed.
+ * Deliberately does not call the token endpoint: that endpoint may start a
+ * minutes-long PAM refresh, so using it as a two-second health probe can both
+ * abandon live work and spuriously create a second session.
  */
 export async function detectNestedSession(
   env: Record<string, string | undefined>,
@@ -64,16 +67,9 @@ export async function detectNestedSession(
 
     const headers = { "Metadata-Flavor": "Google" };
 
-    // Validate token is available and not expired (also validates PID ancestry)
-    const tokenRes = await fetchFn(
-      `http://${metadataHost}/computeMetadata/v1/instance/service-accounts/default/token`,
-      { headers, signal: AbortSignal.timeout(2000) },
-    );
-    if (!tokenRes.ok) return null;
-    const tokenBody = (await tokenRes.json()) as { expires_in?: number };
-    if (!tokenBody.expires_in || tokenBody.expires_in <= 0) return null;
-
-    // Read email
+    // Read email. PID ancestry validation wraps this route just like the token
+    // route, so a successful response also proves this process may use the
+    // parent proxy without triggering a credential refresh.
     const emailRes = await fetchFn(
       `http://${metadataHost}/computeMetadata/v1/instance/service-accounts/default/email`,
       { headers, signal: AbortSignal.timeout(2000) },

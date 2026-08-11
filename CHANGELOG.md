@@ -30,6 +30,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   command now prints the request's full command before it resolves anything and
   requires the operator to type `yes`; off a TTY it refuses unless `--yes` is
   passed.
+- **Command disclosure resists more terminal and redaction tricks.** Separate
+  values after password/token/key flags and JWT-shaped arguments are redacted,
+  and Unicode bidirectional formatting controls are stripped with C0/C1
+  terminal controls before commands reach a dialog, terminal, or audit line.
+- **Stored TLS identities are fully validated before use.** Gate and client
+  startup reject symlinked or non-regular material, unsafe ownership or modes,
+  not-yet-valid certificates, invalid CA/key-usage and leaf EKU constraints,
+  unexpected subjects or server SANs, signature failures, and private keys
+  that do not match their certificate. Atomic TLS writes now use unpredictable,
+  exclusively-created staging files instead of a plantable fixed `.tmp` path.
 
 ### Added
 
@@ -83,6 +93,107 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   drains stdin cannot wedge the flush itself. AppleScript's `choose from list`
   has no timeout of its own, and a dialog that never returned would hold the
   prod rate limiter's single-flight lock indefinitely.
+- **Token caches now use an adaptive refresh margin:** 10% of the lifetime
+  observed when the token enters the cache, capped at 5 minutes. Short-lived
+  tokens therefore retain a useful cache window instead of being stale as soon
+  as they are returned, while ordinary hour-long tokens keep the prior
+  5-minute safety margin. Concurrent metadata and dev-token refreshes also
+  coalesce onto one request.
+- **PAM activation and OAuth minting now run concurrently after approval.**
+  The confirmation limiter is released as soon as the operator decides, so a
+  slow PAM rotation cannot block the next dialog and its wait no longer adds
+  serially to token-mint latency.
+- **`kube-token` mirrors the exec API requested by kubectl.** Supported
+  `KUBERNETES_EXEC_INFO` requests for `client.authentication.k8s.io/v1` and
+  `v1beta1` now receive the same version instead of an unconditional beta
+  response.
+
+### Fixed
+
+- **Gate requests can no longer wait indefinitely after receiving HTTP
+  headers.** Authentication, PAM, metadata, admin, and `with-prod` requests
+  now keep their application deadline active until the complete small response
+  body is buffered. The gate and metadata servers disable Bun's shorter
+  per-request idle timeout so legitimate confirmation and PAM work can use
+  those explicit bounds instead of being disconnected after 10 seconds.
+  `with-prod` also performs a 3-second `/health` transport preflight before it
+  opens an approval request, so a missing daemon, stale socket, or broken
+  tunnel fails promptly rather than consuming the acquisition deadline.
+- **PAM grant reuse now follows the actual access window.** Expiry is derived
+  from `auditTrail.accessGrantTime` (or the activated timeline event) plus the
+  requested duration, with `createTime` and a bounded request-start estimate as
+  conservative fallbacks for incomplete fresh responses. Unbounded existing
+  grants and grants marked `externallyModified` are not reused.
+  Per-entitlement rotation generations also fence work that outlives its
+  budget, preventing an abandoned rotation from overwriting a replacement
+  cache entry or withdrawing a grant that the replacement adopted. Together
+  these changes avoid needless grant churn and repeated exposure to PAM/IAM
+  propagation latency. Grant rotation remains aligned with the 5-minute token
+  drain boundary, preventing early withdrawal while a token minted under the
+  previous grant can still be valid.
+- **PAM create/withdraw/shutdown races no longer duplicate or resurrect
+  grants.** `grants.create` uses a nonzero UUID `requestId` and retries one
+  ambiguous network/body-timeout, 429, or 5xx result with the same ID. A grant
+  is marked retiring immediately before its withdraw request so a replacement
+  scan cannot adopt access already being removed. Shutdown is one-way, rejects
+  new work, tracks late successful create responses, withdraws only proven-owned
+  grants, and returns within a 10-second cleanup budget.
+- **`with-prod` teardown is bounded and transactional.** Nested-session
+  detection checks stable email/project metadata instead of calling `/token`,
+  so probing a parent cannot start an unnecessary PAM rotation. Any failure
+  after session acquisition now restores the umask, stops the temporary proxy,
+  removes token-bearing files, and awaits best-effort session revocation. The
+  first `SIGINT`/`SIGTERM` gives the wrapped child 5 seconds to exit before
+  `SIGKILL`; a second signal escalates immediately, so an unresponsive child
+  cannot hold the wrapper open indefinitely.
+- **`with-prod` acquisition now responds to termination signals before a child
+  exists.** `SIGINT`/`SIGTERM` cancels the gate request and exits 130/143 rather
+  than leaving the wrapper attached to a multi-minute acquisition. Refreshed
+  gcloud tokens are written through random exclusive staging files, and a
+  failed file update is no longer committed to the proxy's in-memory cache.
+- **The per-request `with-prod` path no longer repeats identity discovery after
+  a successful prod-token request.** The gate includes the email it already
+  resolved for confirmation in the prod response; clients retain a fallback
+  `/identity` call for compatibility with older gates. This removes up to
+  another 105-second auth backstop and avoids discarding a valid token if that
+  redundant lookup fails.
+- **Gate listener startup is transactional.** If TLS validation or a later
+  admin/operator socket step fails after another listener has started, all
+  listeners and socket files created by that attempt are rolled back and the
+  previous umask is restored. On shutdown, listeners close before asynchronous
+  PAM cleanup so no new work enters a stopping daemon; both gate and metadata
+  proxy remove their signal listeners on stop.
+- **Socket paths that alias through symlinked parent directories are rejected
+  before binding.** This closes the gap where lexically different main/admin/
+  operator paths could resolve to one inode and a later stale-socket cleanup
+  could unlink a listener already started by the same process.
+- **Pending-request CLI commands validate IDs before connecting** and reject
+  anything other than the canonical 32-character lowercase hex form. Their
+  admin-socket calls have a 5-second whole-response deadline and now report
+  connection failures, old-daemon routes, malformed error bodies, and missing
+  requests distinctly.
+- **Metadata service-account aliases no longer match arbitrary lookalikes.**
+  Only the exact `default` segment and email-shaped identifiers route to the
+  proxy's single credential source; names such as `default-prod` now return 404.
+- **Remote gate URLs are canonicalized** so an accepted trailing slash cannot
+  produce `//token`-style endpoint paths. Metadata clients no longer add a
+  second identity cache, so a gate-side identity change after credential-cache
+  invalidation is observable without restarting the proxy.
+- **Configuration rejects ambiguous or misspelled security settings.** TOML
+  files now reject unknown keys, `scopes` cannot be empty, socket paths must be
+  normalized absolute paths with no collisions between main/admin/operator
+  listeners, and `gate_url` must be a pure HTTPS origin without credentials,
+  query, fragment, or a non-root path.
+- **TLS repair no longer rotates a valid certificate chain just because the
+  derived client bundle is missing.** `init-tls` reconstructs the bundle from
+  the existing CA/client material, honors configured `tls_dir`, and reports
+  configuration errors without an uncaught stack trace.
+- **`kube-setup` updates and backs up kubeconfig transactionally.** Backup
+  creation is now fatal on failure; backup and target writes are atomic,
+  preserve file modes despite a restrictive umask, clean staging files, and
+  update the target of a kubeconfig symlink instead of replacing the link.
+- **Expired sessions are pruned as a set** whenever sessions are created or
+  validated, preventing dead entries from accumulating for an 8-hour daemon.
 
 ## [0.13.0] - 2026-07-22
 

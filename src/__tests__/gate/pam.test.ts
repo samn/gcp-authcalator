@@ -1,5 +1,11 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { resolveEntitlementPath, createPamModule, type PamModule } from "../../gate/pam.ts";
+import {
+  resolveEntitlementPath,
+  createPamModule,
+  PamRequesterLookupError,
+  type PamModule,
+} from "../../gate/pam.ts";
+import { CredentialsExpiredError } from "../../gate/credentials-error.ts";
 
 // ---------------------------------------------------------------------------
 // resolveEntitlementPath
@@ -160,6 +166,10 @@ function mockFetch(responses: Array<{ status: number; body: unknown }>): typeof 
   }) as unknown as typeof globalThis.fetch;
 }
 
+function isGrantCollectionUrl(url: string): boolean {
+  return new URL(url).pathname.endsWith("/grants");
+}
+
 /**
  * Mock fetch that auto-responds to withdraw POSTs with `{}` 200 and dispenses
  * `creates` (lazy bodies — evaluated when the create call fires, so they can
@@ -212,6 +222,8 @@ function makeModule(
 
 describe("ensureGrant", () => {
   const entitlementPath = "projects/p/locations/global/entitlements/e";
+  const requestId1 = "11111111-1111-4111-8111-111111111111";
+  const requestId2 = "22222222-2222-4222-8222-222222222222";
 
   test("creates and returns an immediately activated grant", async () => {
     const grantName = `${entitlementPath}/grants/grant-1`;
@@ -222,6 +234,159 @@ describe("ensureGrant", () => {
     expect(result.name).toBe(grantName);
     expect(result.state).toBe("ACTIVATED");
     expect(result.cached).toBe(false);
+  });
+
+  test("sends a nonzero UUID requestId on grants.create", async () => {
+    const grantName = `${entitlementPath}/grants/grant-1`;
+    let createUrl: string | undefined;
+    const pam = createPamModule(async () => "token", {
+      fetchFn: (async (url: string) => {
+        createUrl = url;
+        return Response.json(makeActivatedGrant(grantName));
+      }) as unknown as typeof globalThis.fetch,
+      requestIdFactory: () => requestId1,
+    });
+
+    await pam.ensureGrant(entitlementPath);
+
+    expect(new URL(createUrl!).searchParams.get("requestId")).toBe(requestId1);
+  });
+
+  test("retries a network-ambiguous create exactly once with the same requestId", async () => {
+    const grantName = `${entitlementPath}/grants/grant-1`;
+    const createUrls: string[] = [];
+    const pam = createPamModule(async () => "token", {
+      fetchFn: (async (url: string) => {
+        createUrls.push(url);
+        if (createUrls.length === 1) throw new TypeError("socket reset");
+        return Response.json(makeActivatedGrant(grantName));
+      }) as unknown as typeof globalThis.fetch,
+      requestIdFactory: () => requestId1,
+    });
+
+    const result = await pam.ensureGrant(entitlementPath);
+
+    expect(result.name).toBe(grantName);
+    expect(createUrls).toHaveLength(2);
+    expect(createUrls[1]).toBe(createUrls[0]);
+  });
+
+  test("retries a timed-out create exactly once with the same requestId", async () => {
+    const grantName = `${entitlementPath}/grants/grant-1`;
+    const createUrls: string[] = [];
+    const pam = createPamModule(async () => "token", {
+      fetchFn: ((url: string, init?: RequestInit) => {
+        createUrls.push(url);
+        if (createUrls.length === 1) {
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), {
+              once: true,
+            });
+          });
+        }
+        return Promise.resolve(Response.json(makeActivatedGrant(grantName)));
+      }) as unknown as typeof globalThis.fetch,
+      fetchTimeoutMs: 20,
+      requestIdFactory: () => requestId1,
+    });
+
+    const result = await pam.ensureGrant(entitlementPath);
+
+    expect(result.name).toBe(grantName);
+    expect(createUrls).toHaveLength(2);
+    expect(createUrls[1]).toBe(createUrls[0]);
+  });
+
+  test.each([429, 500, 503])(
+    "retries transient HTTP %d exactly once with the same requestId",
+    async (status) => {
+      const grantName = `${entitlementPath}/grants/grant-1`;
+      const createUrls: string[] = [];
+      const pam = createPamModule(async () => "token", {
+        fetchFn: (async (url: string) => {
+          createUrls.push(url);
+          if (createUrls.length === 1) {
+            return Response.json({ error: { message: "transient" } }, { status });
+          }
+          return Response.json(makeActivatedGrant(grantName));
+        }) as unknown as typeof globalThis.fetch,
+        requestIdFactory: () => requestId1,
+      });
+
+      const result = await pam.ensureGrant(entitlementPath);
+
+      expect(result.name).toBe(grantName);
+      expect(createUrls).toHaveLength(2);
+      expect(createUrls[1]).toBe(createUrls[0]);
+    },
+  );
+
+  test("does not retry a deterministic 4xx create failure", async () => {
+    let createCalls = 0;
+    const pam = createPamModule(async () => "token", {
+      fetchFn: (async () => {
+        createCalls++;
+        return Response.json({ error: { message: "denied" } }, { status: 403 });
+      }) as unknown as typeof globalThis.fetch,
+      requestIdFactory: () => requestId1,
+    });
+
+    await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow("access denied (403)");
+    expect(createCalls).toBe(1);
+  });
+
+  test("uses a new requestId for create after open-grant recovery", async () => {
+    const currentTime = 10_000_000;
+    const staleName = `${entitlementPath}/grants/stale`;
+    const freshName = `${entitlementPath}/grants/fresh`;
+    const ids = [requestId1, requestId2];
+    const createUrls: string[] = [];
+    const pam = createPamModule(async () => "token", {
+      fetchFn: (async (url: string, init?: RequestInit) => {
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (method === "POST" && url.includes(":withdraw")) return Response.json({});
+        if (method === "GET") {
+          return Response.json({
+            grants: [
+              {
+                name: staleName,
+                state: "ACTIVE",
+                createTime: new Date(currentTime - 2 * 60 * 60 * 1000).toISOString(),
+                requestedDuration: "3600s",
+              },
+            ],
+          });
+        }
+        createUrls.push(url);
+        if (createUrls.length === 1) {
+          return Response.json({ error: { message: "Already exists" } }, { status: 409 });
+        }
+        return Response.json(makeActivatedGrant(freshName, new Date(currentTime).toISOString()));
+      }) as unknown as typeof globalThis.fetch,
+      now: () => currentTime,
+      requestIdFactory: () => ids.shift()!,
+    });
+
+    const result = await pam.ensureGrant(entitlementPath);
+
+    expect(result.name).toBe(freshName);
+    expect(createUrls).toHaveLength(2);
+    expect(new URL(createUrls[0]!).searchParams.get("requestId")).toBe(requestId1);
+    expect(new URL(createUrls[1]!).searchParams.get("requestId")).toBe(requestId2);
+  });
+
+  test("rejects an invalid requestId before issuing create", async () => {
+    let fetchCalls = 0;
+    const pam = createPamModule(async () => "token", {
+      fetchFn: (async () => {
+        fetchCalls++;
+        return Response.json({});
+      }) as unknown as typeof globalThis.fetch,
+      requestIdFactory: () => "00000000-0000-0000-0000-000000000000",
+    });
+
+    await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow("invalid UUID");
+    expect(fetchCalls).toBe(0);
   });
 
   test("uses configured grant duration in request body", async () => {
@@ -358,7 +523,9 @@ describe("ensureGrant", () => {
       { status: 200, body: { grants: [] } },
     ]);
 
-    await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow("no open grant of ours found");
+    await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow(
+      /no open grant of ours found.*across 1 page\(s\)/,
+    );
   });
 
   test("throws when grant is denied during polling", async () => {
@@ -703,7 +870,10 @@ describe("ensureGrant", () => {
   });
 
   test("throws on generic PAM API error", async () => {
-    const { pam } = makeModule([{ status: 500, body: { error: { message: "Internal error" } } }]);
+    const { pam } = makeModule([
+      { status: 500, body: { error: { message: "Internal error" } } },
+      { status: 500, body: { error: { message: "Internal error" } } },
+    ]);
 
     await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow("PAM API error (500)");
   });
@@ -731,13 +901,15 @@ describe("ensureGrant", () => {
     expect(parsed.justification?.unstructuredJustification).toBe("running migration");
   });
 
-  test("cache expiry is derived from grant createTime, not current time", async () => {
+  test("reuses an active grant until the token drain boundary", async () => {
     const grantName1 = `${entitlementPath}/grants/grant-1`;
-    const grantName2 = `${entitlementPath}/grants/grant-2`;
-    let currentTime = 1_000_000;
+    const currentTime = 1_000_000;
 
-    // Grant was created 50 minutes ago (only 10 minutes of lifetime remain)
-    const createdAt = currentTime - 50 * 60 * 1000;
+    // Nine minutes remain. Tokens minted under this grant can still be valid
+    // for four more minutes because their expiry is clamped five minutes short
+    // of the grant. Withdrawing now would invalidate authorization before the
+    // advertised token lifetime, so the conflict recovery path must reuse it.
+    const createdAt = currentTime - 51 * 60 * 1000;
     const oldGrant = {
       name: grantName1,
       state: "ACTIVATED",
@@ -750,35 +922,17 @@ describe("ensureGrant", () => {
         // 409 on create, then find the old grant
         { status: 409, body: { error: { message: "Already exists" } } },
         { status: 200, body: { grants: [oldGrant] } },
-        // Second ensureGrant: cached grant is within the cache margin but not
-        // yet expired, so the new behaviour withdraws it before re-creating.
-        { status: 200, body: {} },
-        // Then it requests a fresh grant
-        {
-          status: 200,
-          body: makeActivatedGrant(grantName2, new Date(currentTime + 7 * 60 * 1000).toISOString()),
-        },
       ],
       () => currentTime,
     );
 
-    const first = await pam.ensureGrant(entitlementPath);
-    expect(first.name).toBe(grantName1);
-    expect(first.cached).toBe(false);
-
-    // Advance 7 minutes — past the old grant's real expiry (10 min remaining
-    // minus 5 min cache margin = should be expired after ~5 min)
-    currentTime += 7 * 60 * 1000;
-
-    const second = await pam.ensureGrant(entitlementPath);
-    // Should NOT be cached because the grant's real expiry was derived from createTime
-    expect(second.name).toBe(grantName2);
-    expect(second.cached).toBe(false);
+    const result = await pam.ensureGrant(entitlementPath);
+    expect(result.name).toBe(grantName1);
+    expect(result.cached).toBe(false);
   });
 
   test("falls back to conservative TTL when grant lacks createTime", async () => {
     const grantName1 = `${entitlementPath}/grants/grant-1`;
-    const grantName2 = `${entitlementPath}/grants/grant-2`;
     let currentTime = 1_000_000;
 
     // Grant without createTime
@@ -788,33 +942,41 @@ describe("ensureGrant", () => {
       // no createTime, no requestedDuration
     };
 
-    const { pam } = makeModule(
-      [
-        { status: 200, body: grantNoTime },
-        // Second ensureGrant fires within the cache margin of the conservative
-        // 15-minute fallback expiry, so the still-active grant is withdrawn
-        // before a new one is created.
-        { status: 200, body: {} },
-        {
-          status: 200,
-          body: makeActivatedGrant(
-            grantName2,
-            new Date(currentTime + 16 * 60 * 1000).toISOString(),
-          ),
-        },
-      ],
-      () => currentTime,
-    );
+    const { pam } = makeModule([{ status: 200, body: grantNoTime }], () => currentTime);
 
     const first = await pam.ensureGrant(entitlementPath);
     expect(first.name).toBe(grantName1);
+    expect(first.expiresAt.getTime()).toBe(currentTime + 3600 * 1000);
 
-    // Advance past the conservative 15-minute fallback TTL (minus 5 min margin = 10 min)
+    // Request start is earlier than activation, so using the full requested
+    // duration from that anchor remains conservative and avoids early churn.
     currentTime += 11 * 60 * 1000;
-
     const second = await pam.ensureGrant(entitlementPath);
-    expect(second.name).toBe(grantName2);
-    expect(second.cached).toBe(false);
+    expect(second.name).toBe(grantName1);
+    expect(second.cached).toBe(true);
+  });
+
+  test("uses the full configured multi-hour fallback for an incomplete create response", async () => {
+    const grantName = `${entitlementPath}/grants/grant-long`;
+    const requestedAt = 5_000_000;
+    let currentTime = requestedAt;
+    let fetchCalls = 0;
+    const pam = createPamModule(async () => "token", {
+      fetchFn: (async () => {
+        fetchCalls++;
+        return Response.json({ name: grantName, state: "ACTIVATED" });
+      }) as unknown as typeof globalThis.fetch,
+      now: () => currentTime,
+      grantDurationSeconds: 4 * 60 * 60,
+    });
+
+    const first = await pam.ensureGrant(entitlementPath);
+    expect(first.expiresAt.getTime()).toBe(requestedAt + 4 * 60 * 60 * 1000);
+
+    currentTime += 30 * 60 * 1000;
+    const second = await pam.ensureGrant(entitlementPath);
+    expect(second.cached).toBe(true);
+    expect(fetchCalls).toBe(1);
   });
 
   test("409 with a stale-but-still-open grant: withdraws the stale grant and retries create", async () => {
@@ -859,7 +1021,7 @@ describe("ensureGrant", () => {
             headers: { "Content-Type": "application/json" },
           });
         }
-        if (method === "POST" && url.endsWith("/grants")) {
+        if (method === "POST" && isGrantCollectionUrl(url)) {
           createCalls++;
           if (createCalls === 1) {
             // First create: PAM rejects because the stale grant is still open.
@@ -965,7 +1127,7 @@ describe("ensureGrant", () => {
             headers: { "Content-Type": "application/json" },
           });
         }
-        if (method === "POST" && url.endsWith("/grants")) {
+        if (method === "POST" && isGrantCollectionUrl(url)) {
           createCalls++;
           if (createCalls === 1) {
             return new Response(JSON.stringify({ error: { message: "Already exists" } }), {
@@ -1046,6 +1208,57 @@ describe("ensureGrant", () => {
     expect(result.expiresAt.getTime()).toBe(createdAtMs + 3600 * 1000);
   });
 
+  test("anchors expiry to auditTrail.accessGrantTime after delayed approval", async () => {
+    const grantName = `${entitlementPath}/grants/grant-delayed`;
+    const currentTime = 20_000_000;
+    const createdAt = currentTime - 20 * 60 * 1000;
+    const accessGrantedAt = currentTime - 2 * 60 * 1000;
+    const { pam } = makeModule(
+      [
+        {
+          status: 200,
+          body: {
+            name: grantName,
+            state: "ACTIVE",
+            createTime: new Date(createdAt).toISOString(),
+            requestedDuration: "3600s",
+            auditTrail: { accessGrantTime: new Date(accessGrantedAt).toISOString() },
+          },
+        },
+      ],
+      () => currentTime,
+    );
+
+    const result = await pam.ensureGrant(entitlementPath);
+    expect(result.expiresAt.getTime()).toBe(accessGrantedAt + 3600 * 1000);
+  });
+
+  test("uses an activated timeline event when the audit trail is absent", async () => {
+    const grantName = `${entitlementPath}/grants/grant-timeline`;
+    const currentTime = 20_000_000;
+    const activatedAt = currentTime - 60_000;
+    const { pam } = makeModule(
+      [
+        {
+          status: 200,
+          body: {
+            name: grantName,
+            state: "ACTIVE",
+            createTime: new Date(currentTime - 10 * 60 * 1000).toISOString(),
+            requestedDuration: "3600.5s",
+            timeline: {
+              events: [{ eventTime: new Date(activatedAt).toISOString(), activated: {} }],
+            },
+          },
+        },
+      ],
+      () => currentTime,
+    );
+
+    const result = await pam.ensureGrant(entitlementPath);
+    expect(result.expiresAt.getTime()).toBe(activatedAt + 3_600_500);
+  });
+
   test("near-expiry renewal recovers when PAM still 409s after our pre-withdraw", async () => {
     // The proactive pre-withdraw in ensureGrant clears most of the
     // cache-margin races, but PAM may still echo the just-withdrawn grant
@@ -1091,7 +1304,7 @@ describe("ensureGrant", () => {
             { status: 200, headers: { "Content-Type": "application/json" } },
           );
         }
-        if (method === "POST" && url.endsWith("/grants")) {
+        if (method === "POST" && isGrantCollectionUrl(url)) {
           createCalls++;
           if (createCalls === 1) {
             // Initial create the test driver runs against an empty cache.
@@ -1335,7 +1548,10 @@ describe("ensureGrant", () => {
     // silent in the daemon log (the original bug report symptom).
     const errorSpy = spyOn(console, "error").mockImplementation(() => {});
     try {
-      const { pam } = makeModule([{ status: 500, body: { error: { message: "boom" } } }]);
+      const { pam } = makeModule([
+        { status: 500, body: { error: { message: "boom" } } },
+        { status: 500, body: { error: { message: "boom" } } },
+      ]);
       await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow("PAM API error (500)");
       const logged = errorSpy.mock.calls.map((c) => String(c[0]));
       expect(logged.some((m) => m.includes(`grant rotation failed for ${entitlementPath}`))).toBe(
@@ -1541,6 +1757,166 @@ describe("withdrawAll", () => {
     // Should not throw
     await pam.withdrawAll();
   });
+
+  test("aborts an activating rotation and withdraws its created grant", async () => {
+    const grantName = `${entitlementPath}/grants/pending-at-shutdown`;
+    const withdrawn: string[] = [];
+    let pollStarted = false;
+    const pam = createPamModule(async () => "token", {
+      fetchFn: (async (url: string, init?: RequestInit) => {
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (method === "POST" && url.includes(":withdraw")) {
+          withdrawn.push(url);
+          return Response.json({ done: true });
+        }
+        if (method === "POST" && isGrantCollectionUrl(url)) {
+          return Response.json({
+            name: grantName,
+            state: "ACTIVATING",
+            requestedDuration: "3600s",
+          });
+        }
+        if (method === "GET" && url.endsWith(grantName)) {
+          pollStarted = true;
+          return new Promise<Response>((_resolve, reject) => {
+            const signal = init?.signal;
+            if (signal?.aborted) {
+              reject(signal.reason);
+            } else {
+              signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+            }
+          });
+        }
+        throw new Error(`unexpected fetch: ${method} ${url}`);
+      }) as unknown as typeof globalThis.fetch,
+      sleepFn: async () => {},
+      shutdownTimeoutMs: 500,
+    });
+
+    const rotationOutcome = pam.ensureGrant(entitlementPath).catch((error: unknown) => error);
+    expect(await until(() => pollStarted, 1000)).toBe(true);
+
+    await pam.withdrawAll();
+
+    const rotationError = await rotationOutcome;
+    expect(rotationError).toBeInstanceOf(Error);
+    expect((rotationError as Error).message).toContain("shutting down");
+    expect(withdrawn).toHaveLength(1);
+    expect(withdrawn[0]).toContain(grantName);
+  });
+
+  test("withdraws a grant whose create response arrives after shutdown starts", async () => {
+    const grantName = `${entitlementPath}/grants/late-create-response`;
+    const withdrawn: string[] = [];
+    let createStarted = false;
+    let resolveCreate: ((response: Response) => void) | undefined;
+    const pam = createPamModule(async () => "token", {
+      fetchFn: (async (url: string, init?: RequestInit) => {
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (method === "POST" && url.includes(":withdraw")) {
+          withdrawn.push(url);
+          return Response.json({ done: true });
+        }
+        if (method === "POST" && isGrantCollectionUrl(url)) {
+          createStarted = true;
+          // Model a response already on the wire when shutdown aborts fetch.
+          // The module must handle the conservative case where it still wins
+          // the race and reveals the created grant's resource name.
+          return new Promise<Response>((resolve) => {
+            resolveCreate = resolve;
+          });
+        }
+        throw new Error(`unexpected fetch: ${method} ${url}`);
+      }) as unknown as typeof globalThis.fetch,
+      shutdownTimeoutMs: 500,
+    });
+
+    const rotationOutcome = pam.ensureGrant(entitlementPath).catch((error: unknown) => error);
+    expect(await until(() => createStarted, 1000)).toBe(true);
+
+    const shutdown = pam.withdrawAll();
+    resolveCreate!(
+      Response.json({
+        name: grantName,
+        state: "ACTIVATING",
+        requestedDuration: "3600s",
+      }),
+    );
+    await shutdown;
+
+    expect(await rotationOutcome).toBeInstanceOf(Error);
+    expect(withdrawn).toHaveLength(1);
+    expect(withdrawn[0]).toContain(grantName);
+  });
+
+  test("rejects new grant requests after shutdown", async () => {
+    let fetchCalls = 0;
+    const pam = createPamModule(async () => "token", {
+      fetchFn: (async () => {
+        fetchCalls++;
+        return Response.json({});
+      }) as unknown as typeof globalThis.fetch,
+    });
+
+    await pam.withdrawAll();
+
+    await expect(pam.ensureGrant(entitlementPath)).rejects.toThrow("shutting down");
+    expect(fetchCalls).toBe(0);
+  });
+
+  test("bounds shutdown when withdrawal access-token acquisition never settles", async () => {
+    const grantName = `${entitlementPath}/grants/grant-1`;
+    let tokenCalls = 0;
+    const pam = createPamModule(
+      () => {
+        tokenCalls++;
+        if (tokenCalls === 1) return Promise.resolve("token");
+        return new Promise<string>(() => {});
+      },
+      {
+        fetchFn: (async () =>
+          Response.json(makeActivatedGrant(grantName))) as unknown as typeof globalThis.fetch,
+        shutdownTimeoutMs: 30,
+      },
+    );
+    await pam.ensureGrant(entitlementPath);
+
+    const outcome = await settleWithin(pam.withdrawAll(), 500);
+
+    expect(outcome.status).toBe("resolved");
+    expect(tokenCalls).toBe(2);
+  });
+
+  test("does not withdraw a cached grant whose requester ownership was never confirmed", async () => {
+    const otherGrant = `${entitlementPath}/grants/other-requester`;
+    let withdrawCalls = 0;
+    const pam = createPamModule(async () => "token", {
+      fetchFn: (async (url: string, init?: RequestInit) => {
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (method === "POST" && url.includes(":withdraw")) {
+          withdrawCalls++;
+          return Response.json({ done: true });
+        }
+        if (method === "POST") {
+          return Response.json({ error: { message: "Already exists" } }, { status: 409 });
+        }
+        return Response.json({
+          grants: [
+            {
+              ...makeActivatedGrant(otherGrant),
+              requester: "other@example.com",
+            },
+          ],
+        });
+      }) as unknown as typeof globalThis.fetch,
+    });
+
+    const adopted = await pam.ensureGrant(entitlementPath);
+    expect(adopted.name).toBe(otherGrant);
+
+    await pam.withdrawAll();
+    expect(withdrawCalls).toBe(0);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1609,7 +1985,7 @@ describe("ensureGrant single-flight", () => {
           withdrawCalls++;
           return new Response("{}", { status: 200 });
         }
-        if (method === "POST" && url.endsWith("/grants")) {
+        if (method === "POST" && isGrantCollectionUrl(url)) {
           createCalls++;
           if (createCalls === 1) {
             // First ensureGrant — return grant-1 synchronously.
@@ -1736,7 +2112,7 @@ describe("withdraw Operation (LRO) polling", () => {
           });
         }
 
-        if (method === "POST" && url.endsWith("/grants")) {
+        if (method === "POST" && isGrantCollectionUrl(url)) {
           createCalls++;
           if (createCalls === 1) {
             // Initial create returns grant-1.
@@ -1796,7 +2172,7 @@ describe("withdraw Operation (LRO) polling", () => {
           opPolls++;
           return new Response("{}", { status: 200 });
         }
-        if (method === "POST" && url.endsWith("/grants")) {
+        if (method === "POST" && isGrantCollectionUrl(url)) {
           createCalls++;
           const grant = createCalls === 1 ? grantName1 : grantName2;
           return new Response(
@@ -1841,7 +2217,7 @@ describe("withdraw Operation (LRO) polling", () => {
             { status: 200, headers: { "Content-Type": "application/json" } },
           );
         }
-        if (method === "POST" && url.endsWith("/grants")) {
+        if (method === "POST" && isGrantCollectionUrl(url)) {
           createCalls++;
           const grant = createCalls === 1 ? grantName1 : grantName2;
           return new Response(
@@ -1894,7 +2270,7 @@ describe("withdraw Operation (LRO) polling", () => {
             { status: 200, headers: { "Content-Type": "application/json" } },
           );
         }
-        if (method === "POST" && url.endsWith("/grants")) {
+        if (method === "POST" && isGrantCollectionUrl(url)) {
           createCalls++;
           const grant = createCalls === 1 ? grantName1 : grantName2;
           return new Response(
@@ -1969,7 +2345,7 @@ describe("withdraw API surface", () => {
             headers: { "Content-Type": "application/json" },
           });
         }
-        if (method === "POST" && url.endsWith("/grants")) {
+        if (method === "POST" && isGrantCollectionUrl(url)) {
           createCalls++;
           const grant = createCalls === 1 ? grantName1 : grantName2;
           return new Response(
@@ -2028,7 +2404,7 @@ describe("scanForOpenGrants requester filtering", () => {
             headers: { "Content-Type": "application/json" },
           });
         }
-        if (method === "POST" && url.endsWith("/grants")) {
+        if (method === "POST" && isGrantCollectionUrl(url)) {
           createCalls++;
           if (createCalls === 1 || !opts.createAfterRetry) {
             return new Response(JSON.stringify({ error: { message: "Already exists" } }), {
@@ -2158,6 +2534,91 @@ describe("scanForOpenGrants requester filtering", () => {
     expect(withdrawn).toHaveLength(1);
     expect(withdrawn[0]).toContain("own-pending");
   });
+
+  test("does not reuse an own grant whose create time is missing", async () => {
+    const currentTime = 10_000_000;
+    const unbounded = {
+      name: `${entitlementPath}/grants/own-unbounded`,
+      state: "ACTIVATED",
+      requester: "me@example.com",
+      requestedDuration: "3600s",
+    };
+    const freshName = `${entitlementPath}/grants/fresh`;
+    const withdrawn: string[] = [];
+    const pam = makeFilteringModule([unbounded], {
+      currentTime,
+      onWithdraw: (url) => withdrawn.push(url),
+      createAfterRetry: makeActivatedGrant(freshName, new Date(currentTime).toISOString()),
+    });
+
+    const result = await pam.ensureGrant(entitlementPath);
+    expect(result.name).toBe(freshName);
+    expect(withdrawn[0]).toContain("own-unbounded");
+  });
+
+  test("does not reuse an own grant whose requested duration is missing", async () => {
+    const currentTime = 10_000_000;
+    const unbounded = {
+      name: `${entitlementPath}/grants/own-no-duration`,
+      state: "ACTIVATED",
+      requester: "me@example.com",
+      createTime: new Date(currentTime).toISOString(),
+    };
+    const freshName = `${entitlementPath}/grants/fresh`;
+    const withdrawn: string[] = [];
+    const pam = makeFilteringModule([unbounded], {
+      currentTime,
+      onWithdraw: (url) => withdrawn.push(url),
+      createAfterRetry: makeActivatedGrant(freshName, new Date(currentTime).toISOString()),
+    });
+
+    const result = await pam.ensureGrant(entitlementPath);
+    expect(result.name).toBe(freshName);
+    expect(withdrawn[0]).toContain("own-no-duration");
+  });
+
+  test("reuses an own grant with a fractional protobuf duration", async () => {
+    const currentTime = 10_000_000;
+    const grant = {
+      name: `${entitlementPath}/grants/own-fractional`,
+      state: "ACTIVATED",
+      requester: "me@example.com",
+      createTime: new Date(currentTime).toISOString(),
+      requestedDuration: "3600.000000001s",
+    };
+    const withdrawn: string[] = [];
+    const pam = makeFilteringModule([grant], {
+      currentTime,
+      onWithdraw: (url) => withdrawn.push(url),
+    });
+
+    const result = await pam.ensureGrant(entitlementPath);
+    expect(result.name).toBe(grant.name);
+    expect(withdrawn).toHaveLength(0);
+  });
+
+  test("does not trust a PAM grant marked externally modified", async () => {
+    const currentTime = 10_000_000;
+    const modified = {
+      ...makeActivatedGrant(
+        `${entitlementPath}/grants/own-modified`,
+        new Date(currentTime).toISOString(),
+      ),
+      requester: "me@example.com",
+      externallyModified: true,
+    };
+    const freshName = `${entitlementPath}/grants/fresh`;
+    const withdrawn: string[] = [];
+    const pam = makeFilteringModule([modified], {
+      currentTime,
+      onWithdraw: (url) => withdrawn.push(url),
+      createAfterRetry: makeActivatedGrant(freshName, new Date(currentTime).toISOString()),
+    });
+
+    const result = await pam.ensureGrant(entitlementPath);
+    expect(result.name).toBe(freshName);
+    expect(withdrawn[0]).toContain("own-modified");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -2237,6 +2698,33 @@ describe("ensureGrant fetch timeout and rotation budget", () => {
     }
   });
 
+  test("keeps a stalled PAM response body inside the per-request timeout", async () => {
+    let requestSignal: AbortSignal | null | undefined;
+    const stalledBodyFetch = (async (_url: string, init?: RequestInit) => {
+      requestSignal = init?.signal;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"name":'));
+          init?.signal?.addEventListener("abort", () => {
+            controller.error((init.signal as AbortSignal).reason);
+          });
+        },
+      });
+      return new Response(body, { status: 200 });
+    }) as unknown as typeof globalThis.fetch;
+    const pam = createPamModule(async () => "token", {
+      fetchFn: stalledBodyFetch,
+      fetchTimeoutMs: 50,
+    });
+
+    const outcome = await settleWithin(pam.ensureGrant(entitlementPath), 1000);
+    expect(outcome.status).toBe("rejected");
+    if (outcome.status === "rejected") {
+      expect(outcome.error.message).toContain("PAM API request timed out after 50ms");
+    }
+    expect(requestSignal?.aborted).toBe(true);
+  });
+
   test("bounds the whole rotation by the budget even when ADC token acquisition hangs", async () => {
     // getAccessToken runs inside pamFetch *before* the HTTP call and is not
     // covered by the per-fetch signal, so only the overall budget can bound it.
@@ -2280,6 +2768,305 @@ describe("ensureGrant fetch timeout and rotation budget", () => {
     }
   });
 
+  test("a superseded renewal cannot delete the replacement rotation's cache entry", async () => {
+    const oldGrant = `${entitlementPath}/grants/old`;
+    const newGrant = `${entitlementPath}/grants/new`;
+    let currentTime = Date.parse("2026-01-01T00:00:00Z");
+    let tokenCalls = 0;
+    let createCalls = 0;
+    let withdrawCalls = 0;
+    let releaseOldToken: (() => void) | undefined;
+    const oldToken = new Promise<void>((resolve) => {
+      releaseOldToken = resolve;
+    });
+
+    const pam = createPamModule(
+      async () => {
+        tokenCalls++;
+        // The first renewal wedges while acquiring the token for its cached
+        // grant withdrawal. Its public promise times out, but its async work
+        // remains alive until this gate is released.
+        if (tokenCalls === 2) {
+          await oldToken;
+        }
+        return "token";
+      },
+      {
+        fetchFn: (async (url: string, init?: RequestInit) => {
+          const method = (init?.method ?? "GET").toUpperCase();
+          if (method === "POST" && url.includes(":withdraw")) {
+            withdrawCalls++;
+            return Response.json({ done: true });
+          }
+          if (method === "POST" && isGrantCollectionUrl(url)) {
+            createCalls++;
+            return Response.json(
+              makeActivatedGrant(
+                createCalls === 1 ? oldGrant : newGrant,
+                new Date(currentTime).toISOString(),
+              ),
+            );
+          }
+          throw new Error(`unexpected fetch: ${method} ${url}`);
+        }) as unknown as typeof globalThis.fetch,
+        now: () => currentTime,
+        rotationBudgetMs: 100,
+      },
+    );
+
+    await pam.ensureGrant(entitlementPath);
+    // Leave less than the token drain margin so renewal is required next.
+    currentTime += 3_301_000;
+
+    const abandoned = pam.ensureGrant(entitlementPath);
+    expect(await until(() => tokenCalls === 2, 1000)).toBe(true);
+    const abandonedOutcome = await settleWithin(abandoned, 1000);
+    expect(abandonedOutcome.status).toBe("rejected");
+
+    const replacement = await pam.ensureGrant(entitlementPath);
+    expect(replacement.name).toBe(newGrant);
+    expect(replacement.cached).toBe(false);
+
+    // Let the abandoned getAccessToken() return. Before the ownership fence,
+    // its best-effort withdraw swallowed the abort and then unconditionally
+    // deleted the replacement cache entry.
+    releaseOldToken!();
+    await oldToken;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const cached = await pam.ensureGrant(entitlementPath);
+    expect(cached.name).toBe(newGrant);
+    expect(cached.cached).toBe(true);
+    expect(createCalls).toBe(2);
+    expect(withdrawCalls).toBe(1);
+  });
+
+  test("a superseded poller cannot withdraw the active grant adopted by its replacement", async () => {
+    const grantName = `${entitlementPath}/grants/adopted`;
+    let tokenCalls = 0;
+    let createCalls = 0;
+    const withdrawn: string[] = [];
+    let releaseOldPollToken: (() => void) | undefined;
+    const oldPollToken = new Promise<void>((resolve) => {
+      releaseOldPollToken = resolve;
+    });
+
+    const pam = createPamModule(
+      async () => {
+        tokenCalls++;
+        // The original rotation wedges before its first poll request. Once its
+        // budget expires, the replacement sees and adopts the now-active grant.
+        if (tokenCalls === 2) {
+          await oldPollToken;
+        }
+        return "token";
+      },
+      {
+        fetchFn: (async (url: string, init?: RequestInit) => {
+          const method = (init?.method ?? "GET").toUpperCase();
+          if (method === "POST" && url.includes(":withdraw")) {
+            withdrawn.push(url);
+            return Response.json({ done: true });
+          }
+          if (method === "POST" && isGrantCollectionUrl(url)) {
+            createCalls++;
+            if (createCalls === 1) {
+              return Response.json({
+                name: grantName,
+                state: "APPROVAL_AWAITED",
+                requestedDuration: "3600s",
+              });
+            }
+            return Response.json({ error: { message: "Already exists" } }, { status: 409 });
+          }
+          if (method === "GET" && url.includes("?pageSize=")) {
+            return Response.json({ grants: [makeActivatedGrant(grantName)] });
+          }
+          throw new Error(`unexpected fetch: ${method} ${url}`);
+        }) as unknown as typeof globalThis.fetch,
+        rotationBudgetMs: 100,
+        sleepFn: async () => {},
+      },
+    );
+
+    const abandoned = pam.ensureGrant(entitlementPath);
+    expect(await until(() => tokenCalls === 2, 1000)).toBe(true);
+    const abandonedOutcome = await settleWithin(abandoned, 1000);
+    expect(abandonedOutcome.status).toBe("rejected");
+
+    const replacement = await pam.ensureGrant(entitlementPath);
+    expect(replacement.name).toBe(grantName);
+    expect(replacement.cached).toBe(false);
+
+    releaseOldPollToken!();
+    await oldPollToken;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const cached = await pam.ensureGrant(entitlementPath);
+    expect(cached.name).toBe(grantName);
+    expect(cached.cached).toBe(true);
+    expect(withdrawn).toEqual([]);
+  });
+
+  test("supersession during cleanup token lookup does not retire or withdraw an adoptable grant", async () => {
+    const grantName = `${entitlementPath}/grants/adoptable`;
+    let tokenCalls = 0;
+    let createCalls = 0;
+    let pollStarted = false;
+    let withdrawCalls = 0;
+    let resolveOldPoll: ((response: Response) => void) | undefined;
+    let releaseCleanupToken: (() => void) | undefined;
+    const cleanupToken = new Promise<void>((resolve) => {
+      releaseCleanupToken = resolve;
+    });
+
+    const pam = createPamModule(
+      async () => {
+        tokenCalls++;
+        // After the old rotation's budget has expired, let its poll report the
+        // grant ACTIVE. The abandoned work then enters its cleanup withdrawal
+        // and wedges acquiring this third token before any POST is dispatched.
+        if (tokenCalls === 3) await cleanupToken;
+        return "token";
+      },
+      {
+        fetchFn: (async (url: string, init?: RequestInit) => {
+          const method = (init?.method ?? "GET").toUpperCase();
+          if (method === "POST" && url.includes(":withdraw")) {
+            withdrawCalls++;
+            return Response.json({ done: true });
+          }
+          if (method === "POST" && isGrantCollectionUrl(url)) {
+            createCalls++;
+            if (createCalls === 1) {
+              return Response.json({
+                name: grantName,
+                state: "APPROVAL_AWAITED",
+                requestedDuration: "3600s",
+              });
+            }
+            return Response.json({ error: { message: "Already exists" } }, { status: 409 });
+          }
+          if (method === "GET" && url.includes("?pageSize=")) {
+            return Response.json({ grants: [makeActivatedGrant(grantName)] });
+          }
+          if (method === "GET" && url.endsWith(grantName)) {
+            pollStarted = true;
+            return new Promise<Response>((resolve) => {
+              resolveOldPoll = resolve;
+            });
+          }
+          throw new Error(`unexpected fetch: ${method} ${url}`);
+        }) as unknown as typeof globalThis.fetch,
+        rotationBudgetMs: 100,
+        sleepFn: async () => {},
+      },
+    );
+
+    const abandoned = pam.ensureGrant(entitlementPath);
+    expect(await until(() => pollStarted, 1000)).toBe(true);
+    expect((await settleWithin(abandoned, 1000)).status).toBe("rejected");
+
+    // Complete the old poll only after its public budget has expired. It starts
+    // cleanup while it is still the owner, but blocks before the HTTP request.
+    resolveOldPoll!(Response.json(makeActivatedGrant(grantName)));
+    expect(await until(() => tokenCalls === 3, 1000)).toBe(true);
+
+    // The replacement supersedes that cleanup and can adopt the still-active
+    // grant. A pre-token retiring mark would instead classify it as blocking,
+    // withdraw it, and expose IAM propagation delay on a needless replacement.
+    const replacement = await pam.ensureGrant(entitlementPath);
+    expect(replacement.name).toBe(grantName);
+    expect(withdrawCalls).toBe(0);
+
+    releaseCleanupToken!();
+    await cleanupToken;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(withdrawCalls).toBe(0);
+    const cached = await pam.ensureGrant(entitlementPath);
+    expect(cached.name).toBe(grantName);
+    expect(cached.cached).toBe(true);
+  });
+
+  test("a replacement never adopts a grant whose withdraw POST already landed", async () => {
+    const retiringGrant = `${entitlementPath}/grants/retiring`;
+    const freshGrant = `${entitlementPath}/grants/fresh`;
+    let tokenCalls = 0;
+    let createCalls = 0;
+    let withdrawCalls = 0;
+    let releaseOldPollToken: (() => void) | undefined;
+    const oldPollToken = new Promise<void>((resolve) => {
+      releaseOldPollToken = resolve;
+    });
+    let resolveOldWithdraw: ((response: Response) => void) | undefined;
+
+    const pam = createPamModule(
+      async () => {
+        tokenCalls++;
+        // Let the original rotation's public budget expire while its first
+        // activation poll is waiting for an access token. Releasing this token
+        // sends it into best-effort cleanup while it still owns the rotation.
+        if (tokenCalls === 2) await oldPollToken;
+        return "token";
+      },
+      {
+        fetchFn: (async (url: string, init?: RequestInit) => {
+          const method = (init?.method ?? "GET").toUpperCase();
+          if (method === "POST" && url.includes(":withdraw")) {
+            withdrawCalls++;
+            if (withdrawCalls === 1) {
+              // The old cleanup request reached PAM, but its response/LRO has
+              // not settled when the replacement rotation starts.
+              return new Promise<Response>((resolve) => {
+                resolveOldWithdraw = resolve;
+              });
+            }
+            return Response.json({ done: true });
+          }
+          if (method === "POST" && isGrantCollectionUrl(url)) {
+            createCalls++;
+            if (createCalls === 1) {
+              return Response.json({
+                name: retiringGrant,
+                state: "APPROVAL_AWAITED",
+                requestedDuration: "3600s",
+              });
+            }
+            if (createCalls === 2) {
+              return Response.json({ error: { message: "Already exists" } }, { status: 409 });
+            }
+            return Response.json(makeActivatedGrant(freshGrant));
+          }
+          if (method === "GET" && url.includes("?pageSize=")) {
+            // grants.list can lag the withdrawal and still advertise ACTIVE.
+            return Response.json({ grants: [makeActivatedGrant(retiringGrant)] });
+          }
+          throw new Error(`unexpected fetch: ${method} ${url}`);
+        }) as unknown as typeof globalThis.fetch,
+        rotationBudgetMs: 100,
+        sleepFn: async () => {},
+      },
+    );
+
+    const abandoned = pam.ensureGrant(entitlementPath);
+    expect(await until(() => tokenCalls === 2, 1000)).toBe(true);
+    expect((await settleWithin(abandoned, 1000)).status).toBe("rejected");
+
+    releaseOldPollToken!();
+    expect(await until(() => withdrawCalls === 1, 1000)).toBe(true);
+
+    const replacement = await pam.ensureGrant(entitlementPath);
+    expect(replacement.name).toBe(freshGrant);
+    expect(createCalls).toBe(3);
+    expect(withdrawCalls).toBe(2);
+
+    // Let the abandoned cleanup settle so it cannot leave work behind after
+    // the test. Its owner signal is now superseded, so it stops before polling.
+    resolveOldWithdraw!(Response.json({ name: "operations/old-withdraw", done: false }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
   test("a budget abort during polling rejects promptly and withdraws the un-activated grant", async () => {
     // The created grant never activates; the budget must fire mid-poll, reject
     // the rotation, and best-effort withdraw the grant so it is not orphaned
@@ -2321,5 +3108,43 @@ describe("ensureGrant fetch timeout and rotation budget", () => {
     // The grant we created must be withdrawn (background cleanup), not orphaned.
     expect(await until(() => withdrawn.length > 0, 2000)).toBe(true);
     expect(withdrawn[0]).toContain("pending-1");
+  });
+});
+
+describe("scanForOpenGrants requester lookup failures", () => {
+  const entitlementPath = "projects/p/locations/global/entitlements/e";
+
+  function moduleWithLookup(getRequesterEmail: () => Promise<string>): PamModule {
+    return createPamModule(async () => "token", {
+      fetchFn: (async (url: string, init?: RequestInit) => {
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (method === "POST" && isGrantCollectionUrl(url)) {
+          return Response.json({ error: { message: "Already exists" } }, { status: 409 });
+        }
+        throw new Error(`unexpected fetch: ${method} ${url}`);
+      }) as unknown as typeof globalThis.fetch,
+      getRequesterEmail,
+    });
+  }
+
+  test("wraps an unrelated identity lookup failure with its cause", async () => {
+    const pam = moduleWithLookup(async () => {
+      throw new Error("tokeninfo returned 503");
+    });
+
+    const error = await pam.ensureGrant(entitlementPath).catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(PamRequesterLookupError);
+    expect((error as Error & { cause?: Error }).cause?.message).toContain("tokeninfo returned 503");
+  });
+
+  test("preserves CredentialsExpiredError for the typed re-auth path", async () => {
+    const expired = new CredentialsExpiredError("credentials expired");
+    const pam = moduleWithLookup(async () => {
+      throw expired;
+    });
+
+    const error = await pam.ensureGrant(entitlementPath).catch((err: unknown) => err);
+    expect(error).toBe(expired);
+    expect(error).not.toBeInstanceOf(PamRequesterLookupError);
   });
 });

@@ -7,6 +7,7 @@ import { describeCommand } from "../../gate/summarize-command.ts";
 import { handleAdminRequest } from "../../gate/admin-handlers.ts";
 import { runApprove, runPending } from "../../commands/approve.ts";
 import type { Config } from "../../config.ts";
+import { GateTimeoutError } from "../../gate/connection.ts";
 import { makeGateDeps as makeDeps } from "../gate/test-helpers.ts";
 
 describe("approve command (admin socket)", () => {
@@ -347,6 +348,29 @@ describe("runApprove and runPending", () => {
     expect(output()).toContain("gcp-authcalator pending");
   });
 
+  test("rejects malformed request IDs locally without contacting the admin socket", async () => {
+    const { config } = setup();
+    const fetchFn = spyOn(globalThis, "fetch");
+
+    await expect(
+      runApprove(config, ["../../health"], {
+        yes: true,
+        fetchFn: fetchFn as unknown as typeof globalThis.fetch,
+      }),
+    ).rejects.toThrow("process.exit");
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(errorSpy.mock.calls.flat().join(" ")).toContain("invalid pending request ID");
+
+    fetchFn.mockClear();
+    await expect(
+      runPending(config, ["A".repeat(32)], {
+        fetchFn: fetchFn as unknown as typeof globalThis.fetch,
+      }),
+    ).rejects.toThrow("process.exit");
+    expect(fetchFn).not.toHaveBeenCalled();
+    fetchFn.mockRestore();
+  });
+
   test("shows requests that reported no command", async () => {
     const { config, queue } = setup();
     const promise = queue.enqueue("user@example.com");
@@ -408,6 +432,78 @@ describe("runApprove and runPending", () => {
       "process.exit",
     );
     expect(errorSpy.mock.calls.flat().join(" ")).toContain("not found (may have expired)");
+  });
+
+  test("bounds both the inspect and resolve admin-socket requests", async () => {
+    const signals: AbortSignal[] = [];
+    const id = "a".repeat(32);
+    const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      signals.push(init!.signal!);
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.endsWith("/approve")) return Response.json({ status: "approved" });
+      return Response.json({
+        id,
+        email: "user@example.com",
+        createdAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      });
+    }) as unknown as typeof globalThis.fetch;
+    const config = { admin_socket_path: "/tmp/test-admin.sock" } as Config;
+
+    await runApprove(config, [id], { yes: true, fetchFn });
+
+    expect(signals).toHaveLength(2);
+  });
+
+  test("bounds pending-list requests", async () => {
+    let signal: AbortSignal | null = null;
+    const fetchFn = (async (_input: string | URL | Request, init?: RequestInit) => {
+      signal = init?.signal ?? null;
+      return Response.json({ pending: [] });
+    }) as unknown as typeof globalThis.fetch;
+    const config = { admin_socket_path: "/tmp/test-admin.sock" } as Config;
+
+    await runPending(config, [], { fetchFn });
+
+    expect(signal).toBeInstanceOf(AbortSignal);
+  });
+
+  test("reports a wedged admin socket as a timeout", async () => {
+    const fetchFn = (async () => {
+      throw new GateTimeoutError(
+        5_000,
+        "http://localhost/pending",
+        new DOMException("The operation was aborted", "AbortError"),
+      );
+    }) as unknown as typeof globalThis.fetch;
+    const config = { admin_socket_path: "/tmp/test-admin.sock" } as Config;
+
+    await expect(runPending(config, [], { fetchFn })).rejects.toThrow("process.exit");
+    const errors = errorSpy.mock.calls.flat().join(" ");
+    expect(errors).toContain("admin socket not responding");
+    expect(errors).not.toContain("could not connect");
+  });
+
+  test("reports an unreachable admin socket with its configured path", async () => {
+    const fetchFn = (async () => {
+      throw new Error("FailedToOpenSocket");
+    }) as unknown as typeof globalThis.fetch;
+    const config = { admin_socket_path: "/tmp/missing-admin.sock" } as Config;
+
+    await expect(runPending(config, [], { fetchFn })).rejects.toThrow("process.exit");
+    const errors = errorSpy.mock.calls.flat().join(" ");
+    expect(errors).toContain("could not connect to the admin socket");
+    expect(errors).toContain("/tmp/missing-admin.sock");
+  });
+
+  test("reports a non-JSON admin error without exposing a SyntaxError", async () => {
+    const fetchFn = (async () =>
+      new Response("Internal Server Error", { status: 500 })) as unknown as typeof globalThis.fetch;
+    const config = { admin_socket_path: "/tmp/test-admin.sock" } as Config;
+
+    await expect(runPending(config, [], { fetchFn })).rejects.toThrow("process.exit");
+    expect(errorSpy.mock.calls.flat().join(" ")).toContain("admin socket returned HTTP 500");
   });
 
   describe("the real stdin reader", () => {

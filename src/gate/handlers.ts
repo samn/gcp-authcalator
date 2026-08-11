@@ -52,6 +52,12 @@ function errorBodyFromException(err: unknown): ErrorResponse {
   return { error: message };
 }
 
+function assertClientConnected(req: Request, phase: string): void {
+  if (req.signal.aborted) {
+    throw new Error(`Client disconnected before ${phase}; prod acquisition was cancelled`);
+  }
+}
+
 /**
  * Pure request handler — routes incoming requests and delegates to deps.
  * All responses are JSON. Audit entries are written for token requests.
@@ -197,23 +203,29 @@ async function handleSessionTokenRefresh(
   };
 
   try {
-    // Renew PAM grant if the session has a PAM policy (grants expire
-    // independently of the session and must be kept alive for the token
-    // to carry elevated permissions). Pass the command summary captured
-    // at session creation so renewed grants carry the same justification
-    // as the initial grant in the GCP PAM audit log.
+    assertClientConnected(req, "session refresh");
+    // Renew PAM and mint concurrently. The access token does not embed IAM
+    // bindings, so it is safe to mint while PAM waits for activation; it is
+    // returned only after both operations succeed.
+    const pamPromise =
+      session.pamPolicy && deps.ensurePamGrant
+        ? deps.ensurePamGrant(session.pamPolicy, session.commandSummary)
+        : Promise.resolve(undefined);
+    const [grantResult, cached] = await Promise.all([
+      pamPromise,
+      deps.mintProdToken(session.scopes, session.ttlSeconds),
+    ]);
+
     let pamAuditFields: Pick<AuditEntry, "pam_grant" | "pam_cached"> = {};
     let pamGrantExpiresAt: Date | undefined;
-    if (session.pamPolicy && deps.ensurePamGrant) {
-      const grantResult = await deps.ensurePamGrant(session.pamPolicy, session.commandSummary);
+    if (grantResult) {
       pamAuditFields = {
         pam_grant: grantResult.name,
         pam_cached: grantResult.cached,
       };
       pamGrantExpiresAt = grantResult.expiresAt;
     }
-
-    const cached = await deps.mintProdToken(session.scopes, session.ttlSeconds);
+    assertClientConnected(req, "session token response");
     const expiresIn = expiresInClampedToGrant(cached, pamGrantExpiresAt);
 
     const body: TokenResponse = {
@@ -293,6 +305,8 @@ async function handleDevToken(
 /** Result of a successful acquireProdAccess call. */
 interface ProdAccessGrant {
   email: string;
+  /** Token minted in parallel with PAM activation after confirmation. */
+  token: CachedToken;
   effectivePamPolicy?: string;
   /** Redacted, length-bounded summary of the wrapped command, if any. */
   commandSummary?: string;
@@ -338,9 +352,9 @@ function expiresInClampedToGrant(token: CachedToken, grantExpiresAt: Date | unde
  * rate-limit, confirm (or auto-approve on the operator socket), and ensure
  * PAM grant.
  *
- * Returns a ProdAccessGrant on success or a Response on error.
- * On success the rate limiter has been acquired — the caller MUST call
- * deps.prodRateLimiter.release() in both its success and error paths.
+ * Returns a ProdAccessGrant on success or a Response on error. The rate
+ * limiter protects only confirmation UI: it is released as soon as the
+ * confirmation resolves, before potentially slow PAM propagation begins.
  */
 async function acquireProdAccess(
   req: Request,
@@ -350,6 +364,7 @@ async function acquireProdAccess(
     pamPolicyParam?: string;
     auditEndpoint: string;
     ttlSeconds?: number;
+    scopes?: string[];
   },
 ): Promise<ProdAccessGrant | Response> {
   // Resolve effective PAM policy: query param > config default > none
@@ -445,8 +460,17 @@ async function acquireProdAccess(
     return jsonResponse({ error: gate.reason }, 429);
   }
 
+  let limiterHeld = true;
+  const releaseLimiter = (result: "granted" | "denied" | "error") => {
+    if (!limiterHeld) return;
+    limiterHeld = false;
+    deps.prodRateLimiter.release(result);
+  };
+
   try {
+    assertClientConnected(req, "identity lookup");
     const email = await deps.getIdentityEmail();
+    assertClientConnected(req, "confirmation");
 
     const pendingId = req.headers.get("X-Pending-Id") ?? undefined;
 
@@ -457,7 +481,7 @@ async function acquireProdAccess(
       approved = await deps.confirmProdAccess(email, command, effectivePamPolicy, pendingId);
     }
     if (!approved) {
-      deps.prodRateLimiter.release("denied");
+      releaseLimiter("denied");
       deps.writeAuditLog({
         ...auditBase,
         timestamp: new Date().toISOString(),
@@ -467,21 +491,36 @@ async function acquireProdAccess(
       return jsonResponse({ error: "Prod access denied by user" }, 403);
     }
 
-    // Request PAM grant if a policy is configured
+    assertClientConnected(req, "PAM grant acquisition");
+    releaseLimiter("granted");
+
+    // PAM activation and OAuth minting are independent after approval: IAM
+    // evaluates permissions when the token is used, not when it is minted.
+    // Run them together so their bounded waits do not add serially.
+    const pamPromise =
+      effectivePamPolicy && deps.ensurePamGrant
+        ? deps.ensurePamGrant(effectivePamPolicy, commandSummary)
+        : Promise.resolve(undefined);
+    const [grantResult, token] = await Promise.all([
+      pamPromise,
+      deps.mintProdToken(opts.scopes, opts.ttlSeconds),
+    ]);
+
     let pamAuditFields: Pick<AuditEntry, "pam_grant" | "pam_cached"> = {};
     let pamGrantExpiresAt: Date | undefined;
-    if (effectivePamPolicy && deps.ensurePamGrant) {
-      const grantResult = await deps.ensurePamGrant(effectivePamPolicy, commandSummary);
+    if (grantResult) {
       pamAuditFields = {
         pam_grant: grantResult.name,
         pam_cached: grantResult.cached,
       };
       pamGrantExpiresAt = grantResult.expiresAt;
     }
+    assertClientConnected(req, "production token mint");
 
     const grantedAuditBase = autoApprove ? { ...auditBase, auto_approved: true } : auditBase;
     return {
       email,
+      token,
       effectivePamPolicy,
       commandSummary,
       pamAuditFields,
@@ -489,7 +528,7 @@ async function acquireProdAccess(
       auditBase: grantedAuditBase,
     };
   } catch (err) {
-    deps.prodRateLimiter.release("error");
+    releaseLimiter("error");
 
     const errorBody = errorBodyFromException(err);
 
@@ -516,19 +555,19 @@ async function handleProdToken(
     pamPolicyParam,
     auditEndpoint: "/token?level=prod",
     ttlSeconds,
+    scopes,
   });
   if (grant instanceof Response) return grant;
 
   try {
-    const cached = await deps.mintProdToken(scopes, ttlSeconds);
-    const expiresIn = expiresInClampedToGrant(cached, grant.pamGrantExpiresAt);
-
-    deps.prodRateLimiter.release("granted");
+    assertClientConnected(req, "production token response");
+    const expiresIn = expiresInClampedToGrant(grant.token, grant.pamGrantExpiresAt);
 
     const body: TokenResponse = {
-      access_token: cached.access_token,
+      access_token: grant.token.access_token,
       expires_in: expiresIn,
       token_type: "Bearer",
+      email: grant.email,
     };
 
     deps.writeAuditLog({
@@ -541,8 +580,6 @@ async function handleProdToken(
 
     return jsonResponse(body);
   } catch (err) {
-    deps.prodRateLimiter.release("error");
-
     const errorBody = errorBodyFromException(err);
 
     deps.writeAuditLog({
@@ -629,13 +666,13 @@ async function handleCreateSession(
     pamPolicyParam,
     auditEndpoint: "/session",
     ttlSeconds: ttlResult.ttlSeconds,
+    scopes,
   });
   if (grant instanceof Response) return grant;
 
   try {
-    // Mint the initial token
-    const cached = await deps.mintProdToken(scopes, ttlResult.ttlSeconds);
-    const expiresIn = expiresInClampedToGrant(cached, grant.pamGrantExpiresAt);
+    assertClientConnected(req, "session creation");
+    const expiresIn = expiresInClampedToGrant(grant.token, grant.pamGrantExpiresAt);
 
     // Create the session
     const effectiveTokenTtl = ttlResult.ttlSeconds ?? deps.defaultTokenTtlSeconds;
@@ -649,11 +686,9 @@ async function handleCreateSession(
       sessionLifetimeSeconds: effectiveSessionTtl,
     });
 
-    deps.prodRateLimiter.release("granted");
-
     const body: SessionResponse = {
       session_id: session.id,
-      access_token: cached.access_token,
+      access_token: grant.token.access_token,
       expires_in: expiresIn,
       token_type: "Bearer",
       email: grant.email,
@@ -670,8 +705,6 @@ async function handleCreateSession(
 
     return jsonResponse(body);
   } catch (err) {
-    deps.prodRateLimiter.release("error");
-
     const errorBody = errorBodyFromException(err);
 
     deps.writeAuditLog({

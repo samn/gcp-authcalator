@@ -1,9 +1,13 @@
+import { randomUUID } from "node:crypto";
+
+import { CredentialsExpiredError } from "./credentials-error.ts";
+
 // ---------------------------------------------------------------------------
 // GCP Privileged Access Manager (PAM) module
 //
 // Requests just-in-time PAM grants to temporarily elevate the engineer's
-// IAM roles. Grants are cached, withdrawn when stale or expired, and
-// best-effort withdrawn on shutdown.
+// IAM roles. Grants are cached, withdrawn when stale or expired, and every
+// grant known to be owned by this module is best-effort withdrawn on shutdown.
 //
 // API quirks and how we handle them (see plans/pam-rotation-drain-margin.md
 // and plans/pam-withdraw-own-grants.md for the full audit):
@@ -104,6 +108,9 @@ const POLL_TIMEOUT_MS = 120_000;
  */
 const PAM_FETCH_TIMEOUT_MS = 10_000;
 
+/** Maximum time shutdown waits for admitted rotations and withdraw dispatch. */
+const PAM_SHUTDOWN_TIMEOUT_MS = 10_000;
+
 /**
  * Overall wall-clock budget for one grant rotation (`doRotateGrant`). A
  * backstop, not a tight SLA, deliberately set ABOVE the worst-case sum of the
@@ -140,6 +147,9 @@ const ENTITLEMENT_ID_PATTERN = /^[a-z][a-z0-9-]*$/;
 const LIST_GRANTS_PAGE_SIZE = 100;
 /** Safety bound on pagination when scanning for an active grant. */
 const LIST_GRANTS_MAX_PAGES = 10;
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
 /**
  * Grant states that represent an active (usable) grant. PAM ships both
@@ -190,10 +200,10 @@ const FOLDER_ENTITLEMENT_PATH_PATTERN =
 const ORG_ENTITLEMENT_PATH_PATTERN =
   /^organizations\/([0-9]+)\/locations\/([^/]+)\/entitlements\/([^/]+)$/;
 
-/** Parse a GCP duration string (e.g. "3600s") to seconds. Returns 0 on failure. */
+/** Parse protobuf JSON duration seconds, including up to nine fractional digits. */
 function parseDurationSeconds(duration?: string): number {
   if (!duration) return 0;
-  const match = /^(\d+)s$/.exec(duration);
+  const match = /^(\d+(?:\.\d{1,9})?)s$/.exec(duration);
   return match ? Number(match[1]) : 0;
 }
 
@@ -234,6 +244,10 @@ export interface PamModuleOptions {
   fetchTimeoutMs?: number;
   /** Overall wall-clock budget (ms) for one grant rotation. Defaults to ROTATION_BUDGET_MS. */
   rotationBudgetMs?: number;
+  /** Overall shutdown cleanup budget (ms). Defaults to PAM_SHUTDOWN_TIMEOUT_MS. */
+  shutdownTimeoutMs?: number;
+  /** UUID factory for grants.create idempotency keys. Tests may inject a deterministic factory. */
+  requestIdFactory?: () => string;
   /**
    * Email of the identity the gate requests grants as. When set, the
    * open-grant scan only considers grants whose `requester` matches —
@@ -246,7 +260,7 @@ export interface PamModuleOptions {
 export interface PamModule {
   /** Ensure an active PAM grant exists for the entitlement. Caches grants. */
   ensureGrant: (entitlementPath: string, justification?: string) => Promise<PamGrantResult>;
-  /** Best-effort withdraw all cached active grants. Called on shutdown. */
+  /** Stop new rotations and best-effort withdraw every known owned grant. */
   withdrawAll: () => Promise<void>;
 }
 
@@ -256,7 +270,8 @@ export interface PamGrantResult {
   /** Grant state ("ACTIVE" or "ACTIVATED" — PAM ships both spellings). */
   state: string;
   /**
-   * Computed grant expiry (createTime + requestedDuration). Callers minting
+   * Computed grant expiry (accessGrantTime + requestedDuration, with a
+   * conservative create-time fallback). Callers minting
    * an access token under this grant must clamp the token's TTL — see
    * `expiresInClampedToGrant` in handlers.ts, which subtracts DRAIN_MARGIN_MS
    * before clamping to keep concurrent clients safe across rotation.
@@ -274,10 +289,15 @@ interface PamGrantResponse {
   createTime?: string;
   timeline?: {
     events?: Array<{
-      activateTime?: string;
       eventTime?: string;
+      activated?: Record<string, never>;
     }>;
   };
+  auditTrail?: {
+    accessGrantTime?: string;
+    accessRemoveTime?: string;
+  };
+  externallyModified?: boolean;
   privilegedAccess?: unknown;
   justification?: unknown;
   requestedDuration?: string;
@@ -293,6 +313,30 @@ interface CachedGrant {
   name: string;
   state: string;
   expiresAt: Date;
+}
+
+/** Distinguishes requester-identity failures from PAM API failures. */
+export class PamRequesterLookupError extends Error {
+  constructor(cause: unknown) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    super(
+      `could not resolve the gate's requester email for PAM open-grant scan: ${detail}`,
+      cause instanceof Error ? { cause } : undefined,
+    );
+    this.name = "PamRequesterLookupError";
+  }
+}
+
+/**
+ * Marks an HTTP exchange whose outcome is ambiguous: PAM may have processed
+ * the request even though the client did not receive the complete response.
+ * grants.create retries these failures once with the same requestId.
+ */
+class PamAmbiguousRequestError extends Error {
+  constructor(message: string, cause: unknown) {
+    super(message, cause instanceof Error ? { cause } : undefined);
+    this.name = "PamAmbiguousRequestError";
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -385,21 +429,97 @@ export function createPamModule(
 ): PamModule {
   const fetchFn = options.fetchFn ?? globalThis.fetch;
   const now = options.now ?? Date.now;
-  const grantDuration = `${options.grantDurationSeconds ?? FALLBACK_GRANT_DURATION_SECONDS}s`;
+  const grantDurationSeconds = options.grantDurationSeconds ?? FALLBACK_GRANT_DURATION_SECONDS;
+  const grantDuration = `${grantDurationSeconds}s`;
   const sleep =
     options.sleepFn ?? ((ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms)));
   const getRequesterEmail = options.getRequesterEmail;
   const fetchTimeoutMs = options.fetchTimeoutMs ?? PAM_FETCH_TIMEOUT_MS;
   const rotationBudgetMs = options.rotationBudgetMs ?? ROTATION_BUDGET_MS;
+  const shutdownTimeoutMs = options.shutdownTimeoutMs ?? PAM_SHUTDOWN_TIMEOUT_MS;
+  const requestIdFactory = options.requestIdFactory ?? randomUUID;
 
   const grantCache = new Map<string, CachedGrant>();
+  // Names created by this module, or observed with a requester identity that
+  // matches the module's authenticated identity. Shutdown uses this ownership
+  // set instead of blindly withdrawing every cached grant: without requester
+  // lookup, conflict recovery may reuse a grant whose ownership is unknown.
+  const ownedOpenGrantNames = new Set<string>();
+  // A withdraw POST can land just before its rotation is superseded while PAM
+  // still reports the grant ACTIVE. Remember that local intent immediately so
+  // a replacement conflict scan never adopts access that is already being
+  // removed. Entries are cleared only after PAM itself reports a terminal
+  // state; an LRO completing before grants.list catches up is not sufficient.
+  const retiringGrantNames = new Set<string>();
   // Single-flight rotation per entitlement: concurrent `ensureGrant` calls
   // that miss the cache fast-path coalesce onto one rotation. The gate is
   // single-instance per machine (server.ts:91), so in-process coordination
   // is sufficient — no distributed lock needed.
   const inFlightRotations = new Map<string, Promise<PamGrantResult>>();
+  // The public rotation promise can reject on its wall-clock budget while its
+  // underlying work remains stuck in unabortable access-token acquisition.
+  // Shutdown tracks the underlying work separately and waits only within its
+  // own bounded cleanup budget.
+  const admittedRotationWork = new Set<Promise<PamGrantResult>>();
+  // A rotation can outlive its public promise when the wall-clock budget
+  // expires while getAccessToken() is wedged (that API is not abortable).
+  // Track the latest owner separately from the single-flight promise so the
+  // abandoned work cannot mutate state after a replacement rotation starts.
+  interface RotationOwner {
+    id: number;
+    controller: AbortController;
+  }
+  const rotationOwners = new Map<string, RotationOwner>();
+  let nextRotationOwner = 0;
+  let shuttingDown = false;
+  let shutdownController: AbortController | undefined;
+  let shutdownPromise: Promise<void> | undefined;
+  const shutdownWithdrawals = new Map<string, Promise<boolean>>();
+
+  function rememberOwnedGrant(grantName: string): void {
+    ownedOpenGrantNames.add(grantName);
+    if (shuttingDown) scheduleShutdownWithdraw(grantName);
+  }
+
+  function isRotationOwner(entitlementPath: string, owner: RotationOwner): boolean {
+    return rotationOwners.get(entitlementPath) === owner;
+  }
+
+  function rotationStoppedError(
+    entitlementPath: string,
+    owner: RotationOwner,
+    signal?: AbortSignal,
+  ): Error {
+    if (signal?.aborted) {
+      return signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason));
+    }
+    if (owner.controller.signal.aborted) {
+      const { reason } = owner.controller.signal;
+      return reason instanceof Error ? reason : new Error(String(reason));
+    }
+    return new Error(
+      `PAM grant rotation for "${entitlementPath}" was superseded (owner ${owner.id})`,
+    );
+  }
+
+  function assertRotationOwner(
+    entitlementPath: string,
+    owner: RotationOwner,
+    signal?: AbortSignal,
+  ): void {
+    if (
+      signal?.aborted ||
+      owner.controller.signal.aborted ||
+      !isRotationOwner(entitlementPath, owner)
+    ) {
+      throw rotationStoppedError(entitlementPath, owner, signal);
+    }
+  }
 
   function hasUsableLifetime(expiresAt: Date): boolean {
+    // Rotation must begin at the same boundary used to clamp minted tokens.
+    // Rotating any earlier could withdraw IAM access while a previously minted
+    // token is still within the lifetime we advertised to its caller.
     return expiresAt.getTime() - now() > DRAIN_MARGIN_MS;
   }
 
@@ -407,8 +527,22 @@ export function createPamModule(
     url: string,
     init?: RequestInit,
     rotationSignal?: AbortSignal,
+    beforeRequest?: () => void,
   ): Promise<Response> {
+    if (rotationSignal?.aborted) {
+      throw rotationSignal.reason instanceof Error
+        ? rotationSignal.reason
+        : new Error(String(rotationSignal.reason));
+    }
     const token = await getAccessToken();
+    if (rotationSignal?.aborted) {
+      throw rotationSignal.reason instanceof Error
+        ? rotationSignal.reason
+        : new Error(String(rotationSignal.reason));
+    }
+    // Ownership may change while the unabortable token lookup is pending.
+    // Check immediately before issuing a state-changing cleanup request.
+    beforeRequest?.();
     // Combine the per-request timeout with the rotation-wide budget signal (when
     // a rotation is in flight) so the overall budget can cancel an in-flight
     // call, not just the next one. If the budget already fired, the combined
@@ -418,7 +552,7 @@ export function createPamModule(
       ? AbortSignal.any([timeoutSignal, rotationSignal])
       : timeoutSignal;
     try {
-      return await fetchFn(url, {
+      const response = await fetchFn(url, {
         ...init,
         signal,
         headers: {
@@ -426,6 +560,15 @@ export function createPamModule(
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
         },
+      });
+      // fetch() resolves once headers arrive. Buffer the small PAM JSON body
+      // before returning so a peer that stalls mid-body remains inside this
+      // per-request timeout and receives the same actionable error mapping.
+      const body = await response.arrayBuffer();
+      return new Response(body.byteLength > 0 ? body : null, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
       });
     } catch (err) {
       // A rotation-budget abort surfaces the budget error (the abort reason),
@@ -438,22 +581,33 @@ export function createPamModule(
       // Otherwise surface the abort as an actionable message instead of a bare
       // DOMException, so the gate log / client error names the stalled call.
       if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
-        throw new Error(`PAM API request timed out after ${fetchTimeoutMs}ms: ${url}`, {
-          cause: err,
-        });
+        throw new PamAmbiguousRequestError(
+          `PAM API request timed out after ${fetchTimeoutMs}ms: ${url}`,
+          err,
+        );
       }
-      throw err;
+      // A connection failure or truncated response does not reveal whether a
+      // mutating request reached PAM. Preserve that distinction so create can
+      // safely retry once with its idempotency key; callers of read-only and
+      // withdraw operations still receive the original diagnostic as cause.
+      throw new PamAmbiguousRequestError(err instanceof Error ? err.message : String(err), err);
     }
   }
 
-  type CreateGrantOnceResult = { kind: "ok"; grant: PamGrantResponse } | { kind: "open-conflict" };
+  type CreateGrantAttemptResult =
+    | { kind: "ok"; grant: PamGrantResponse }
+    | { kind: "open-conflict" };
 
-  async function createGrantOnce(
+  async function createGrantAttempt(
     entitlementPath: string,
     justification?: string,
     signal?: AbortSignal,
-  ): Promise<CreateGrantOnceResult> {
-    const url = `${PAM_API_BASE}/${entitlementPath}/grants`;
+  ): Promise<CreateGrantAttemptResult> {
+    const requestId = requestIdFactory();
+    if (!UUID_PATTERN.test(requestId) || requestId.toLowerCase() === NIL_UUID) {
+      throw new Error(`PAM grants.create requestId factory returned an invalid UUID: ${requestId}`);
+    }
+    const url = `${PAM_API_BASE}/${entitlementPath}/grants?requestId=${encodeURIComponent(requestId)}`;
     const body = {
       requestedDuration: grantDuration,
       justification: {
@@ -461,14 +615,36 @@ export function createPamModule(
       },
     };
 
-    const res = await pamFetch(
-      url,
-      {
-        method: "POST",
-        body: JSON.stringify(body),
-      },
-      signal,
-    );
+    let res: Response;
+    for (let attempt = 0; ; attempt++) {
+      if (signal?.aborted) {
+        throw signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason));
+      }
+      try {
+        res = await pamFetch(
+          url,
+          {
+            method: "POST",
+            body: JSON.stringify(body),
+          },
+          signal,
+        );
+      } catch (err) {
+        if (attempt === 0 && err instanceof PamAmbiguousRequestError && !signal?.aborted) {
+          continue;
+        }
+        throw err;
+      }
+
+      // PAM explicitly supports idempotent create retries via requestId. One
+      // retry covers a transient backend/rate-limit response without turning a
+      // persistent outage into a long client wait. Deterministic 4xx responses
+      // (including the open-grant conflict handled below) are never retried.
+      if (attempt === 0 && (res.status === 429 || res.status >= 500)) {
+        continue;
+      }
+      break;
+    }
 
     if (res.status === 409) {
       return { kind: "open-conflict" };
@@ -499,7 +675,12 @@ export function createPamModule(
       throw new Error(`PAM API error (${res.status}): ${text}`);
     }
 
-    return { kind: "ok", grant: (await res.json()) as PamGrantResponse };
+    const grant = (await res.json()) as PamGrantResponse;
+    // A successful response to our create request establishes ownership even
+    // while the grant is still pending and has not reached the cache. Record
+    // it before returning so a concurrent shutdown cannot miss it.
+    if (grant.name) rememberOwnedGrant(grant.name);
+    return { kind: "ok", grant };
   }
 
   interface OpenGrantScan {
@@ -515,6 +696,7 @@ export function createPamModule(
      */
     blocking: Array<PamGrantResponse & { name: string }>;
     scanned: number;
+    pagesScanned: number;
     /** Non-terminal grants excluded because they belong to other requesters. */
     skippedOtherRequester: number;
   }
@@ -536,13 +718,24 @@ export function createPamModule(
     // blocking the create, and they're the only ones withdraw may touch.
     // Grants with no requester field are skipped: never end a grant we
     // can't attribute to ourselves.
-    const requester = getRequesterEmail ? (await getRequesterEmail()).toLowerCase() : undefined;
+    let requester: string | undefined;
+    if (getRequesterEmail) {
+      try {
+        requester = (await getRequesterEmail()).toLowerCase();
+      } catch (err) {
+        // Preserve the typed credential error used by the gate/client re-auth
+        // path. Other lookup failures get their own diagnosable classification.
+        if (err instanceof CredentialsExpiredError) throw err;
+        throw new PamRequesterLookupError(err);
+      }
+    }
     const isOwnGrant = (g: PamGrantResponse): boolean =>
       requester === undefined || g.requester?.toLowerCase() === requester;
 
     const baseUrl = `${PAM_API_BASE}/${entitlementPath}/grants?pageSize=${LIST_GRANTS_PAGE_SIZE}`;
     const blocking: Array<PamGrantResponse & { name: string }> = [];
     let scanned = 0;
+    let pagesScanned = 0;
     let skippedOtherRequester = 0;
     let pageToken: string | undefined;
 
@@ -560,20 +753,41 @@ export function createPamModule(
         nextPageToken?: string;
       };
       const grants = data.grants ?? [];
+      pagesScanned++;
       scanned += grants.length;
 
       // Once we find a usable grant we're done — the caller wants to reuse
       // it directly without withdrawing the blocking ones (they'll age out
       // on their own once we stop conflicting with them).
       for (const g of grants) {
-        if (typeof g.name !== "string" || !g.state || isTerminalState(g.state)) continue;
+        if (typeof g.name !== "string") continue;
+        if (isTerminalState(g.state)) {
+          retiringGrantNames.delete(g.name);
+          ownedOpenGrantNames.delete(g.name);
+          continue;
+        }
+        if (!g.state) continue;
         if (!isOwnGrant(g)) {
           skippedOtherRequester++;
           continue;
         }
         const named = g as PamGrantResponse & { name: string };
-        if (isActiveState(g.state) && hasUsableLifetime(computeGrantExpiry(named))) {
-          return { usable: named, blocking, scanned, skippedOtherRequester };
+        // Only a resolved, matching requester proves that a grant discovered
+        // by list belongs to this module. With no requester lookup configured,
+        // legacy callers may still reuse it, but shutdown must not withdraw it.
+        if (requester !== undefined) rememberOwnedGrant(g.name);
+        if (retiringGrantNames.has(g.name)) {
+          blocking.push(named);
+          continue;
+        }
+        const expiry = computeGrantExpiry(named);
+        if (
+          isActiveState(g.state) &&
+          !g.externallyModified &&
+          expiry !== null &&
+          hasUsableLifetime(expiry)
+        ) {
+          return { usable: named, blocking, scanned, pagesScanned, skippedOtherRequester };
         }
         // Active-but-expired (state lag) or still pending — either way it
         // holds the open-grant slot and withdraw can clear it.
@@ -584,7 +798,7 @@ export function createPamModule(
       pageToken = data.nextPageToken;
     }
 
-    return { blocking, scanned, skippedOtherRequester };
+    return { blocking, scanned, pagesScanned, skippedOtherRequester };
   }
 
   async function createGrantWithRecovery(
@@ -592,7 +806,7 @@ export function createPamModule(
     justification?: string,
     signal?: AbortSignal,
   ): Promise<PamGrantResponse> {
-    const first = await createGrantOnce(entitlementPath, justification, signal);
+    const first = await createGrantAttempt(entitlementPath, justification, signal);
     if (first.kind === "ok") return first.grant;
 
     // 409 / 400 FAILED_PRECONDITION ("open Grant"): another grant of ours is
@@ -610,7 +824,7 @@ export function createPamModule(
           : "";
       throw new Error(
         `PAM grant conflict but no open grant of ours found for "${entitlementPath}" ` +
-          `(scanned ${scan.scanned} grant(s) across ${LIST_GRANTS_MAX_PAGES} page(s)${otherNote})`,
+          `(scanned ${scan.scanned} grant(s) across ${scan.pagesScanned} page(s)${otherNote})`,
       );
     }
 
@@ -627,7 +841,7 @@ export function createPamModule(
       )
     ).filter(Boolean).length;
 
-    const retry = await createGrantOnce(entitlementPath, justification, signal);
+    const retry = await createGrantAttempt(entitlementPath, justification, signal);
     if (retry.kind === "ok") return retry.grant;
 
     // The retry still conflicts after we waited for withdraw to complete.
@@ -677,6 +891,7 @@ export function createPamModule(
       }
 
       if (isTerminalState(grant.state)) {
+        ownedOpenGrantNames.delete(grantName);
         throw new GrantTerminalStateError(
           `PAM grant entered terminal state ${grant.state}: ${grantName}`,
         );
@@ -692,26 +907,38 @@ export function createPamModule(
     );
   }
 
-  function computeGrantExpiry(grant: PamGrantResponse): Date {
-    // Derive expiry from the grant's actual creation time + requested duration.
-    // This is critical for the 409 conflict path where we reuse a pre-existing
-    // grant that may have been created well before this process found it.
+  function computeGrantExpiry(grant: PamGrantResponse): Date | null {
+    // Access duration starts when PAM grants access, which may be well after
+    // createTime on approval-based entitlements. Prefer the explicit audit
+    // timestamp, then the activated timeline event. createTime is a safe
+    // conservative fallback: it can rotate early but cannot overstate access.
     const durationMs = parseDurationSeconds(grant.requestedDuration) * 1000;
-    const createMs = grant.createTime ? new Date(grant.createTime).getTime() : NaN;
+    const activatedEvent = grant.timeline?.events?.find((event) => event.activated !== undefined);
+    const anchor =
+      grant.auditTrail?.accessGrantTime ?? activatedEvent?.eventTime ?? grant.createTime;
+    const anchorMs = anchor ? new Date(anchor).getTime() : NaN;
 
-    if (durationMs > 0 && !isNaN(createMs)) {
-      return new Date(createMs + durationMs);
+    if (durationMs > 0 && !isNaN(anchorMs)) {
+      return new Date(anchorMs + durationMs);
     }
 
-    // Fallback: conservative 15-minute TTL when API fields are missing
-    return new Date(now() + 15 * 60 * 1000);
+    return null;
   }
 
-  function cacheGrant(entitlementPath: string, grant: PamGrantResponse): CachedGrant {
+  function cacheGrant(
+    entitlementPath: string,
+    grant: PamGrantResponse,
+    requestedAtMs: number,
+  ): CachedGrant {
     const entry: CachedGrant = {
       name: grant.name!,
       state: grant.state!,
-      expiresAt: computeGrantExpiry(grant),
+      // A newly-created response may omit timestamps/duration. Anchor the
+      // fallback at request start (never cache time after a long activation)
+      // and use the duration we sent. Activation cannot precede this anchor,
+      // so the result remains conservative without forcing multi-hour grants
+      // through needless 15-minute IAM-propagation churn.
+      expiresAt: computeGrantExpiry(grant) ?? new Date(requestedAtMs + grantDurationSeconds * 1000),
     };
     grantCache.set(entitlementPath, entry);
     return entry;
@@ -750,6 +977,10 @@ export function createPamModule(
     entitlementPath: string,
     justification?: string,
   ): Promise<PamGrantResult> {
+    if (shuttingDown) {
+      throw new Error("PAM module is shutting down; new grant requests are disabled");
+    }
+
     const cached = grantCache.get(entitlementPath);
     if (cached && hasUsableLifetime(cached.expiresAt)) {
       return {
@@ -763,9 +994,25 @@ export function createPamModule(
     const pending = inFlightRotations.get(entitlementPath);
     if (pending) return pending;
 
-    const rotation = withRotationBudget((signal) =>
-      doRotateGrant(entitlementPath, justification, cached, signal),
+    const previousOwner = rotationOwners.get(entitlementPath);
+    const owner: RotationOwner = {
+      id: ++nextRotationOwner,
+      controller: new AbortController(),
+    };
+    previousOwner?.controller.abort(
+      new Error(`PAM grant rotation for "${entitlementPath}" was superseded by owner ${owner.id}`),
     );
+    rotationOwners.set(entitlementPath, owner);
+    const rotation = withRotationBudget((budgetSignal) => {
+      const signal = AbortSignal.any([budgetSignal, owner.controller.signal]);
+      const work = doRotateGrant(entitlementPath, justification, cached, owner, signal);
+      admittedRotationWork.add(work);
+      const forgetWork = (): void => {
+        admittedRotationWork.delete(work);
+      };
+      void work.then(forgetWork, forgetWork);
+      return work;
+    });
     inFlightRotations.set(entitlementPath, rotation);
     try {
       return await rotation;
@@ -779,7 +1026,9 @@ export function createPamModule(
       );
       throw err;
     } finally {
-      inFlightRotations.delete(entitlementPath);
+      if (inFlightRotations.get(entitlementPath) === rotation) {
+        inFlightRotations.delete(entitlementPath);
+      }
     }
   }
 
@@ -787,8 +1036,10 @@ export function createPamModule(
     entitlementPath: string,
     justification: string | undefined,
     cached: CachedGrant | undefined,
+    owner: RotationOwner,
     signal?: AbortSignal,
   ): Promise<PamGrantResult> {
+    assertRotationOwner(entitlementPath, owner, signal);
     // Withdraw the cached grant before re-creating. Even when our computed
     // expiry has passed, PAM's state can lag and leave the grant in an "open"
     // state that 409s the immediate createGrant. withdrawGrantAndWait polls
@@ -801,9 +1052,19 @@ export function createPamModule(
         signal,
       );
     }
-    grantCache.delete(entitlementPath);
+    // The withdraw path is best-effort and can swallow a budget abort. Recheck
+    // ownership after it returns: an older rotation must not delete the cache
+    // entry installed by its replacement while token acquisition was stuck.
+    assertRotationOwner(entitlementPath, owner, signal);
+    if (grantCache.get(entitlementPath) === cached) {
+      grantCache.delete(entitlementPath);
+    }
 
+    // If PAM omits expiry fields, this request-start timestamp is a safe
+    // conservative anchor; activation can only happen at or after it.
+    const requestedAt = now();
     const grant = await createGrantWithRecovery(entitlementPath, justification, signal);
+    assertRotationOwner(entitlementPath, owner, signal);
 
     if (!grant.name) {
       throw new Error("PAM API returned a grant with no resource name");
@@ -818,8 +1079,14 @@ export function createPamModule(
         // holds the open-grant slot and would 409-block every follow-up
         // create. Withdraw it best-effort before surfacing the failure;
         // terminal grants are already closed and need no cleanup.
-        if (!(err instanceof GrantTerminalStateError)) {
-          await withdrawGrantAndWait(grant.name, "cleaning up grant that failed to activate");
+        if (!(err instanceof GrantTerminalStateError) && isRotationOwner(entitlementPath, owner)) {
+          await withdrawGrantAndWait(
+            grant.name,
+            "cleaning up grant that failed to activate",
+            WITHDRAW_OP_TIMEOUT_MS,
+            owner.controller.signal,
+            () => assertRotationOwner(entitlementPath, owner),
+          );
         }
         throw err;
       }
@@ -830,14 +1097,24 @@ export function createPamModule(
     // and freed the single-flight slot, and a newer rotation may now own the
     // cache entry — writing here would clobber it (stale TTL) or resurrect a
     // grant a later rotation already withdrew. Best-effort withdraw the grant
-    // we just created (no signal: it is aborted, and this cleanup must run) so
-    // it is not orphaned, then surface the budget error. (See withRotationBudget.)
-    if (signal?.aborted) {
-      await withdrawGrantAndWait(grant.name, "rotation aborted by budget after activation");
-      throw signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason));
+    // we just created under the separate ownership signal, which lets a newer
+    // rotation cancel this cleanup before adopting the grant. Then surface the
+    // budget error. (See withRotationBudget.)
+    if (signal?.aborted || !isRotationOwner(entitlementPath, owner)) {
+      if (isRotationOwner(entitlementPath, owner)) {
+        await withdrawGrantAndWait(
+          grant.name,
+          "rotation aborted by budget after activation",
+          WITHDRAW_OP_TIMEOUT_MS,
+          owner.controller.signal,
+          () => assertRotationOwner(entitlementPath, owner),
+        );
+      }
+      throw rotationStoppedError(entitlementPath, owner, signal);
     }
 
-    const entry = cacheGrant(entitlementPath, activated);
+    assertRotationOwner(entitlementPath, owner, signal);
+    const entry = cacheGrant(entitlementPath, activated, requestedAt);
 
     return {
       name: entry.name,
@@ -913,11 +1190,19 @@ export function createPamModule(
     reason: string,
     deadlineMs: number = WITHDRAW_OP_TIMEOUT_MS,
     signal?: AbortSignal,
+    beforeRequest?: () => void,
   ): Promise<boolean> {
     const startedAt = now();
     try {
       const url = `${PAM_API_BASE_V1BETA}/${grantName}:withdraw`;
-      const res = await pamFetch(url, { method: "POST" }, signal);
+      const res = await pamFetch(url, { method: "POST" }, signal, () => {
+        // Run the ownership fence after the unabortable access-token lookup,
+        // then mark immediately before fetch dispatch. Marking at function
+        // entry would poison a grant even when token lookup fails or a newer
+        // rotation supersedes this cleanup before any withdraw POST is sent.
+        beforeRequest?.();
+        retiringGrantNames.add(grantName);
+      });
 
       if (!res.ok) {
         const text = await res.text();
@@ -926,6 +1211,11 @@ export function createPamModule(
       }
 
       const op = (await res.json().catch(() => ({}))) as PamOperation;
+      // PAM accepted the withdraw. Unless it immediately reports an operation
+      // error, this grant is no longer an open grant that shutdown must issue
+      // another request for. `retiringGrantNames` remains until list observes
+      // a terminal state, preventing stale ACTIVE responses from being reused.
+      if (!op.error) ownedOpenGrantNames.delete(grantName);
       if (op.done || !op.name) {
         // Synchronous withdraw or untrackable response — assume done.
         if (op.error) {
@@ -952,22 +1242,68 @@ export function createPamModule(
   // Fire-and-forget: deadline 0 means withdrawGrantAndWait POSTs the
   // withdraw, reads its Operation response, and skips polling. Used on
   // shutdown where we want the request landed but not the LRO confirmation.
-  function withdrawGrantFireAndForget(grantName: string, reason: string): Promise<boolean> {
-    return withdrawGrantAndWait(grantName, reason, 0);
+  function withdrawGrantFireAndForget(
+    grantName: string,
+    reason: string,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    return withdrawGrantAndWait(grantName, reason, 0, signal);
   }
 
-  async function withdrawAll(): Promise<void> {
-    const entries = [...grantCache.values()];
+  function scheduleShutdownWithdraw(grantName: string): void {
+    if (!shutdownController || shutdownWithdrawals.has(grantName)) return;
+    const withdrawal = withdrawGrantFireAndForget(grantName, "shutdown", shutdownController.signal);
+    shutdownWithdrawals.set(grantName, withdrawal);
+  }
+
+  async function runShutdown(admittedWork: Promise<PamGrantResult>[]): Promise<void> {
+    for (const grantName of ownedOpenGrantNames) scheduleShutdownWithdraw(grantName);
+
+    const cleanup = (async (): Promise<void> => {
+      // Wait for the underlying rotation work, not just its budgeted public
+      // promise. A response that arrives after shutdown began can reveal a
+      // pending grant name; rememberOwnedGrant schedules it immediately.
+      await Promise.allSettled(admittedWork);
+      for (const grantName of ownedOpenGrantNames) scheduleShutdownWithdraw(grantName);
+      await Promise.allSettled([...shutdownWithdrawals.values()]);
+    })();
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(() => {
+        timedOut = true;
+        shutdownController?.abort(
+          new Error(`PAM shutdown cleanup exceeded its ${shutdownTimeoutMs}ms budget`),
+        );
+        resolve();
+      }, shutdownTimeoutMs);
+      timer.unref?.();
+    });
+
+    await Promise.race([cleanup, deadline]);
+    clearTimeout(timer);
+    if (timedOut) {
+      console.error(`pam: shutdown cleanup exceeded its ${shutdownTimeoutMs}ms budget`);
+    }
+  }
+
+  function withdrawAll(): Promise<void> {
+    if (shutdownPromise) return shutdownPromise;
+
+    shuttingDown = true;
+    shutdownController = new AbortController();
+    const admittedWork = [...admittedRotationWork];
+    const shutdownError = new Error("PAM module is shutting down");
+    for (const owner of rotationOwners.values()) owner.controller.abort(shutdownError);
+    rotationOwners.clear();
     grantCache.clear();
 
-    if (entries.length === 0) return;
-
-    console.log(`pam: withdrawing ${entries.length} active grant(s)...`);
-    // Shutdown path: fire-and-forget. We don't poll the LRO because the
-    // process is exiting and we just want the request landed on PAM's side.
-    await Promise.allSettled(
-      entries.map((entry) => withdrawGrantFireAndForget(entry.name, "shutdown")),
-    );
+    if (ownedOpenGrantNames.size > 0) {
+      console.log(`pam: withdrawing ${ownedOpenGrantNames.size} owned grant(s)...`);
+    }
+    shutdownPromise = runShutdown(admittedWork);
+    return shutdownPromise;
   }
 
   return { ensureGrant, withdrawAll };

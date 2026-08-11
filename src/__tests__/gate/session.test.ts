@@ -113,6 +113,19 @@ describe("createSessionManager", () => {
     expect(mgr.validate(s2.id)).toBeNull();
   });
 
+  test("creating a session prunes expired entries left by clients that never revoked", () => {
+    let time = 1_000_000;
+    const mgr = createSessionManager({ now: () => time });
+    const expired = mgr.create({ ...baseParams, sessionLifetimeSeconds: 60 });
+
+    time += 61_000;
+    mgr.create({ ...baseParams, sessionLifetimeSeconds: 60 });
+
+    // revoke() would return true for an expired entry still retained in the
+    // map, so this observes the sweep without exposing internal map state.
+    expect(mgr.revoke(expired.id)).toBe(false);
+  });
+
   test("validate returns null at exact expiry boundary", () => {
     let time = 1_000_000;
     const mgr = createSessionManager({ now: () => time });

@@ -1,5 +1,5 @@
-import { unlinkSync, existsSync, chmodSync, chownSync, lstatSync } from "node:fs";
-import { dirname } from "node:path";
+import { unlinkSync, existsSync, chmodSync, chownSync, lstatSync, realpathSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import type { GateConfig } from "../config.ts";
 import type { GateDeps } from "./types.ts";
 import { createAuthModule, type AuthModuleOptions } from "./auth.ts";
@@ -21,11 +21,12 @@ import {
   isUidInPasswd,
 } from "./unix-group.ts";
 import { ensurePrivateDir, chooseSocketDirMode } from "./dir-utils.ts";
+import { useApplicationDeadline } from "../request-timeout.ts";
 
-// Bun's max idleTimeout (255s). Prod flows (POST /session, GET /token?level=prod)
-// can wait on the pending-approval queue (120s) and PAM grant polling (120s)
-// before the server writes a response; Bun's 10s default would close the
-// connection mid-request.
+// Keep the longest global value Bun accepts for connection housekeeping. Each
+// gate request disables this transport-level deadline in its fetch handler and
+// relies on the endpoint's application deadline instead; PAM rotation alone can
+// legitimately exceed 255s.
 const SOCKET_IDLE_TIMEOUT_SECONDS = 255;
 
 export interface GateServerResult {
@@ -40,6 +41,8 @@ export interface StartGateServerOptions {
   authOptions?: AuthModuleOptions;
   confirmOptions?: ConfirmOptions;
   auditLogDir?: string;
+  /** Optional PAM implementation, primarily for deterministic integration tests. */
+  pamModule?: PamModule;
 }
 
 /**
@@ -178,12 +181,14 @@ export async function startGateServer(
   if (config.pam_policy) {
     const pamLocation = config.pam_location ?? "global";
 
-    pam = createPamModule(auth.getSourceAccessToken, {
-      grantDurationSeconds: pamGrantTtlSeconds,
-      // Scope open-grant scans to our own grants — shared entitlements list
-      // every team member's grants and only ours may be reused or withdrawn.
-      getRequesterEmail: auth.getIdentityEmail,
-    });
+    pam =
+      options.pamModule ??
+      createPamModule(auth.getSourceAccessToken, {
+        grantDurationSeconds: pamGrantTtlSeconds,
+        // Scope open-grant scans to our own grants — shared entitlements list
+        // every team member's grants and only ours may be reused or withdrawn.
+        getRequesterEmail: auth.getIdentityEmail,
+      });
 
     pamDefaultPolicy = resolveEntitlementPath(config.pam_policy, config.project_id, pamLocation);
 
@@ -235,113 +240,21 @@ export async function startGateServer(
     pendingQueue,
   };
 
-  // Bun.serve binds the AF_UNIX socket using the inherited umask, so a
-  // tight one closes the window between bind and the explicit chmod.
-  process.umask(0o077);
-
-  const socketDir = dirname(config.socket_path);
-  ensurePrivateDir(socketDir, chooseSocketDirMode(socketDir));
-
-  await cleanStaleSocket(config.socket_path, "socket", { probeForRunning: true });
-
-  const server = Bun.serve({
-    unix: config.socket_path,
-    idleTimeout: SOCKET_IDLE_TIMEOUT_SECONDS,
-    fetch(req) {
-      return handleRequest(req, deps, { trusted: false, socket: "main" });
-    },
-  });
-
-  // Group-readable socket (rw-rw----): a different-UID agent in the gate
-  // UID's primary group can connect. On systems with per-user primary
-  // groups (Linux UPG, default on modern distros) this is effectively
-  // owner-only. The directory's traversal mode (chooseSocketDirMode)
-  // additionally controls whether group reaches the socket at all.
-  chmodSync(config.socket_path, 0o660);
-
-  // Optional TCP+mTLS server for remote devcontainer support
+  // Bind every listener as one startup transaction. A failure after the main
+  // socket was bound (invalid TLS files, an occupied admin socket, invalid
+  // operator-socket config, etc.) must not leave a live partial daemon behind.
+  // Such a leaked listener makes the next launch report "another instance is
+  // already running" even though the original start call rejected.
+  let server: ReturnType<typeof Bun.serve> | undefined;
   let tcpServer: ReturnType<typeof Bun.serve> | undefined;
-  if (config.gate_tls_port !== undefined) {
-    const tlsFiles = await loadAndValidateTlsFiles(config.tls_dir);
-    tcpServer = Bun.serve({
-      hostname: "127.0.0.1",
-      port: config.gate_tls_port,
-      idleTimeout: SOCKET_IDLE_TIMEOUT_SECONDS,
-      tls: {
-        cert: tlsFiles.serverCert,
-        key: tlsFiles.serverKey,
-        ca: tlsFiles.caCert,
-        requestCert: true,
-        rejectUnauthorized: true,
-      },
-      fetch(req) {
-        return handleRequest(req, deps, { trusted: false, socket: "tcp" });
-      },
-    });
-  }
-
-  // --- Admin socket (for approve/deny — NOT mounted into containers) ---
-  const adminSocketDir = dirname(config.admin_socket_path);
-  ensurePrivateDir(adminSocketDir, chooseSocketDirMode(adminSocketDir));
-
-  await cleanStaleSocket(config.admin_socket_path, "admin socket");
-
-  const adminServer = Bun.serve({
-    unix: config.admin_socket_path,
-    fetch(req) {
-      return handleAdminRequest(req, deps);
-    },
-  });
-
-  chmodSync(config.admin_socket_path, 0o600);
-
-  // --- Operator socket (auto-approve eligible) ---
+  let adminServer: ReturnType<typeof Bun.serve> | undefined;
   let operatorServer: ReturnType<typeof Bun.serve> | undefined;
+  let socketIno: number | undefined;
+  let adminSocketIno: number | undefined;
   let operatorSocketIno: number | undefined;
-  if (config.operator_socket_path) {
-    // Schema refinement guarantees agent_uid is set when operator_socket_path is.
-    const gateUid = process.getuid!();
-    const unixDb = loadUnixGroupDb();
-    const agentUid = resolveAgentUid(config.agent_uid!, unixDb);
 
-    if (agentUid === gateUid) {
-      throw new Error(
-        `gate: agent_uid (${agentUid}) equals gate uid — operator-socket trust boundary cannot exist`,
-      );
-    }
-
-    const access = resolveOperatorSocketAccess(config.operator_socket_group, agentUid, unixDb);
-
-    const operatorSocketDir = dirname(config.operator_socket_path);
-    ensurePrivateDir(operatorSocketDir, chooseSocketDirMode(operatorSocketDir));
-    if (access.gid !== undefined) {
-      chownSync(operatorSocketDir, gateUid, access.gid);
-    }
-
-    await cleanStaleSocket(config.operator_socket_path, "operator socket");
-
-    operatorServer = Bun.serve({
-      unix: config.operator_socket_path,
-      idleTimeout: SOCKET_IDLE_TIMEOUT_SECONDS,
-      fetch(req) {
-        return handleRequest(req, deps, { trusted: true, socket: "operator" });
-      },
-    });
-
-    // chown before chmod: chown clears setgid/setuid bits on some kernels.
-    if (access.gid !== undefined) {
-      chownSync(config.operator_socket_path, gateUid, access.gid);
-    }
-    chmodSync(config.operator_socket_path, access.sockMode);
-    operatorSocketIno = lstatSync(config.operator_socket_path).ino;
-  }
-
-  // Capture inodes so stop() only removes the sockets we created,
-  // not ones created by a replacement instance.
-  const socketIno = lstatSync(config.socket_path).ino;
-  const adminSocketIno = lstatSync(config.admin_socket_path).ino;
-
-  function unlinkIfOurs(path: string, ino: number) {
+  function unlinkIfOurs(path: string, ino: number | undefined) {
+    if (ino === undefined) return;
     try {
       if (existsSync(path)) {
         const current = lstatSync(path);
@@ -354,9 +267,179 @@ export async function startGateServer(
     }
   }
 
+  function stopStartedServers(): void {
+    for (const started of [operatorServer, adminServer, tcpServer, server]) {
+      try {
+        started?.stop(true);
+      } catch {
+        // Already stopped, or startup only reached part of this list.
+      }
+    }
+  }
+
+  // Bun.serve binds AF_UNIX sockets using the inherited umask, so a tight one
+  // closes the window between bind and explicit chmod. On successful daemon
+  // startup it deliberately remains in force for later audit-log creation. If
+  // startup rejects, restore the caller's umask along with the other rollback.
+  const previousUmask = process.umask(0o077);
+
+  try {
+    const socketDir = dirname(config.socket_path);
+    ensurePrivateDir(socketDir, chooseSocketDirMode(socketDir));
+
+    const adminSocketDir = dirname(config.admin_socket_path);
+    ensurePrivateDir(adminSocketDir, chooseSocketDirMode(adminSocketDir));
+
+    const operatorSocketDir = config.operator_socket_path
+      ? dirname(config.operator_socket_path)
+      : undefined;
+    if (operatorSocketDir) {
+      ensurePrivateDir(operatorSocketDir, chooseSocketDirMode(operatorSocketDir));
+    }
+
+    // Lexically different paths can still name one socket when an ancestor is
+    // a symlink. Resolve every existing parent before binding anything; without
+    // this check, admin stale-socket cleanup could unlink the live main socket
+    // and replace it with the privileged listener.
+    const configuredSocketPaths: Array<[string, string]> = [
+      ["socket_path", config.socket_path],
+      ["admin_socket_path", config.admin_socket_path],
+    ];
+    if (config.operator_socket_path) {
+      configuredSocketPaths.push(["operator_socket_path", config.operator_socket_path]);
+    }
+    const resolvedSocketPaths: Array<[string, string]> = configuredSocketPaths.map(
+      ([key, socketPath]) => [key, join(realpathSync(dirname(socketPath)), basename(socketPath))],
+    );
+    const firstKeyByResolvedPath = new Map<string, string>();
+    for (const [key, resolvedPath] of resolvedSocketPaths) {
+      const firstKey = firstKeyByResolvedPath.get(resolvedPath);
+      if (firstKey) {
+        throw new Error(
+          `gate: ${key} resolves to the same filesystem entry as ${firstKey}: ${resolvedPath}`,
+        );
+      }
+      firstKeyByResolvedPath.set(resolvedPath, key);
+    }
+
+    await cleanStaleSocket(config.socket_path, "socket", { probeForRunning: true });
+
+    server = Bun.serve({
+      unix: config.socket_path,
+      idleTimeout: SOCKET_IDLE_TIMEOUT_SECONDS,
+      fetch(req, bunServer) {
+        useApplicationDeadline(req, bunServer);
+        return handleRequest(req, deps, { trusted: false, socket: "main" });
+      },
+    });
+    socketIno = lstatSync(config.socket_path).ino;
+
+    // Group-readable socket (rw-rw----): a different-UID agent in the gate
+    // UID's primary group can connect. On systems with per-user primary groups
+    // this is effectively owner-only. Directory traversal adds another layer.
+    chmodSync(config.socket_path, 0o660);
+
+    // Optional TCP+mTLS server for remote devcontainer support.
+    if (config.gate_tls_port !== undefined) {
+      const tlsFiles = await loadAndValidateTlsFiles(config.tls_dir);
+      tcpServer = Bun.serve({
+        hostname: "127.0.0.1",
+        port: config.gate_tls_port,
+        idleTimeout: SOCKET_IDLE_TIMEOUT_SECONDS,
+        tls: {
+          cert: tlsFiles.serverCert,
+          key: tlsFiles.serverKey,
+          ca: tlsFiles.caCert,
+          requestCert: true,
+          rejectUnauthorized: true,
+        },
+        fetch(req, bunServer) {
+          useApplicationDeadline(req, bunServer);
+          return handleRequest(req, deps, { trusted: false, socket: "tcp" });
+        },
+      });
+    }
+
+    // --- Admin socket (for approve/deny — NOT mounted into containers) ---
+    await cleanStaleSocket(config.admin_socket_path, "admin socket");
+
+    adminServer = Bun.serve({
+      unix: config.admin_socket_path,
+      fetch(req) {
+        return handleAdminRequest(req, deps);
+      },
+    });
+    adminSocketIno = lstatSync(config.admin_socket_path).ino;
+    chmodSync(config.admin_socket_path, 0o600);
+
+    // --- Operator socket (auto-approve eligible) ---
+    if (config.operator_socket_path) {
+      // Schema refinement guarantees agent_uid is set with this path.
+      const gateUid = process.getuid!();
+      const unixDb = loadUnixGroupDb();
+      const agentUid = resolveAgentUid(config.agent_uid!, unixDb);
+
+      if (agentUid === gateUid) {
+        throw new Error(
+          `gate: agent_uid (${agentUid}) equals gate uid — operator-socket trust boundary cannot exist`,
+        );
+      }
+
+      const access = resolveOperatorSocketAccess(config.operator_socket_group, agentUid, unixDb);
+
+      // The parent was created and canonicalized before any listener bound.
+      const operatorSocketDir = dirname(config.operator_socket_path);
+      if (access.gid !== undefined) {
+        chownSync(operatorSocketDir, gateUid, access.gid);
+      }
+
+      await cleanStaleSocket(config.operator_socket_path, "operator socket");
+
+      operatorServer = Bun.serve({
+        unix: config.operator_socket_path,
+        idleTimeout: SOCKET_IDLE_TIMEOUT_SECONDS,
+        fetch(req, bunServer) {
+          useApplicationDeadline(req, bunServer);
+          return handleRequest(req, deps, { trusted: true, socket: "operator" });
+        },
+      });
+      operatorSocketIno = lstatSync(config.operator_socket_path).ino;
+
+      // chown before chmod: chown clears setgid/setuid bits on some kernels.
+      if (access.gid !== undefined) {
+        chownSync(config.operator_socket_path, gateUid, access.gid);
+      }
+      chmodSync(config.operator_socket_path, access.sockMode);
+    }
+  } catch (err) {
+    stopStartedServers();
+    unlinkIfOurs(config.socket_path, socketIno);
+    unlinkIfOurs(config.admin_socket_path, adminSocketIno);
+    if (config.operator_socket_path) {
+      unlinkIfOurs(config.operator_socket_path, operatorSocketIno);
+    }
+    process.umask(previousUmask);
+    throw err;
+  }
+
+  // Both are guaranteed by the transaction above; keep the invariant explicit
+  // for TypeScript and for future edits that add another early-return path.
+  if (!server || !adminServer) {
+    throw new Error("gate: internal error: startup transaction completed without all listeners");
+  }
+  const mainServer = server;
+  const privilegedAdminServer = adminServer;
+  let signalHandlersInstalled = false;
+  let shutdownStarted = false;
+
   function stop() {
+    if (signalHandlersInstalled) {
+      process.off("SIGTERM", handleSigterm);
+      process.off("SIGINT", handleSigint);
+      signalHandlersInstalled = false;
+    }
     try {
-      server.stop(true);
+      mainServer.stop(true);
     } catch {
       // Already stopped
     }
@@ -366,7 +449,7 @@ export async function startGateServer(
       // Already stopped
     }
     try {
-      adminServer.stop(true);
+      privilegedAdminServer.stop(true);
     } catch {
       // Already stopped
     }
@@ -383,18 +466,29 @@ export async function startGateServer(
   }
 
   // Graceful shutdown on signals
-  const onSignal = async () => {
+  async function onSignal(): Promise<void> {
+    if (shutdownStarted) return;
+    shutdownStarted = true;
     console.log("\ngate: shutting down...");
+    // Close and unlink every listener before asynchronous PAM cleanup so no
+    // new request can enter while shutdown is waiting on the control plane.
+    stop();
     pendingQueue.denyAll();
     sessionManager.revokeAll();
     if (pam) {
       await pam.withdrawAll();
     }
-    stop();
     process.exit(0);
-  };
-  process.on("SIGTERM", () => void onSignal());
-  process.on("SIGINT", () => void onSignal());
+  }
+  function handleSigterm(): void {
+    void onSignal();
+  }
+  function handleSigint(): void {
+    void onSignal();
+  }
+  process.on("SIGTERM", handleSigterm);
+  process.on("SIGINT", handleSigint);
+  signalHandlersInstalled = true;
 
   console.log("gate: starting gcp-gate token daemon");
   console.log(`  project:         ${config.project_id}`);
@@ -447,5 +541,11 @@ export async function startGateServer(
     console.log("    (other endpoints same as main socket)");
   }
 
-  return { server, tcpServer, adminServer, operatorServer, stop };
+  return {
+    server: mainServer,
+    tcpServer,
+    adminServer: privilegedAdminServer,
+    operatorServer,
+    stop,
+  };
 }

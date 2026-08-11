@@ -1,5 +1,5 @@
 import { describe, expect, test, afterEach } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { startGateServer, type GateServerResult } from "../../gate/server.ts";
@@ -234,6 +234,23 @@ describe("Gate TCP+mTLS server", () => {
         auditLogDir: join(tempDir, "audit"),
       }),
     ).rejects.toThrow(/init-tls/);
+
+    // TLS validation happens after the Unix listener binds. Failed startup is
+    // transactional: no socket or hidden live server remains behind.
+    expect(existsSync(socketPath)).toBe(false);
+
+    result = await startGateServer(
+      { ...config, gate_tls_port: undefined, tls_dir: undefined },
+      {
+        authOptions: {
+          sourceClient: mockClient("source-tok"),
+          impersonatedClient: mockClient("dev-tok"),
+          fetchFn: mockFetch("test@example.com"),
+        },
+        auditLogDir: join(tempDir, "audit"),
+      },
+    );
+    expect(result.server).toBeDefined();
   });
 
   test("does not start TCP server when gate_tls_port is not configured", async () => {

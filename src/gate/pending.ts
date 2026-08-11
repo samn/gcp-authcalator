@@ -12,6 +12,11 @@ import type { CommandDisplay } from "./summarize-command.ts";
 /** Validates a client-provided pending ID: must be exactly 32 lowercase hex chars. */
 const PENDING_ID_RE = /^[a-f0-9]{32}$/;
 
+/** Return whether a pending-request ID has the canonical 128-bit hex form. */
+export function isValidPendingId(id: string): boolean {
+  return PENDING_ID_RE.test(id);
+}
+
 /** A confirmation request waiting for external approval. */
 export interface PendingRequest {
   /** Random hex ID (32 chars / 128 bits). */
@@ -78,7 +83,7 @@ export function createPendingQueue(options: PendingQueueOptions = {}): PendingQu
     clientId?: string,
   ): Promise<boolean> {
     if (clientId !== undefined) {
-      if (!PENDING_ID_RE.test(clientId)) {
+      if (!isValidPendingId(clientId)) {
         throw new Error(`Invalid pending ID format: must be 32 lowercase hex chars`);
       }
       if (entries.has(clientId)) {

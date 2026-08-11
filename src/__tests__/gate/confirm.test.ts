@@ -25,6 +25,7 @@ function mockSpawn(
   capture: Capture = newCapture(),
   hang = false,
   stderrText?: string,
+  stderrNeverCloses = false,
 ): NonNullable<ConfirmOptions["spawn"]> {
   return (cmd, opts) => {
     capture.cmd = cmd;
@@ -45,8 +46,8 @@ function mockSpawn(
           ? null
           : new ReadableStream<Uint8Array>({
               start(controller) {
-                controller.enqueue(new TextEncoder().encode(stderrText));
-                controller.close();
+                if (stderrText) controller.enqueue(new TextEncoder().encode(stderrText));
+                if (!stderrNeverCloses) controller.close();
               },
             }),
       exitCode: null,
@@ -481,6 +482,19 @@ describe("createConfirmModule", () => {
 
       const result = await confirmProdAccess("user@example.com", display(["gcloud"]));
       expect(result).toBe(false);
+      expect(capture.killed).toBe(true);
+    });
+
+    test("bounds stderr that remains open after the dialog process exits", async () => {
+      const capture = newCapture();
+      const { confirmProdAccess } = createConfirmModule({
+        spawn: mockSpawn(0, capture, false, "", true),
+        platform: "linux",
+        isTTY: false,
+        dialogBackstopMs: 10,
+      });
+
+      expect(await confirmProdAccess("user@example.com")).toBe(false);
       expect(capture.killed).toBe(true);
     });
   });

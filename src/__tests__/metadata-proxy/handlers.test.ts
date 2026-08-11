@@ -792,6 +792,35 @@ describe("email-based service account paths", () => {
     const body = (await res.json()) as Record<string, unknown>;
     expect(body.email).toBe("sa@test-project.iam.gserviceaccount.com");
   });
+
+  test("aliases an email whose local part starts with default", async () => {
+    const res = await handleRequest(
+      metadataRequest(
+        "/computeMetadata/v1/instance/service-accounts/default-prod@test-project.iam.gserviceaccount.com/token",
+      ),
+      makeDeps(),
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.access_token).toBe("test-access-token");
+  });
+
+  test("does not alias a non-email identifier that starts with default", async () => {
+    let tokenCalls = 0;
+    const res = await handleRequest(
+      metadataRequest("/computeMetadata/v1/instance/service-accounts/default-prod/token"),
+      makeDeps({
+        getToken: async () => {
+          tokenCalls++;
+          throw new Error("must not fetch a token");
+        },
+      }),
+    );
+
+    expect(res.status).toBe(404);
+    expect(tokenCalls).toBe(0);
+  });
 });
 
 // ---------------------------------------------------------------------------

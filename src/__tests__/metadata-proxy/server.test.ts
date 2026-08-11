@@ -315,6 +315,34 @@ describe("startMetadataProxyServer", () => {
     }
   });
 
+  test("stop() removes signal handlers and remains idempotent", () => {
+    const port = nextPort++;
+    const config = makeConfig(port);
+    const termListenersBefore = process.listenerCount("SIGTERM");
+    const intListenersBefore = process.listenerCount("SIGINT");
+
+    result = startMetadataProxyServer(config, {
+      tokenProvider: {
+        getToken: async () => ({
+          access_token: "tok",
+          expires_at: new Date(Date.now() + 3600_000),
+        }),
+      },
+      installSignalHandlers: true,
+      quiet: true,
+    });
+
+    expect(process.listenerCount("SIGTERM")).toBe(termListenersBefore + 1);
+    expect(process.listenerCount("SIGINT")).toBe(intListenersBefore + 1);
+
+    result.stop();
+    result.stop();
+    result = null;
+
+    expect(process.listenerCount("SIGTERM")).toBe(termListenersBefore);
+    expect(process.listenerCount("SIGINT")).toBe(intListenersBefore);
+  });
+
   test("uses custom tokenProvider instead of gate client", async () => {
     const port = nextPort++;
     const config = makeConfig(port);

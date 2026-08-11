@@ -3,17 +3,26 @@ import {
   type GateConnection,
   type BunRequestInit,
   connectionFetchOpts,
+  fetchWithGateTimeout,
 } from "../gate/connection.ts";
 import type { CachedToken, GateClient } from "./types.ts";
+import { tokenRefreshAt } from "../token-cache.ts";
 
-/** Minimum remaining lifetime before we re-fetch a cached token (5 minutes). */
-const CACHE_MARGIN_MS = 5 * 60 * 1000;
+// Client backstops must sit outside the gate's sequential 30-second auth-stage
+// deadlines. A cold token mint can perform ADC discovery plus minting; identity
+// and project lookup can additionally perform one Google HTTP exchange.
+const TOKEN_GATE_TIMEOUT_MS = 75_000;
+const IDENTITY_GATE_TIMEOUT_MS = 105_000;
+const PROJECT_GATE_TIMEOUT_MS = 105_000;
+const UNIVERSE_GATE_TIMEOUT_MS = 45_000;
 
 export interface GateClientOptions {
   /** Override fetch for testing. */
   fetchFn?: typeof globalThis.fetch;
   /** OAuth scopes to request from the gate daemon. */
   scopes?: string[];
+  /** Override the clock for testing cache expiry. */
+  now?: () => number;
 }
 
 /**
@@ -33,14 +42,18 @@ export async function checkGateConnection(
   // TCP mode — health check with mTLS
   let res: Response;
   try {
-    res = await fetchFn(`${conn.gateUrl}/health`, {
-      tls: {
-        cert: conn.clientCert,
-        key: conn.clientKey,
-        ca: conn.caCert,
-      },
-      signal: AbortSignal.timeout(3_000),
-    } as BunRequestInit);
+    res = await fetchWithGateTimeout(
+      fetchFn,
+      `${conn.gateUrl}/health`,
+      {
+        tls: {
+          cert: conn.clientCert,
+          key: conn.clientKey,
+          ca: conn.caCert,
+        },
+      } as BunRequestInit,
+      3_000,
+    );
   } catch {
     throw new Error(
       `Could not connect to gcp-gate at ${conn.gateUrl}\n` +
@@ -86,10 +99,12 @@ export async function checkGateSocket(
 
   let res: Response;
   try {
-    res = await fetchFn("http://localhost/health", {
-      unix: socketPath,
-      signal: AbortSignal.timeout(3_000),
-    } as BunRequestInit);
+    res = await fetchWithGateTimeout(
+      fetchFn,
+      "http://localhost/health",
+      { unix: socketPath } as BunRequestInit,
+      3_000,
+    );
   } catch {
     throw new Error(
       `Could not connect to gcp-gate at ${socketPath}\n` +
@@ -114,7 +129,7 @@ export async function checkGateSocket(
  * - Caches tokens in memory; re-fetches when remaining lifetime < 5 minutes
  * - Caches the numeric project ID permanently (immutable value)
  * - Caches the universe domain permanently (immutable value)
- * - Caches the authenticated identity email permanently (stable per daemon)
+ * - Re-reads authenticated identity so a gate-side credential-cache reset is observable
  * - Accepts an optional fetchFn for test injection
  */
 export function createGateClient(
@@ -122,27 +137,30 @@ export function createGateClient(
   options: GateClientOptions = {},
 ): GateClient {
   const fetchFn = options.fetchFn ?? globalThis.fetch;
+  const now = options.now ?? Date.now;
   const { baseUrl, extraOpts } = connectionFetchOpts(conn);
 
   let tokenCache: CachedToken | null = null;
+  let tokenRefreshAtMs = 0;
+  let tokenRefresh: Promise<CachedToken> | null = null;
   let numericProjectIdCache: string | null = null;
   let universeDomainCache: string | null = null;
-  let identityCache: string | null = null;
+
+  function gateFetch(path: string, timeoutMs: number): Promise<Response> {
+    const url = `${baseUrl}${path}`;
+    return fetchWithGateTimeout(fetchFn, url, extraOpts, timeoutMs);
+  }
 
   function isCacheValid(cached: CachedToken | null): cached is CachedToken {
     if (!cached) return false;
-    return cached.expires_at.getTime() - Date.now() > CACHE_MARGIN_MS;
+    return now() < tokenRefreshAtMs;
   }
 
-  async function getToken(): Promise<CachedToken> {
-    if (isCacheValid(tokenCache)) {
-      return tokenCache;
-    }
-
+  async function refreshToken(): Promise<CachedToken> {
     const tokenUrl = options.scopes
       ? `${baseUrl}/token?scopes=${options.scopes.map(encodeURIComponent).join(",")}`
       : `${baseUrl}/token`;
-    const res = await fetchFn(tokenUrl, extraOpts);
+    const res = await fetchWithGateTimeout(fetchFn, tokenUrl, extraOpts, TOKEN_GATE_TIMEOUT_MS);
 
     if (!res.ok) {
       const text = await res.text();
@@ -159,10 +177,29 @@ export function createGateClient(
 
     tokenCache = {
       access_token: body.access_token,
-      expires_at: new Date(Date.now() + expiresIn * 1000),
+      expires_at: new Date(now() + expiresIn * 1000),
     };
+    tokenRefreshAtMs = tokenRefreshAt(tokenCache.expires_at.getTime(), now());
 
     return tokenCache;
+  }
+
+  async function getToken(): Promise<CachedToken> {
+    if (isCacheValid(tokenCache)) {
+      return tokenCache;
+    }
+
+    if (tokenRefresh) return tokenRefresh;
+
+    const pending = refreshToken();
+    tokenRefresh = pending;
+    try {
+      return await pending;
+    } finally {
+      // Identity check avoids an older finally clearing a replacement request
+      // if this function gains cancellation/retry behavior later.
+      if (tokenRefresh === pending) tokenRefresh = null;
+    }
   }
 
   async function getNumericProjectId(): Promise<string> {
@@ -170,7 +207,7 @@ export function createGateClient(
       return numericProjectIdCache;
     }
 
-    const res = await fetchFn(`${baseUrl}/project-number`, extraOpts);
+    const res = await gateFetch("/project-number", PROJECT_GATE_TIMEOUT_MS);
 
     if (!res.ok) {
       const text = await res.text();
@@ -192,7 +229,7 @@ export function createGateClient(
       return universeDomainCache;
     }
 
-    const res = await fetchFn(`${baseUrl}/universe-domain`, extraOpts);
+    const res = await gateFetch("/universe-domain", UNIVERSE_GATE_TIMEOUT_MS);
 
     if (!res.ok) {
       const text = await res.text();
@@ -210,11 +247,7 @@ export function createGateClient(
   }
 
   async function getIdentity(): Promise<string> {
-    if (identityCache) {
-      return identityCache;
-    }
-
-    const res = await fetchFn(`${baseUrl}/identity`, extraOpts);
+    const res = await gateFetch("/identity", IDENTITY_GATE_TIMEOUT_MS);
 
     if (!res.ok) {
       const text = await res.text();
@@ -227,8 +260,7 @@ export function createGateClient(
       throw new Error("gcp-gate returned no email");
     }
 
-    identityCache = body.email;
-    return identityCache;
+    return body.email;
   }
 
   return { getToken, getNumericProjectId, getUniverseDomain, getIdentity };

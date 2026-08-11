@@ -16,7 +16,11 @@ import { createPerRequestTokenProvider } from "../with-prod/per-request-token-pr
 import type { TokenProvider } from "../metadata-proxy/types.ts";
 import { startMetadataProxyServer } from "../metadata-proxy/server.ts";
 import { detectNestedSession, PROD_SESSION_ENV_VAR } from "../with-prod/detect-nested-session.ts";
-import { buildGateConnection } from "../gate/connection.ts";
+import {
+  buildGateConnection,
+  connectionFetchOpts,
+  fetchWithGateTimeout,
+} from "../gate/connection.ts";
 import type { GateConnection } from "../gate/connection.ts";
 import { formatVersion } from "../version.ts";
 import type { Subprocess } from "bun";
@@ -27,6 +31,36 @@ import type { Subprocess } from "bun";
  * a request has been outstanding long enough to look stuck.
  */
 const APPROVE_HINT_DELAY_MS = 10_000;
+
+/** Fail fast when the gate transport is unreachable before starting acquisition. */
+const GATE_PREFLIGHT_TIMEOUT_MS = 3_000;
+
+/** Give a wrapped command a short window to clean up before forcing it to exit. */
+const CHILD_SIGNAL_GRACE_MS = 5_000;
+
+async function preflightGate(
+  conn: GateConnection,
+  fetchFn: typeof globalThis.fetch,
+  signal?: AbortSignal,
+): Promise<void> {
+  const { baseUrl, extraOpts } = connectionFetchOpts(conn);
+  // Any complete HTTP response proves the transport is alive. Do not require a
+  // 2xx here: an older-but-reachable gate may not implement /health, and the
+  // real acquisition request will report its protocol error precisely.
+  await fetchWithGateTimeout(
+    fetchFn,
+    `${baseUrl}/health`,
+    { ...extraOpts, signal },
+    GATE_PREFLIGHT_TIMEOUT_MS,
+  );
+}
+
+class AcquisitionInterruptedError extends Error {
+  constructor(readonly signal: "SIGINT" | "SIGTERM") {
+    super(`with-prod acquisition interrupted by ${signal}`);
+    this.name = "AcquisitionInterruptedError";
+  }
+}
 
 /** Startup banner naming the running build and the project being targeted. */
 function startupBanner(projectId: string): string {
@@ -43,11 +77,89 @@ type SpawnFn = (
   },
 ) => Subprocess;
 
+export interface ChildSignalSource {
+  on(signal: "SIGINT" | "SIGTERM", listener: () => void): unknown;
+  off(signal: "SIGINT" | "SIGTERM", listener: () => void): unknown;
+}
+
+type ScheduleForceKill = (callback: () => void, delayMs: number) => () => void;
+
+export interface WaitForChildExitOptions {
+  /** Override the signal source for deterministic tests. */
+  signalSource?: ChildSignalSource;
+  /** Override timer scheduling for deterministic tests. */
+  scheduleForceKill?: ScheduleForceKill;
+}
+
+const scheduleForceKill: ScheduleForceKill = (callback, delayMs) => {
+  const timer = setTimeout(callback, delayMs);
+  timer.unref?.();
+  return () => clearTimeout(timer);
+};
+
+/**
+ * Wait for a wrapped child while forwarding termination signals safely.
+ *
+ * The first SIGINT/SIGTERM is forwarded so the child can clean up. If it has
+ * not exited after the grace period, SIGKILL prevents `with-prod` from hanging
+ * forever. A second signal skips the remaining grace period. Listeners and a
+ * pending escalation timer are always removed before returning or throwing.
+ */
+export async function waitForChildExit(
+  child: Subprocess,
+  options: WaitForChildExitOptions = {},
+): Promise<number | undefined> {
+  const signalSource = options.signalSource ?? process;
+  const schedule = options.scheduleForceKill ?? scheduleForceKill;
+  let signalForwarded = false;
+  let cancelEscalation: (() => void) | undefined;
+
+  const tryKill = (signal: number) => {
+    try {
+      child.kill(signal);
+    } catch {
+      // The child may have exited between delivery and kill(). Its `exited`
+      // promise remains the authoritative completion signal.
+    }
+  };
+
+  const forceKill = () => {
+    cancelEscalation = undefined;
+    tryKill(9);
+  };
+  const forwardSignal = (signal: "SIGINT" | "SIGTERM") => {
+    if (signalForwarded) {
+      cancelEscalation?.();
+      cancelEscalation = undefined;
+      tryKill(9);
+      return;
+    }
+
+    signalForwarded = true;
+    tryKill(signal === "SIGINT" ? 2 : 15);
+    cancelEscalation = schedule(forceKill, CHILD_SIGNAL_GRACE_MS);
+  };
+  const onSigint = () => forwardSignal("SIGINT");
+  const onSigterm = () => forwardSignal("SIGTERM");
+
+  signalSource.on("SIGINT", onSigint);
+  signalSource.on("SIGTERM", onSigterm);
+  try {
+    return (await child.exited) ?? undefined;
+  } finally {
+    signalSource.off("SIGINT", onSigint);
+    signalSource.off("SIGTERM", onSigterm);
+    cancelEscalation?.();
+  }
+}
+
 export interface WithProdOptions {
   /** Override fetch for testing (passed to fetchProdToken and detectNestedSession). */
   fetchOptions?: FetchProdTokenOptions;
   /** Override Bun.spawn for testing. */
   spawnFn?: SpawnFn;
+  /** Override the process signal source for deterministic lifecycle tests. */
+  signalSource?: ChildSignalSource;
   /**
    * Per-invocation GCP project that this `with-prod` should target, overriding
    * `config.project_id`. Wired in by the CLI's `--project` flag. The override
@@ -133,6 +245,24 @@ function stripCredentialEnvVars(
   return cleaned;
 }
 
+/**
+ * Replace gcloud's token file without following a caller-planted temp symlink.
+ *
+ * The wrapped command can write inside its CLOUDSDK_CONFIG directory. A fixed
+ * `access_token.tmp` path lets it pre-create a symlink and make the privileged
+ * wrapper overwrite an arbitrary file on refresh. A random, exclusive-create
+ * path ensures the write opens a new regular file before the atomic rename.
+ */
+export function replaceTokenFile(tokenFilePath: string, accessToken: string): void {
+  const tmpPath = `${tokenFilePath}.${randomBytes(12).toString("hex")}.tmp`;
+  try {
+    writeFileSync(tmpPath, accessToken, { mode: 0o600, flag: "wx" });
+    renameSync(tmpPath, tokenFilePath);
+  } finally {
+    rmSync(tmpPath, { force: true });
+  }
+}
+
 /** Spawn child, forward signals, wait for exit, then exit with the child's code. */
 async function spawnAndWait(
   wrappedCommand: string[],
@@ -146,13 +276,7 @@ async function spawnAndWait(
     stderr: "inherit",
   });
 
-  const forwardSignal = (signal: NodeJS.Signals) => {
-    child.kill(signal === "SIGINT" ? 2 : 15);
-  };
-  process.on("SIGTERM", () => forwardSignal("SIGTERM"));
-  process.on("SIGINT", () => forwardSignal("SIGINT"));
-
-  const exitCode = (await child.exited) ?? undefined;
+  const exitCode = await waitForChildExit(child);
   process.exit(exitCode ?? 1);
 }
 
@@ -246,35 +370,76 @@ export async function runWithProd(
 
   console.error(startupBanner(effectiveProjectId));
 
+  // Install interruption handling before the first gate request. The default
+  // SIGINT/SIGTERM action would terminate immediately and skip JS cleanup if a
+  // session response or token-file setup were in flight. During acquisition we
+  // instead abort the client request and leave the normal error/cleanup path in
+  // control; once a child exists, waitForChildExit takes over signal forwarding.
+  const acquisitionController = new AbortController();
+  let acquisitionInterruptedBy: "SIGINT" | "SIGTERM" | undefined;
+  const interruptAcquisition = (signal: "SIGINT" | "SIGTERM") => {
+    if (acquisitionInterruptedBy) return;
+    acquisitionInterruptedBy = signal;
+    acquisitionController.abort(new AcquisitionInterruptedError(signal));
+  };
+  const onAcquisitionSigint = () => interruptAcquisition("SIGINT");
+  const onAcquisitionSigterm = () => interruptAcquisition("SIGTERM");
+  let acquisitionSignalHandlersInstalled = true;
+  const signalSource = options.signalSource ?? process;
+  signalSource.on("SIGINT", onAcquisitionSigint);
+  signalSource.on("SIGTERM", onAcquisitionSigterm);
+  const removeAcquisitionSignalHandlers = () => {
+    if (!acquisitionSignalHandlersInstalled) return;
+    acquisitionSignalHandlersInstalled = false;
+    signalSource.off("SIGINT", onAcquisitionSigint);
+    signalSource.off("SIGTERM", onAcquisitionSigterm);
+  };
+  const callerSignal = options.fetchOptions?.signal;
+  const acquisitionSignal = callerSignal
+    ? AbortSignal.any([callerSignal, acquisitionController.signal])
+    : acquisitionController.signal;
+  const acquisitionFetchOptions: FetchProdTokenOptions = {
+    ...options.fetchOptions,
+    signal: acquisitionSignal,
+  };
+
   // Step 1: Create prod session at gcp-gate (triggers confirmation dialog).
   // If the gate is the operator socket, session creation returns 403 and we
   // fall back to per-request token mode (each refresh hits the gate, which
   // auto-approves silently if the PAM policy is allowlisted).
   const pendingId = randomBytes(16).toString("hex");
-  // Only surface the manual-approval hint if no prompt has been approved within
-  // APPROVE_HINT_DELAY_MS — otherwise it's noise in the common (fast) path.
-  const hintTimer = setTimeout(() => {
-    console.error(
-      // Only mention `pending` as the no-dialog path: the gate queues a
-      // request only when it has no GUI or TTY prompt available, so on a
-      // desktop host this ID was never queued and `pending <id>` would report
-      // it missing while the dialog is still open and waiting.
-      `with-prod: still waiting for approval — check for a dialog on the host.\n` +
-        `with-prod: if no prompt appears, review and approve with: ` +
-        `gcp-authcalator pending ${pendingId} && gcp-authcalator approve ${pendingId}`,
-    );
-  }, APPROVE_HINT_DELAY_MS);
-  hintTimer.unref?.(); // never keep the event loop alive for the hint alone
-  let conn: GateConnection;
+  let hintTimer: ReturnType<typeof setTimeout> | undefined;
+  let conn!: GateConnection;
   let initialEmail: string;
   let initialAccessToken: string;
   let initialExpiresIn: number;
   let sessionId: string | undefined;
   try {
     conn = await buildGateConnection(wpConfig);
+    await preflightGate(
+      conn,
+      acquisitionFetchOptions.fetchFn ?? globalThis.fetch,
+      acquisitionSignal,
+    );
+
+    // Only surface the manual-approval hint if no prompt has been approved within
+    // APPROVE_HINT_DELAY_MS — otherwise it's noise in the common (fast) path.
+    hintTimer = setTimeout(() => {
+      console.error(
+        // Only mention `pending` as the no-dialog path: the gate queues a
+        // request only when it has no GUI or TTY prompt available, so on a
+        // desktop host this ID was never queued and `pending <id>` would report
+        // it missing while the dialog is still open and waiting.
+        `with-prod: still waiting for approval — check for a dialog on the host.\n` +
+          `with-prod: if no prompt appears, review and approve with: ` +
+          `gcp-authcalator pending ${pendingId} && gcp-authcalator approve ${pendingId}`,
+      );
+    }, APPROVE_HINT_DELAY_MS);
+    hintTimer.unref?.(); // never keep the event loop alive for the hint alone
+
     try {
       const sessionResult = await createProdSession(conn, {
-        ...options.fetchOptions,
+        ...acquisitionFetchOptions,
         command: wrappedCommand,
         scopes: wpConfig.scopes,
         pamPolicy: wpConfig.pam_policy,
@@ -295,7 +460,7 @@ export async function runWithProd(
         // pendingId is for the CLI approve flow which doesn't apply on the
         // operator socket auto-approve path; the gate would 400 if we sent it.
         const tokenResult = await fetchProdToken(conn, {
-          ...options.fetchOptions,
+          ...acquisitionFetchOptions,
           command: wrappedCommand,
           scopes: wpConfig.scopes,
           pamPolicy: wpConfig.pam_policy,
@@ -311,6 +476,15 @@ export async function runWithProd(
     }
   } catch (err) {
     clearTimeout(hintTimer);
+    removeAcquisitionSignalHandlers();
+    if (sessionId) {
+      await revokeProdSession(conn, sessionId, {
+        fetchFn: options.fetchOptions?.fetchFn,
+      });
+    }
+    if (acquisitionInterruptedBy) {
+      process.exit(acquisitionInterruptedBy === "SIGINT" ? 130 : 143);
+    }
     // CredentialsExpiredError already carries the full reauth instruction;
     // forwarding the message verbatim keeps the actionable text intact.
     if (err instanceof CredentialsExpiredError) {
@@ -327,83 +501,92 @@ export async function runWithProd(
     `with-prod: prod access acquired for ${initialEmail} on project ${effectiveProjectId}`,
   );
 
-  // Tighten umask only around the token-bearing file creation below.
-  // The wrapped child should not inherit it — restore before spawn.
-  const previousUmask = process.umask(0o077);
-
-  // Step 2: Create an isolated gcloud config directory BEFORE the token
-  // provider so onRefresh can capture the file path in its closure.
-  // The sandbox dir (mkdtempSync) is the real security boundary — created
-  // 0o700 owned by the caller, with 0o600 token files inside — so the
-  // parent's exact mode doesn't matter. mkdirSync no-ops on existing dirs.
-  const runtimeDir = getDefaultWithProdRuntimeDir();
-  mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
-  const gcloudConfigDir = mkdtempSync(join(runtimeDir, "gcp-authcalator-gcloud-"));
-  chmodSync(gcloudConfigDir, 0o700);
-
-  const tokenFilePath = join(gcloudConfigDir, "access_token");
-  writeFileSync(tokenFilePath, initialAccessToken, { mode: 0o600 });
-  writeFileSync(
-    join(gcloudConfigDir, "properties"),
-    `[auth]\naccess_token_file = ${tokenFilePath}\n`,
-    { mode: 0o600 },
-  );
-
-  process.umask(previousUmask);
-
-  // Step 3: Create a token provider that auto-refreshes from the gate.
-  // The session ID (when present) stays in this closure — the subprocess
-  // never sees it. In per-request mode there is no session; each refresh
-  // re-hits the gate (auto-approved on the operator socket).
-  const initialToken = {
-    access_token: initialAccessToken,
-    expires_at: new Date(Date.now() + initialExpiresIn * 1000),
-  };
-  const onRefresh = (token: { access_token: string }) => {
-    // Atomically update gcloud's access_token_file (write to temp, rename)
-    const tmpPath = `${tokenFilePath}.tmp`;
-    writeFileSync(tmpPath, token.access_token, { mode: 0o600 });
-    renameSync(tmpPath, tokenFilePath);
-  };
-  const tokenProvider: TokenProvider = sessionId
-    ? createSessionTokenProvider(conn, sessionId, initialToken, {
-        fetchFn: options.fetchOptions?.fetchFn,
-        onRefresh,
-        targetProject: effectiveProjectId,
-      })
-    : createPerRequestTokenProvider(conn, initialToken, {
-        fetchFn: options.fetchOptions?.fetchFn,
-        command: wrappedCommand,
-        scopes: wpConfig.scopes,
-        pamPolicy: wpConfig.pam_policy,
-        tokenTtlSeconds: wpConfig.token_ttl_seconds,
-        targetProject: effectiveProjectId,
-        onRefresh,
-      });
-
-  // Step 4: Start temporary metadata proxy with the engineer's email so
-  // gcloud can discover the account (it ignores the "default" alias).
-  const { server, stop } = startMetadataProxyServer(
-    {
-      project_id: effectiveProjectId,
-      service_account: initialEmail,
-      socket_path: wpConfig.socket_path,
-      admin_socket_path: wpConfig.admin_socket_path,
-      port: 0,
-    },
-    {
-      tokenProvider,
-      installSignalHandlers: false,
-      quiet: true,
-      allowedAncestorPid: process.pid,
-      scopes: wpConfig.scopes,
-    },
-  );
-
-  const metadataHost = `127.0.0.1:${server.port}`;
-
+  let gcloudConfigDir: string | undefined;
+  let stopProxy: (() => void) | undefined;
+  let previousUmask: number | undefined;
   let exitCode: number | undefined;
+
+  // Everything after session acquisition is one transaction. Any setup error
+  // must restore the process umask, revoke the live session, and remove any
+  // token-bearing files that were created before the failure.
   try {
+    // Tighten umask only around the token-bearing file creation below. The
+    // wrapped child must not inherit it, even when mkdir/write throws.
+    previousUmask = process.umask(0o077);
+    try {
+      // Step 2: Create an isolated gcloud config directory BEFORE the token
+      // provider so onRefresh can capture the file path in its closure.
+      // The sandbox dir (mkdtempSync) is the real security boundary — created
+      // 0o700 owned by the caller, with 0o600 token files inside — so the
+      // parent's exact mode doesn't matter. mkdirSync no-ops on existing dirs.
+      const runtimeDir = getDefaultWithProdRuntimeDir();
+      mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
+      gcloudConfigDir = mkdtempSync(join(runtimeDir, "gcp-authcalator-gcloud-"));
+      chmodSync(gcloudConfigDir, 0o700);
+
+      const tokenFilePath = join(gcloudConfigDir, "access_token");
+      writeFileSync(tokenFilePath, initialAccessToken, { mode: 0o600 });
+      writeFileSync(
+        join(gcloudConfigDir, "properties"),
+        `[auth]\naccess_token_file = ${tokenFilePath}\n`,
+        { mode: 0o600 },
+      );
+    } finally {
+      process.umask(previousUmask);
+      previousUmask = undefined;
+    }
+
+    const tokenFilePath = join(gcloudConfigDir, "access_token");
+
+    // Step 3: Create a token provider that auto-refreshes from the gate.
+    // The session ID (when present) stays in this closure — the subprocess
+    // never sees it. In per-request mode there is no session; each refresh
+    // re-hits the gate (auto-approved on the operator socket).
+    const initialToken = {
+      access_token: initialAccessToken,
+      expires_at: new Date(Date.now() + initialExpiresIn * 1000),
+    };
+    const onRefresh = (token: { access_token: string }) => {
+      replaceTokenFile(tokenFilePath, token.access_token);
+    };
+    const tokenProvider: TokenProvider = sessionId
+      ? createSessionTokenProvider(conn, sessionId, initialToken, {
+          fetchFn: options.fetchOptions?.fetchFn,
+          onRefresh,
+          targetProject: effectiveProjectId,
+        })
+      : createPerRequestTokenProvider(conn, initialToken, {
+          fetchFn: options.fetchOptions?.fetchFn,
+          command: wrappedCommand,
+          scopes: wpConfig.scopes,
+          pamPolicy: wpConfig.pam_policy,
+          tokenTtlSeconds: wpConfig.token_ttl_seconds,
+          targetProject: effectiveProjectId,
+          onRefresh,
+        });
+
+    // Step 4: Start temporary metadata proxy with the engineer's email so
+    // gcloud can discover the account (it ignores the "default" alias).
+    const { server, stop } = startMetadataProxyServer(
+      {
+        project_id: effectiveProjectId,
+        service_account: initialEmail,
+        socket_path: wpConfig.socket_path,
+        admin_socket_path: wpConfig.admin_socket_path,
+        port: 0,
+      },
+      {
+        tokenProvider,
+        installSignalHandlers: false,
+        quiet: true,
+        allowedAncestorPid: process.pid,
+        scopes: wpConfig.scopes,
+      },
+    );
+    stopProxy = stop;
+
+    const metadataHost = `127.0.0.1:${server.port}`;
+
     // Step 5: Spawn wrapped command with metadata env vars
     const baseEnv: Record<string, string | undefined> = {
       ...stripCredentialEnvVars(process.env),
@@ -446,17 +629,18 @@ export async function runWithProd(
       stderr: "inherit",
     });
 
-    // Step 6: Forward signals to child
-    const forwardSignal = (signal: NodeJS.Signals) => {
-      child.kill(signal === "SIGINT" ? 2 : 15);
-    };
-    process.on("SIGTERM", () => forwardSignal("SIGTERM"));
-    process.on("SIGINT", () => forwardSignal("SIGINT"));
-
-    // Step 7: Wait for child
-    exitCode = (await child.exited) ?? undefined;
+    // Step 6: Forward signals with bounded cleanup, then wait for the child.
+    // Switching handlers is synchronous, so no signal can be delivered in the
+    // gap between removing the acquisition listener and installing the child
+    // supervisor inside waitForChildExit.
+    removeAcquisitionSignalHandlers();
+    exitCode = await waitForChildExit(child, { signalSource });
   } finally {
-    stop();
+    removeAcquisitionSignalHandlers();
+    // Restore defensively in case setup failed inside the narrow umask block
+    // before its own finally ran to completion.
+    if (previousUmask !== undefined) process.umask(previousUmask);
+    stopProxy?.();
     // Best-effort revoke the session so gate can clean up immediately.
     // In per-request mode (operator socket) there is no session to revoke.
     if (sessionId) {
@@ -466,7 +650,7 @@ export async function runWithProd(
         fetchFn: options.fetchOptions?.fetchFn,
       });
     }
-    rmSync(gcloudConfigDir, { recursive: true, force: true });
+    if (gcloudConfigDir) rmSync(gcloudConfigDir, { recursive: true, force: true });
   }
 
   process.exit(exitCode ?? 1);

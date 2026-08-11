@@ -1,7 +1,7 @@
 import {
-  type BunRequestInit,
   type GateConnection,
   connectionFetchOpts,
+  fetchWithGateTimeout,
 } from "../gate/connection.ts";
 import { CREDENTIALS_EXPIRED_CODE, CredentialsExpiredError } from "../gate/credentials-error.ts";
 import { SESSION_NOT_PERMITTED_CODE, TARGET_PROJECT_HEADER } from "../gate/types.ts";
@@ -20,16 +20,20 @@ import { encodeCommandHeader } from "../gate/summarize-command.ts";
 
 /**
  * Acquisition requests (`/token?level=prod`, `POST /session`) block on
- * host-side confirmation (≤120 s pending-queue) AND a PAM grant rotation
- * (≤ the gate's rotation budget), so this is sized above their sum.
+ * a cold identity lookup (up to three 30 s auth stages), host-side
+ * confirmation (≤120 s), a PAM grant rotation (≤420 s), and a production
+ * token mint (up to two 30 s auth stages). PAM and token minting run in
+ * parallel after confirmation, so keep response/transport margin above the
+ * roughly 630 s composed worst case.
  */
-const PROD_FETCH_TIMEOUT_MS = 600_000;
+const PROD_FETCH_TIMEOUT_MS = 720_000;
 
 /**
- * The lightweight `/identity` read does no confirmation or PAM work (just a
- * tokeninfo lookup), so it gets a short cap.
+ * `/identity` does no confirmation or PAM work, but on a cold gate it can run
+ * ADC discovery, token acquisition, and tokeninfo as three sequential
+ * 30-second auth stages.
  */
-const IDENTITY_FETCH_TIMEOUT_MS = 30_000;
+const IDENTITY_FETCH_TIMEOUT_MS = 105_000;
 
 /**
  * Fetch the gate with a backstop timeout, rethrowing an abort as an actionable,
@@ -40,25 +44,7 @@ const IDENTITY_FETCH_TIMEOUT_MS = 30_000;
  * request settles, rather than lingering — important on the repeatedly-called
  * session-refresh path.
  */
-export async function fetchWithGateTimeout(
-  fetchFn: typeof globalThis.fetch,
-  url: string,
-  init: BunRequestInit,
-  timeoutMs: number,
-): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetchFn(url, { ...init, signal: controller.signal });
-  } catch (err) {
-    if (err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError")) {
-      throw new Error(`gcp-gate request timed out after ${timeoutMs}ms: ${url}`, { cause: err });
-    }
-    throw err;
-  } finally {
-    clearTimeout(timer);
-  }
-}
+export { fetchWithGateTimeout };
 
 /** Raised when the gate signals that sessions are disabled on this socket. */
 export class SessionNotPermittedError extends Error {
@@ -101,6 +87,8 @@ export function throwTypedGateError(text: string): void {
 export interface FetchProdTokenOptions {
   /** Override fetch for testing. */
   fetchFn?: typeof globalThis.fetch;
+  /** Cancel an acquisition when the invoking with-prod process is interrupted. */
+  signal?: AbortSignal;
   /** The command being wrapped, sent to gcp-gate for display in the confirmation dialog. */
   command?: string[];
   /** OAuth scopes for the prod token. */
@@ -136,7 +124,7 @@ export interface ProdTokenResult {
 export async function fetchProdAccessToken(
   conn: GateConnection,
   options: FetchProdTokenOptions = {},
-): Promise<{ access_token: string; expires_in: number }> {
+): Promise<{ access_token: string; expires_in: number; email?: string }> {
   const fetchFn = options.fetchFn ?? globalThis.fetch;
   const { baseUrl, extraOpts } = connectionFetchOpts(conn);
 
@@ -165,7 +153,7 @@ export async function fetchProdAccessToken(
   const tokenRes = await fetchWithGateTimeout(
     fetchFn,
     tokenUrl,
-    { ...extraOpts, headers },
+    { ...extraOpts, headers, signal: options.signal },
     PROD_FETCH_TIMEOUT_MS,
   );
 
@@ -175,7 +163,11 @@ export async function fetchProdAccessToken(
     throw new Error(`gcp-gate returned ${tokenRes.status}: ${text}`);
   }
 
-  const tokenBody = (await tokenRes.json()) as { access_token?: string; expires_in?: number };
+  const tokenBody = (await tokenRes.json()) as {
+    access_token?: string;
+    expires_in?: number;
+    email?: string;
+  };
 
   if (!tokenBody.access_token) {
     throw new Error("gcp-gate returned no access_token");
@@ -184,6 +176,7 @@ export async function fetchProdAccessToken(
   return {
     access_token: tokenBody.access_token,
     expires_in: tokenBody.expires_in ?? 3600,
+    ...(tokenBody.email ? { email: tokenBody.email } : {}),
   };
 }
 
@@ -201,10 +194,23 @@ export async function fetchProdToken(
 
   const token = await fetchProdAccessToken(conn, options);
 
+  // Current gates return the identity in the confirmed token response because
+  // they already resolved it for consent/audit. Keep the separate request as
+  // compatibility with older gates, but avoid adding another auth deadline (or
+  // discarding a valid token after a transient identity failure) in the normal
+  // path.
+  if ("email" in token && typeof token.email === "string" && token.email.length > 0) {
+    return {
+      access_token: token.access_token,
+      expires_in: token.expires_in,
+      email: token.email,
+    };
+  }
+
   const identityRes = await fetchWithGateTimeout(
     fetchFn,
     `${baseUrl}/identity`,
-    extraOpts,
+    { ...extraOpts, signal: options.signal },
     IDENTITY_FETCH_TIMEOUT_MS,
   );
   if (!identityRes.ok) {
@@ -282,7 +288,7 @@ export async function createProdSession(
   const res = await fetchWithGateTimeout(
     fetchFn,
     sessionUrl,
-    { ...extraOpts, method: "POST", headers },
+    { ...extraOpts, method: "POST", headers, signal: options.signal },
     PROD_FETCH_TIMEOUT_MS,
   );
 

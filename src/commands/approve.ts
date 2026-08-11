@@ -1,6 +1,6 @@
 import type { Config } from "../config.ts";
-import type { BunRequestInit } from "../gate/connection.ts";
-import type { PendingRequest } from "../gate/pending.ts";
+import { type BunRequestInit, fetchWithGateTimeout, GateTimeoutError } from "../gate/connection.ts";
+import { isValidPendingId, type PendingRequest } from "../gate/pending.ts";
 import type { ErrorResponse } from "../gate/types.ts";
 
 interface ResolveResponse {
@@ -10,6 +10,9 @@ interface ResolveResponse {
 interface ListResponse {
   pending: PendingRequest[];
 }
+
+/** Local admin-socket requests should complete promptly or fail clearly. */
+const ADMIN_FETCH_TIMEOUT_MS = 5_000;
 
 /**
  * `PendingRequest` as it arrives over the wire: JSON has no Date type, so the
@@ -28,6 +31,8 @@ export interface ApproveFlags {
   isTTY?: boolean;
   /** Override the confirmation reader for testing. `null` models the deadline firing. */
   readLine?: () => Promise<string | null>;
+  /** Override fetch for testing. */
+  fetchFn?: typeof globalThis.fetch;
 }
 
 export async function runApprove(
@@ -35,6 +40,7 @@ export async function runApprove(
   positionals: string[],
   flags: ApproveFlags,
 ): Promise<void> {
+  const fetchFn = flags.fetchFn ?? globalThis.fetch;
   const baseUrl = "http://localhost";
   const extraOpts: BunRequestInit = { unix: config.admin_socket_path };
 
@@ -47,13 +53,14 @@ export async function runApprove(
     console.log("Run 'gcp-authcalator pending' to list requests and see their full commands.");
     return;
   }
+  requirePendingId(id);
 
   const action = flags.deny ? "deny" : "approve";
 
   // Show what is being approved before approving it. Denying needs no such
   // care — the failure mode we're guarding against is a blind yes.
   if (action === "approve") {
-    const request = await fetchPending(baseUrl, extraOpts, id);
+    const request = await fetchPending(fetchFn, baseUrl, extraOpts, id);
     printRequest(request);
 
     if (!(await confirmApproval(flags, Date.parse(request.expiresAt)))) {
@@ -62,22 +69,28 @@ export async function runApprove(
     }
   }
 
-  await resolvePending(baseUrl, extraOpts, id, action);
+  await resolvePending(fetchFn, baseUrl, extraOpts, id, action);
 }
 
 /** `gcp-authcalator pending [id]` — inspect the queue without resolving anything. */
-export async function runPending(config: Config, positionals: string[]): Promise<void> {
+export async function runPending(
+  config: Config,
+  positionals: string[],
+  options: Pick<ApproveFlags, "fetchFn"> = {},
+): Promise<void> {
+  const fetchFn = options.fetchFn ?? globalThis.fetch;
   const baseUrl = "http://localhost";
   const extraOpts: BunRequestInit = { unix: config.admin_socket_path };
 
   const id = positionals[0];
 
   if (id) {
-    printRequest(await fetchPending(baseUrl, extraOpts, id));
+    requirePendingId(id);
+    printRequest(await fetchPending(fetchFn, baseUrl, extraOpts, id));
     return;
   }
 
-  const res = await fetch(`${baseUrl}/pending`, extraOpts);
+  const res = await fetchAdmin(fetchFn, `${baseUrl}/pending`, extraOpts);
   if (!res.ok) {
     await failFromResponse(res);
   }
@@ -96,12 +109,20 @@ export async function runPending(config: Config, positionals: string[]): Promise
   }
 }
 
+function requirePendingId(id: string): void {
+  if (isValidPendingId(id)) return;
+
+  console.error("error: invalid pending request ID (expected exactly 32 lowercase hex characters)");
+  process.exit(1);
+}
+
 async function fetchPending(
+  fetchFn: typeof globalThis.fetch,
   baseUrl: string,
   extraOpts: BunRequestInit,
   id: string,
 ): Promise<WirePendingRequest> {
-  const res = await fetch(`${baseUrl}/pending/${id}`, extraOpts);
+  const res = await fetchAdmin(fetchFn, `${baseUrl}/pending/${id}`, extraOpts);
 
   if (res.status === 404) {
     // Three different situations arrive as 404 and want different fixes, so
@@ -217,18 +238,19 @@ function readLine(timeoutMs: number): Promise<string | null> {
 }
 
 async function failFromResponse(res: Response): Promise<never> {
-  const body = (await res.json()) as ErrorResponse;
-  console.error(`error: ${body.error}`);
+  const body = (await res.json().catch(() => null)) as ErrorResponse | null;
+  console.error(`error: ${body?.error ?? `admin socket returned HTTP ${res.status}`}`);
   process.exit(1);
 }
 
 async function resolvePending(
+  fetchFn: typeof globalThis.fetch,
   baseUrl: string,
   extraOpts: BunRequestInit,
   id: string,
   action: "approve" | "deny",
 ): Promise<void> {
-  const res = await fetch(`${baseUrl}/pending/${id}/${action}`, {
+  const res = await fetchAdmin(fetchFn, `${baseUrl}/pending/${id}/${action}`, {
     ...extraOpts,
     method: "POST",
   });
@@ -242,7 +264,32 @@ async function resolvePending(
     await failFromResponse(res);
   }
 
-  const body = (await res.json()) as ResolveResponse;
-  const verb = body.status === "approved" ? "Approved" : "Denied";
+  const body = (await res.json().catch(() => null)) as ResolveResponse | null;
+  const status = body?.status ?? (action === "approve" ? "approved" : "denied");
+  const verb = status === "approved" ? "Approved" : "Denied";
   console.log(`${verb} request ${id}.`);
+}
+
+async function fetchAdmin(
+  fetchFn: typeof globalThis.fetch,
+  url: string,
+  init: BunRequestInit,
+): Promise<Response> {
+  try {
+    return await fetchWithGateTimeout(fetchFn, url, init, ADMIN_FETCH_TIMEOUT_MS);
+  } catch (err) {
+    if (err instanceof GateTimeoutError) {
+      console.error(
+        `error: admin socket not responding (timed out after ${ADMIN_FETCH_TIMEOUT_MS / 1000}s)`,
+      );
+      process.exit(1);
+    }
+
+    const detail = err instanceof Error ? err.message : String(err);
+    console.error(
+      `error: could not connect to the admin socket${init.unix ? ` at ${init.unix}` : ""} (${detail})\n` +
+        "  Is gcp-authcalator running, and does admin_socket_path match the gate's?",
+    );
+    process.exit(1);
+  }
 }

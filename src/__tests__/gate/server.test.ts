@@ -1,6 +1,7 @@
-import { describe, expect, test, afterEach } from "bun:test";
+import { describe, expect, test, afterEach, spyOn } from "bun:test";
 import {
   mkdtempSync,
+  mkdirSync,
   existsSync,
   readFileSync,
   writeFileSync,
@@ -326,6 +327,96 @@ setInterval(() => {}, 1000);`;
     expect(existsSync(socketPath)).toBe(false);
   });
 
+  test("stop() removes the server's signal handlers", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "gate-srv-"));
+    const socketPath = join(tempDir, "gate.sock");
+    const config = makeConfig(socketPath);
+    const termListenersBefore = process.listenerCount("SIGTERM");
+    const intListenersBefore = process.listenerCount("SIGINT");
+
+    result = await startGateServer(config, {
+      authOptions: {
+        sourceClient: mockClient("source-tok"),
+        impersonatedClient: mockClient("dev-tok"),
+        fetchFn: mockFetch("test@example.com"),
+      },
+      auditLogDir: join(tempDir, "audit"),
+    });
+
+    expect(process.listenerCount("SIGTERM")).toBe(termListenersBefore + 1);
+    expect(process.listenerCount("SIGINT")).toBe(intListenersBefore + 1);
+
+    result.stop();
+    result = null;
+    expect(process.listenerCount("SIGTERM")).toBe(termListenersBefore);
+    expect(process.listenerCount("SIGINT")).toBe(intListenersBefore);
+  });
+
+  test("signal shutdown closes listeners before PAM cleanup and is reentrant", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "gate-srv-"));
+    const socketPath = join(tempDir, "gate.sock");
+    const config: GateConfig = {
+      ...makeConfig(socketPath),
+      pam_policy: "prod-db-admin",
+    };
+    let finishWithdraw!: () => void;
+    const withdrawPending = new Promise<void>((resolve) => {
+      finishWithdraw = resolve;
+    });
+    let withdrawCalls = 0;
+    const termListenersBefore = new Set(process.listeners("SIGTERM"));
+    const exitSpy = spyOn(process, "exit").mockImplementation(() => undefined as never);
+
+    try {
+      result = await startGateServer(config, {
+        authOptions: {
+          sourceClient: mockClient("source-tok"),
+          impersonatedClient: mockClient("dev-tok"),
+          fetchFn: mockFetch("test@example.com"),
+        },
+        pamModule: {
+          ensureGrant: async () => ({
+            name: "grants/test",
+            state: "ACTIVE",
+            expiresAt: new Date(Date.now() + 3600_000),
+            cached: false,
+          }),
+          withdrawAll: async () => {
+            withdrawCalls++;
+            await withdrawPending;
+          },
+        },
+        auditLogDir: join(tempDir, "audit"),
+      });
+
+      const signalHandler = process
+        .listeners("SIGTERM")
+        .find((listener) => !termListenersBefore.has(listener));
+      expect(signalHandler).toBeDefined();
+
+      signalHandler!("SIGTERM");
+      signalHandler!("SIGTERM");
+
+      expect(withdrawCalls).toBe(1);
+      expect(existsSync(socketPath)).toBe(false);
+      expect(process.listeners("SIGTERM")).not.toContain(signalHandler!);
+      expect(exitSpy).not.toHaveBeenCalled();
+
+      finishWithdraw();
+      await withdrawPending;
+      await Promise.resolve();
+
+      expect(exitSpy).toHaveBeenCalledTimes(1);
+      expect(exitSpy).toHaveBeenCalledWith(0);
+      result = null;
+    } finally {
+      finishWithdraw();
+      result?.stop();
+      result = null;
+      exitSpy.mockRestore();
+    }
+  });
+
   test("starts admin socket and serves /health on it", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "gate-srv-"));
     const socketPath = join(tempDir, "gate.sock");
@@ -409,6 +500,32 @@ setInterval(() => {}, 1000);`;
     result = null;
 
     expect(existsSync(adminSocketPath)).toBe(false);
+  });
+
+  test("rejects socket paths that alias through a symlinked ancestor", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "gate-srv-alias-"));
+    const realRoot = join(tempDir, "real");
+    const sharedDir = join(realRoot, "shared");
+    const aliasRoot = join(tempDir, "alias");
+    mkdirSync(sharedDir, { recursive: true, mode: 0o700 });
+    symlinkSync(realRoot, aliasRoot);
+
+    const socketPath = join(sharedDir, "gate.sock");
+    const adminSocketPath = join(aliasRoot, "shared", "gate.sock");
+    const config = makeConfig(socketPath, adminSocketPath);
+
+    await expect(
+      startGateServer(config, {
+        authOptions: {
+          sourceClient: mockClient("source-tok"),
+          impersonatedClient: mockClient("dev-tok"),
+          fetchFn: mockFetch("test@example.com"),
+        },
+        auditLogDir: join(tempDir, "audit"),
+      }),
+    ).rejects.toThrow(/resolves to the same filesystem entry/);
+
+    expect(existsSync(socketPath)).toBe(false);
   });
 
   test("admin socket has 0600 permissions", async () => {
@@ -555,16 +672,46 @@ describe("operator socket", () => {
       agent_uid: TEST_AGENT_UID,
     };
 
-    await expect(
-      startGateServer(config, {
+    const previousUmask = process.umask(0o022);
+    try {
+      await expect(
+        startGateServer(config, {
+          authOptions: {
+            sourceClient: mockClient("source-tok"),
+            impersonatedClient: mockClient("dev-tok"),
+            fetchFn: mockFetch("test@example.com"),
+          },
+          auditLogDir: join(tempDir, "audit"),
+        }),
+      ).rejects.toThrow(/not found in \/etc\/group/);
+
+      // Operator validation happens after the main and admin listeners bind.
+      // A rejected startup must roll both back and restore process state.
+      expect(existsSync(config.socket_path)).toBe(false);
+      expect(existsSync(config.admin_socket_path)).toBe(false);
+      expect(process.umask()).toBe(0o022);
+    } finally {
+      process.umask(previousUmask);
+    }
+
+    // Prove no hidden listener survived even if Bun removed its socket file.
+    result = await startGateServer(
+      {
+        ...config,
+        operator_socket_path: undefined,
+        operator_socket_group: undefined,
+        agent_uid: undefined,
+      },
+      {
         authOptions: {
           sourceClient: mockClient("source-tok"),
           impersonatedClient: mockClient("dev-tok"),
           fetchFn: mockFetch("test@example.com"),
         },
         auditLogDir: join(tempDir, "audit"),
-      }),
-    ).rejects.toThrow(/not found in \/etc\/group/);
+      },
+    );
+    expect((await fetchUnix(config.socket_path, "/health")).status).toBe(200);
   });
 
   test("refuses to start when agent_uid equals gate uid", async () => {

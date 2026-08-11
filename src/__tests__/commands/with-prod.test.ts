@@ -1,9 +1,25 @@
 import { describe, expect, test, beforeEach, afterEach, spyOn } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { EventEmitter } from "node:events";
 import { z } from "zod";
-import { resolveEnvSubstitutions, runWithProd } from "../../commands/with-prod.ts";
+import {
+  resolveEnvSubstitutions,
+  replaceTokenFile,
+  runWithProd,
+  waitForChildExit,
+} from "../../commands/with-prod.ts";
+import { GateTimeoutError } from "../../gate/connection.ts";
 import { PROD_SESSION_ENV_VAR } from "../../with-prod/detect-nested-session.ts";
 import type { Subprocess } from "bun";
 
@@ -155,6 +171,108 @@ function mockSpawnCapture() {
   };
   return { mockSpawnFn, getCapturedCmd: () => capturedCmd, getCapturedEnv: () => capturedEnv };
 }
+
+describe("waitForChildExit", () => {
+  test("escalates an ignored SIGTERM to SIGKILL after the cleanup grace period", async () => {
+    const signals = new EventEmitter();
+    const kills: number[] = [];
+    let resolveExit!: (code: number) => void;
+    const exited = new Promise<number>((resolve) => {
+      resolveExit = resolve;
+    });
+    let scheduledCallback: (() => void) | undefined;
+    let scheduledDelay: number | undefined;
+
+    const child = {
+      exited,
+      kill: (signal: number) => {
+        kills.push(signal);
+      },
+    } as unknown as Subprocess;
+
+    const waiting = waitForChildExit(child, {
+      signalSource: signals,
+      scheduleForceKill: (callback, delayMs) => {
+        scheduledCallback = callback;
+        scheduledDelay = delayMs;
+        return () => {};
+      },
+    });
+
+    signals.emit("SIGTERM");
+    expect(kills).toEqual([15]);
+    expect(scheduledDelay).toBe(5_000);
+
+    scheduledCallback?.();
+    expect(kills).toEqual([15, 9]);
+
+    resolveExit(143);
+    expect(await waiting).toBe(143);
+    expect(signals.listenerCount("SIGINT")).toBe(0);
+    expect(signals.listenerCount("SIGTERM")).toBe(0);
+  });
+
+  test("cancels escalation and removes listeners when the child exits", async () => {
+    const signals = new EventEmitter();
+    let resolveExit!: (code: number) => void;
+    const exited = new Promise<number>((resolve) => {
+      resolveExit = resolve;
+    });
+    let cancelCalls = 0;
+
+    const child = {
+      exited,
+      kill: () => {},
+    } as unknown as Subprocess;
+
+    const waiting = waitForChildExit(child, {
+      signalSource: signals,
+      scheduleForceKill: () => () => {
+        cancelCalls++;
+      },
+    });
+
+    signals.emit("SIGINT");
+    resolveExit(130);
+
+    expect(await waiting).toBe(130);
+    expect(cancelCalls).toBe(1);
+    expect(signals.listenerCount("SIGINT")).toBe(0);
+    expect(signals.listenerCount("SIGTERM")).toBe(0);
+  });
+
+  test("a second termination signal skips the remaining grace period", async () => {
+    const signals = new EventEmitter();
+    const kills: number[] = [];
+    let resolveExit!: (code: number) => void;
+    const exited = new Promise<number>((resolve) => {
+      resolveExit = resolve;
+    });
+    let cancelCalls = 0;
+
+    const child = {
+      exited,
+      kill: (signal: number) => {
+        kills.push(signal);
+      },
+    } as unknown as Subprocess;
+
+    const waiting = waitForChildExit(child, {
+      signalSource: signals,
+      scheduleForceKill: () => () => {
+        cancelCalls++;
+      },
+    });
+
+    signals.emit("SIGINT");
+    signals.emit("SIGINT");
+    expect(kills).toEqual([2, 9]);
+    expect(cancelCalls).toBe(1);
+
+    resolveExit(137);
+    expect(await waiting).toBe(137);
+  });
+});
 
 describe("runWithProd", () => {
   let logSpy: ReturnType<typeof spyOn>;
@@ -663,6 +781,28 @@ describe("runWithProd", () => {
     expect(tokenMode).toBe(0o600);
   });
 
+  test("token refresh does not follow a predictable temp-file symlink", () => {
+    const dir = mkdtempSync(join(tmpdir(), "wp-token-refresh-"));
+    try {
+      const tokenPath = join(dir, "access_token");
+      const victimPath = join(dir, "victim");
+      writeFileSync(tokenPath, "old-token", { mode: 0o600 });
+      writeFileSync(victimPath, "do-not-overwrite", { mode: 0o600 });
+
+      // This is the exact fixed temp name used before the exclusive random
+      // update. A wrapped child can create it inside its own CLOUDSDK_CONFIG.
+      symlinkSync(victimPath, `${tokenPath}.tmp`);
+
+      replaceTokenFile(tokenPath, "new-token");
+
+      expect(readFileSync(tokenPath, "utf8")).toBe("new-token");
+      expect(readFileSync(victimPath, "utf8")).toBe("do-not-overwrite");
+      expect(statSync(tokenPath).mode & 0o777).toBe(0o600);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("writes gcloud properties file with access_token_file pointing to token", async () => {
     const mockFetchFn = mockGateFetch();
 
@@ -735,6 +875,59 @@ describe("runWithProd", () => {
 
     expect(capturedConfigDir).toBeTruthy();
     expect(existsSync(capturedConfigDir)).toBe(false);
+  });
+
+  test("revokes the acquired session and restores umask when credential setup fails", async () => {
+    const testDir = mkdtempSync(join(tmpdir(), "wp-setup-failure-"));
+    const runtimeFile = join(testDir, "not-a-directory");
+    writeFileSync(runtimeFile, "block mkdir");
+    const savedRuntime = process.env.XDG_RUNTIME_DIR;
+    process.env.XDG_RUNTIME_DIR = runtimeFile;
+    const originalUmask = process.umask();
+    let revokeCalls = 0;
+
+    const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const path = new URL(url).pathname;
+      if (path === "/health") return new Response("ok");
+      if (path === "/session" && init?.method === "POST") {
+        return Response.json({
+          session_id: "setup-failure-session",
+          access_token: "prod-token",
+          expires_in: 1800,
+          email: "eng@example.com",
+        });
+      }
+      if (path === "/session" && init?.method === "DELETE") {
+        revokeCalls++;
+        return Response.json({ status: "revoked" });
+      }
+      return new Response("Not found", { status: 404 });
+    }) as unknown as typeof globalThis.fetch;
+
+    try {
+      await expect(
+        runWithProd(
+          {
+            project_id: "my-proj",
+            socket_path: "/tmp/gate.sock",
+            port: 8173,
+            admin_socket_path: "/tmp/test-admin.sock",
+          },
+          ["echo", "hello"],
+          { fetchOptions: { fetchFn } },
+        ),
+      ).rejects.toThrow();
+
+      expect(revokeCalls).toBe(1);
+      expect(process.umask()).toBe(originalUmask);
+      expect(exitSpy).not.toHaveBeenCalled();
+    } finally {
+      process.umask(originalUmask);
+      if (savedRuntime === undefined) delete process.env.XDG_RUNTIME_DIR;
+      else process.env.XDG_RUNTIME_DIR = savedRuntime;
+      rmSync(testDir, { recursive: true, force: true });
+    }
   });
 
   test("strips all credential-related env vars from child process", async () => {
@@ -945,6 +1138,89 @@ describe("runWithProd", () => {
     // bury the actionable instruction.
     expect(errorOutput).toContain("with-prod:");
     expect(errorOutput).not.toContain("failed to acquire prod token");
+  });
+
+  test("fails at the short gate preflight instead of entering the 12-minute acquisition wait", async () => {
+    let sessionCalls = 0;
+    const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (new URL(url).pathname === "/health") {
+        expect(init?.signal).toBeInstanceOf(AbortSignal);
+        throw new GateTimeoutError(
+          3_000,
+          url,
+          new DOMException("The operation was aborted", "AbortError"),
+        );
+      }
+      sessionCalls++;
+      return new Response("unexpected", { status: 500 });
+    }) as unknown as typeof globalThis.fetch;
+
+    await expect(
+      runWithProd(
+        {
+          project_id: "my-proj",
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
+        },
+        ["echo", "hello"],
+        { fetchOptions: { fetchFn } },
+      ),
+    ).rejects.toThrow("process.exit called");
+
+    expect(sessionCalls).toBe(0);
+    const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
+    expect(errorOutput).toContain("request timed out after 3000ms");
+    expect(errorOutput).not.toContain("still waiting for approval");
+  });
+
+  test("aborts acquisition and removes signal listeners on SIGINT", async () => {
+    const signals = new EventEmitter();
+    let sessionStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      sessionStarted = resolve;
+    });
+    let spawned = false;
+    const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (new URL(url).pathname === "/health") return Response.json({ status: "ok" });
+      sessionStarted();
+      return new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (signal?.aborted) {
+          reject(signal.reason);
+          return;
+        }
+        signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    }) as unknown as typeof globalThis.fetch;
+
+    const run = runWithProd(
+      {
+        project_id: "my-proj",
+        socket_path: "/tmp/gate.sock",
+        port: 8173,
+        admin_socket_path: "/tmp/test-admin.sock",
+      },
+      ["echo", "hello"],
+      {
+        fetchOptions: { fetchFn },
+        signalSource: signals,
+        spawnFn: (() => {
+          spawned = true;
+          throw new Error("unexpected spawn");
+        }) as never,
+      },
+    );
+    await started;
+    signals.emit("SIGINT");
+
+    await expect(run).rejects.toThrow("process.exit called");
+    expect(exitSpy).toHaveBeenCalledWith(130);
+    expect(spawned).toBe(false);
+    expect(signals.listenerCount("SIGINT")).toBe(0);
+    expect(signals.listenerCount("SIGTERM")).toBe(0);
   });
 
   test("propagates non-zero exit code from child process", async () => {

@@ -18,8 +18,10 @@ export async function runInitTls(options: InitTlsOptions = {}): Promise<void> {
     return;
   }
 
-  // Force-regenerate when init-tls is called explicitly
-  await ensureTlsFiles(tlsDir, true);
+  // Printing an existing bundle is a read-like operation: rotating the CA here
+  // would immediately invalidate every previously distributed client bundle.
+  // Still generate (or renew expired) certificates when no usable set exists.
+  await ensureTlsFiles(tlsDir, !options.bundleB64);
 
   if (options.bundleB64) {
     const b64 = getClientBundleBase64(tlsDir);

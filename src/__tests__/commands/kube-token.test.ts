@@ -42,6 +42,7 @@ describe("runKubeToken", () => {
       fetchFn: mockMetadataFetch(),
       writeFn,
       metadataHost: "127.0.0.1:9999",
+      execInfo: null,
     });
 
     const parsed = JSON.parse(output);
@@ -49,6 +50,40 @@ describe("runKubeToken", () => {
     expect(parsed.kind).toBe("ExecCredential");
     expect(parsed.status.token).toBe("ya29.test-token");
     expect(parsed.status.expirationTimestamp).toBeDefined();
+  });
+
+  test("matches the v1 API version requested by Kubernetes", async () => {
+    let output = "";
+
+    await runKubeToken({
+      fetchFn: mockMetadataFetch(),
+      writeFn: (data) => {
+        output += data;
+      },
+      metadataHost: "127.0.0.1:9999",
+      execInfo: JSON.stringify({
+        apiVersion: "client.authentication.k8s.io/v1",
+        kind: "ExecCredential",
+        spec: { interactive: false },
+      }),
+    });
+
+    expect(JSON.parse(output).apiVersion).toBe("client.authentication.k8s.io/v1");
+  });
+
+  test("keeps the compatible v1beta1 fallback for direct invocation", async () => {
+    let output = "";
+
+    await runKubeToken({
+      fetchFn: mockMetadataFetch(),
+      writeFn: (data) => {
+        output += data;
+      },
+      metadataHost: "127.0.0.1:9999",
+      execInfo: null,
+    });
+
+    expect(JSON.parse(output).apiVersion).toBe("client.authentication.k8s.io/v1beta1");
   });
 
   test("sets expirationTimestamp ~1s from now", async () => {

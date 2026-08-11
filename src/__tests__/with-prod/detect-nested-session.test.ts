@@ -95,28 +95,23 @@ describe("detectNestedSession", () => {
     expect(result).toBeNull();
   });
 
-  test("returns null when token endpoint returns non-200", async () => {
-    const result = await detectNestedSession(
-      { [PROD_SESSION_ENV_VAR]: "127.0.0.1:54321" },
-      mockProxyFetch({ tokenStatus: 403 }),
-    );
-    expect(result).toBeNull();
-  });
+  test("does not invoke the token endpoint as a health check", async () => {
+    let tokenCalls = 0;
+    const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (new URL(url).pathname.endsWith("/token")) {
+        tokenCalls++;
+        return new Promise<Response>(() => {});
+      }
+      return mockProxyFetch()(input, init);
+    }) as unknown as typeof globalThis.fetch;
 
-  test("returns null when token has expired (expires_in <= 0)", async () => {
     const result = await detectNestedSession(
       { [PROD_SESSION_ENV_VAR]: "127.0.0.1:54321" },
-      mockProxyFetch({ tokenBody: { access_token: "tok", expires_in: 0 } }),
+      fetchFn,
     );
-    expect(result).toBeNull();
-  });
-
-  test("returns null when token has negative expires_in", async () => {
-    const result = await detectNestedSession(
-      { [PROD_SESSION_ENV_VAR]: "127.0.0.1:54321" },
-      mockProxyFetch({ tokenBody: { access_token: "tok", expires_in: -100 } }),
-    );
-    expect(result).toBeNull();
+    expect(result).not.toBeNull();
+    expect(tokenCalls).toBe(0);
   });
 
   test("returns null when email endpoint fails", async () => {

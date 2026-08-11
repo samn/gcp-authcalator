@@ -4,12 +4,64 @@ import type { AuthClient } from "google-auth-library";
 import { DEFAULT_SCOPES, type GateConfig } from "../config.ts";
 import { CredentialsExpiredError, mapAdcError } from "./credentials-error.ts";
 import type { CachedToken } from "./types.ts";
-
-/** Minimum remaining lifetime before we re-mint a cached token (5 minutes). */
-const CACHE_MARGIN_MS = 5 * 60 * 1000;
+import { tokenRefreshAt } from "../token-cache.ts";
 
 /** Fallback token lifetime when not configured (1 hour). */
 const FALLBACK_LIFETIME = 3600;
+
+/**
+ * Wall-clock limit for one authentication operation. GoogleAuth has its own
+ * transport retries, but it does not provide a deadline that bounds every ADC
+ * discovery and token-refresh path. Keeping the deadline here prevents one
+ * wedged credential provider or Google API response from occupying a gate
+ * request indefinitely.
+ */
+const AUTH_OPERATION_TIMEOUT_MS = 30_000;
+
+/** A Google authentication operation exceeded its wall-clock deadline. */
+export class AuthTimeoutError extends Error {
+  constructor(
+    readonly operation: string,
+    readonly timeoutMs: number,
+  ) {
+    super(
+      `Authentication timed out after ${timeoutMs}ms while ${operation}. ` +
+        "Check network connectivity from the gate host to Google APIs, then retry.",
+    );
+    this.name = "AuthTimeoutError";
+  }
+}
+
+/**
+ * Bound work from APIs which do not accept an AbortSignal (notably
+ * google-auth-library). Promise.race installs rejection handlers on both
+ * promises, so a late rejection from abandoned library work is still handled.
+ */
+async function withAuthTimeout<T>(
+  operation: string,
+  timeoutMs: number,
+  work: () => Promise<T>,
+  onTimeout?: () => void,
+): Promise<T> {
+  const timeoutError = new AuthTimeoutError(operation, timeoutMs);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      // Reject first so an AbortError raised synchronously by onTimeout cannot
+      // win the race and obscure the actionable timeout error.
+      reject(timeoutError);
+      onTimeout?.();
+    }, timeoutMs);
+    timer.unref?.();
+  });
+
+  try {
+    return await Promise.race([Promise.resolve().then(work), timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 /**
  * Extract the OAuth-style `error` field from a non-OK response and format
@@ -46,6 +98,10 @@ export interface AuthModuleOptions {
   impersonatedClient?: AuthClient;
   /** Override fetch for tokeninfo calls — for testing. */
   fetchFn?: typeof globalThis.fetch;
+  /** Override GoogleAuth construction — for testing ADC discovery. */
+  googleAuthFactory?: (scopes: string[]) => { getClient: () => Promise<AuthClient> };
+  /** Override the wall-clock deadline for each auth operation — for testing. */
+  operationTimeoutMs?: number;
 }
 
 export interface AuthModule {
@@ -76,12 +132,51 @@ export interface AuthModule {
 export function createAuthModule(config: GateConfig, options: AuthModuleOptions = {}): AuthModule {
   const fetchFn = options.fetchFn ?? globalThis.fetch;
   const configTtl = config.token_ttl_seconds ?? FALLBACK_LIFETIME;
+  const operationTimeoutMs = options.operationTimeoutMs ?? AUTH_OPERATION_TIMEOUT_MS;
+  const googleAuthFactory =
+    options.googleAuthFactory ?? ((scopes: string[]) => new GoogleAuth({ scopes }));
+
+  if (!Number.isFinite(operationTimeoutMs) || operationTimeoutMs <= 0) {
+    throw new Error("Authentication operation timeout must be a positive finite number");
+  }
+
+  /** Fetch and fully buffer a small Google API response under one deadline. */
+  async function fetchAuthResponse(
+    url: string,
+    init: RequestInit,
+    operation: string,
+  ): Promise<Response> {
+    const controller = new AbortController();
+    return withAuthTimeout(
+      operation,
+      operationTimeoutMs,
+      async () => {
+        const response = await fetchFn(url, { ...init, signal: controller.signal });
+        // fetch() resolves at headers. Buffering here keeps a peer that stalls
+        // mid-body under the same wall-clock deadline.
+        const body = await response.arrayBuffer();
+        return new Response(body.byteLength > 0 ? body : null, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: response.headers,
+        });
+      },
+      () => controller.abort(),
+    );
+  }
 
   // Lazily initialized clients
   let sourceClient: AuthClient | null = options.sourceClient ?? null;
+  let sourceClientInitialization: Promise<{
+    client: AuthClient;
+    generation: number;
+  }> | null = null;
+  let sourceClientGeneration = 0;
 
   // Per-scope-and-ttl caches for dev tokens (impersonated)
   const devTokenCaches = new Map<string, CachedToken>();
+  const devTokenRefreshTimes = new Map<string, number>();
+  const devTokenRefreshes = new Map<string, Promise<CachedToken>>();
   const impersonatedClients = new Map<string, AuthClient>();
 
   // Default impersonated client (from options, for testing)
@@ -113,9 +208,19 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
     } catch (err) {
       const mapped = mapAdcError(err);
       if (mapped instanceof CredentialsExpiredError) {
-        if (!options.sourceClient) sourceClient = null;
+        if (!options.sourceClient) {
+          // Fence any ADC discovery which began before this failure. The
+          // underlying google-auth-library work cannot be cancelled, so a
+          // late result must not repopulate the cache with the superseded
+          // credentials.
+          sourceClientGeneration++;
+          sourceClient = null;
+          sourceClientInitialization = null;
+        }
         impersonatedClients.clear();
         devTokenCaches.clear();
+        devTokenRefreshTimes.clear();
+        devTokenRefreshes.clear();
         emailCache = null;
       }
       throw mapped;
@@ -128,9 +233,31 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
   }
 
   async function getSourceClient(): Promise<AuthClient> {
-    if (!sourceClient) {
-      const auth = new GoogleAuth({ scopes: DEFAULT_SCOPES });
-      sourceClient = await auth.getClient();
+    while (!sourceClient) {
+      let initialization = sourceClientInitialization;
+      if (!initialization) {
+        const generation = sourceClientGeneration;
+        const auth = googleAuthFactory(DEFAULT_SCOPES);
+        initialization = withAuthTimeout(
+          "loading Application Default Credentials",
+          operationTimeoutMs,
+          () => auth.getClient(),
+        ).then((client) => ({ client, generation }));
+        sourceClientInitialization = initialization;
+      }
+
+      try {
+        const initialized = await initialization;
+        if (initialized.generation === sourceClientGeneration) {
+          sourceClient = initialized.client;
+        }
+      } finally {
+        // Promise identity matters when a credentials-expired reset starts a
+        // replacement discovery before superseded work has settled.
+        if (sourceClientInitialization === initialization) {
+          sourceClientInitialization = null;
+        }
+      }
     }
     return sourceClient;
   }
@@ -157,9 +284,12 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
     return client;
   }
 
-  function isCacheValid(cached: CachedToken | null | undefined): cached is CachedToken {
+  function isCacheValid(
+    cached: CachedToken | null | undefined,
+    refreshAt: number | undefined,
+  ): cached is CachedToken {
     if (!cached) return false;
-    return cached.expires_at.getTime() - Date.now() > CACHE_MARGIN_MS;
+    return refreshAt !== undefined && Date.now() < refreshAt;
   }
 
   /** Extract expiry from the client's credentials, falling back to configured TTL. */
@@ -175,13 +305,20 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
     const key = cacheKey(effectiveScopes, effectiveTtl);
 
     const cached = devTokenCaches.get(key);
-    if (isCacheValid(cached)) {
+    if (isCacheValid(cached, devTokenRefreshTimes.get(key))) {
       return cached;
     }
 
-    return withAdcMapping(async () => {
+    const existingRefresh = devTokenRefreshes.get(key);
+    if (existingRefresh) return existingRefresh;
+
+    const refresh = withAdcMapping(async () => {
       const client = await getImpersonatedClient(effectiveScopes, effectiveTtl);
-      const { token } = await client.getAccessToken();
+      const { token } = await withAuthTimeout(
+        "minting an impersonated development token",
+        operationTimeoutMs,
+        () => client.getAccessToken(),
+      );
 
       if (!token) {
         throw new Error("Failed to mint dev token: no access token returned");
@@ -192,8 +329,17 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
         expires_at: expiryFromCredentials(client, effectiveTtl),
       };
       devTokenCaches.set(key, result);
+      devTokenRefreshTimes.set(key, tokenRefreshAt(result.expires_at.getTime(), Date.now()));
       return result;
     });
+    devTokenRefreshes.set(key, refresh);
+    try {
+      return await refresh;
+    } finally {
+      if (devTokenRefreshes.get(key) === refresh) {
+        devTokenRefreshes.delete(key);
+      }
+    }
   }
 
   async function mintProdToken(scopes?: string[], ttlSeconds?: number): Promise<CachedToken> {
@@ -212,11 +358,19 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
         client = await getSourceClient();
       } else {
         // Custom scopes — create a fresh GoogleAuth with those scopes
-        const auth = new GoogleAuth({ scopes: effectiveScopes });
-        client = await auth.getClient();
+        const auth = googleAuthFactory(effectiveScopes);
+        client = await withAuthTimeout(
+          "loading Application Default Credentials for custom scopes",
+          operationTimeoutMs,
+          () => auth.getClient(),
+        );
       }
 
-      const { token } = await client.getAccessToken();
+      const { token } = await withAuthTimeout(
+        "minting a production access token",
+        operationTimeoutMs,
+        () => client.getAccessToken(),
+      );
 
       if (!token) {
         throw new Error("Failed to mint prod token: no access token returned");
@@ -241,14 +395,20 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
 
     return withAdcMapping(async () => {
       const client = await getSourceClient();
-      const { token } = await client.getAccessToken();
+      const { token } = await withAuthTimeout(
+        "loading an access token for identity lookup",
+        operationTimeoutMs,
+        () => client.getAccessToken(),
+      );
 
       if (!token) {
         throw new Error("Failed to get identity: no access token available");
       }
 
-      const resp = await fetchFn(
+      const resp = await fetchAuthResponse(
         `https://oauth2.googleapis.com/tokeninfo?access_token=${encodeURIComponent(token)}`,
+        {},
+        "querying the OAuth tokeninfo endpoint",
       );
 
       if (!resp.ok) {
@@ -277,15 +437,20 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
 
     return withAdcMapping(async () => {
       const client = await getSourceClient();
-      const { token } = await client.getAccessToken();
+      const { token } = await withAuthTimeout(
+        "loading an access token for project lookup",
+        operationTimeoutMs,
+        () => client.getAccessToken(),
+      );
 
       if (!token) {
         throw new Error("Failed to get project number: no access token available");
       }
 
-      const resp = await fetchFn(
+      const resp = await fetchAuthResponse(
         `https://cloudresourcemanager.googleapis.com/v3/projects/${encodeURIComponent(config.project_id)}`,
         { headers: { Authorization: `Bearer ${token}` } },
+        "querying the Cloud Resource Manager API",
       );
 
       if (!resp.ok) {
@@ -324,7 +489,11 @@ export function createAuthModule(config: GateConfig, options: AuthModuleOptions 
   async function getSourceAccessToken(): Promise<string> {
     return withAdcMapping(async () => {
       const client = await getSourceClient();
-      const { token } = await client.getAccessToken();
+      const { token } = await withAuthTimeout(
+        "loading an Application Default Credentials access token",
+        operationTimeoutMs,
+        () => client.getAccessToken(),
+      );
       if (!token) {
         throw new Error("Failed to get ADC access token: no token returned");
       }

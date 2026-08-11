@@ -127,6 +127,10 @@ describe("ConfigSchema", () => {
     expect(config.port).toBe(9090);
   });
 
+  test("rejects unknown configuration keys", () => {
+    expect(() => ConfigSchema.parse({ projectID: "misspelled-project-id" })).toThrow(z.ZodError);
+  });
+
   test("coerces port from string to number", () => {
     const config = ConfigSchema.parse({ port: "4000" });
     expect(config.port).toBe(4000);
@@ -156,6 +160,27 @@ describe("ConfigSchema", () => {
     expect(() => ConfigSchema.parse({ socket_path: "" })).toThrow(z.ZodError);
   });
 
+  test("requires absolute Unix socket paths", () => {
+    expect(() => ConfigSchema.parse({ socket_path: "relative/gate.sock" })).toThrow(/absolute/);
+    expect(() => ConfigSchema.parse({ admin_socket_path: "relative/admin.sock" })).toThrow(
+      /absolute/,
+    );
+    expect(() => ConfigSchema.parse({ operator_socket_path: "relative/operator.sock" })).toThrow(
+      /absolute/,
+    );
+  });
+
+  test("normalizes every Unix socket path", () => {
+    const config = ConfigSchema.parse({
+      socket_path: "/tmp/runtime/../gate.sock",
+      admin_socket_path: "/tmp/admin/./admin.sock",
+      operator_socket_path: "/tmp/operator/../operator.sock",
+    });
+    expect(config.socket_path).toBe("/tmp/gate.sock");
+    expect(config.admin_socket_path).toBe("/tmp/admin/admin.sock");
+    expect(config.operator_socket_path).toBe("/tmp/operator.sock");
+  });
+
   test("expands ~ in socket_path", () => {
     const config = ConfigSchema.parse({ socket_path: "~/.gcp-authcalator/my.sock" });
     expect(config.socket_path).toBe(join(homedir(), ".gcp-authcalator/my.sock"));
@@ -181,13 +206,43 @@ describe("ConfigSchema", () => {
     expect(() => ConfigSchema.parse({ gate_tls_port: 70000 })).toThrow(z.ZodError);
   });
 
-  test("gate_url must use https://", () => {
+  test("gate_url must use HTTPS", () => {
     expect(() => ConfigSchema.parse({ gate_url: "http://localhost:8174" })).toThrow(z.ZodError);
   });
 
-  test("accepts valid https gate_url", () => {
+  test("accepts an HTTPS origin with or without a trailing slash", () => {
     const config = ConfigSchema.parse({ gate_url: "https://localhost:8174" });
     expect(config.gate_url).toBe("https://localhost:8174");
+    expect(ConfigSchema.parse({ gate_url: "https://localhost:8174/" }).gate_url).toBe(
+      "https://localhost:8174/",
+    );
+  });
+
+  test("rejects malformed gate_url values and non-root paths", () => {
+    expect(() => ConfigSchema.parse({ gate_url: "not a URL" })).toThrow(z.ZodError);
+    expect(() => ConfigSchema.parse({ gate_url: "https:///localhost" })).toThrow(z.ZodError);
+    expect(() => ConfigSchema.parse({ gate_url: "https://[invalid-host" })).toThrow(z.ZodError);
+    expect(() => ConfigSchema.parse({ gate_url: "https://localhost:8174/api" })).toThrow(
+      z.ZodError,
+    );
+    expect(() => ConfigSchema.parse({ gate_url: "https://localhost:8174//" })).toThrow(z.ZodError);
+    expect(() => ConfigSchema.parse({ gate_url: "https://localhost:8174/api/.." })).toThrow(
+      z.ZodError,
+    );
+    expect(() => ConfigSchema.parse({ gate_url: "https:\\localhost:8174" })).toThrow(z.ZodError);
+  });
+
+  test("rejects credentials, queries, and fragments in gate_url", () => {
+    expect(() => ConfigSchema.parse({ gate_url: "https://user:secret@localhost:8174" })).toThrow(
+      z.ZodError,
+    );
+    expect(() => ConfigSchema.parse({ gate_url: "https://@localhost:8174" })).toThrow(z.ZodError);
+    expect(() => ConfigSchema.parse({ gate_url: "https://localhost:8174?mode=prod" })).toThrow(
+      z.ZodError,
+    );
+    expect(() => ConfigSchema.parse({ gate_url: "https://localhost:8174#token" })).toThrow(
+      z.ZodError,
+    );
   });
 
   test("gate_url is optional", () => {
@@ -221,6 +276,10 @@ describe("ConfigSchema", () => {
   test("allows undefined scopes", () => {
     const config = ConfigSchema.parse({});
     expect(config.scopes).toBeUndefined();
+  });
+
+  test("rejects an empty scopes array", () => {
+    expect(() => ConfigSchema.parse({ scopes: [] })).toThrow(z.ZodError);
   });
 
   test("rejects scopes with empty strings", () => {
@@ -292,9 +351,8 @@ describe("ConfigSchema", () => {
     expect(() => ConfigSchema.parse({ pam_grant_ttl_seconds: 30 })).toThrow(z.ZodError);
   });
 
-  // A grant must outlive the 5-minute drain margin, otherwise hasUsableLifetime
-  // is never satisfied and every minted token is clamped to 0s (born expired),
-  // sending the client into a refresh storm. The schema must reject it.
+  // Rotation starts at the five-minute drain boundary. A grant at or below
+  // that threshold cannot back a token with a positive advertised lifetime.
   test("rejects pam_grant_ttl_seconds at or below the 300s drain margin", () => {
     expect(() => ConfigSchema.parse({ pam_grant_ttl_seconds: 300 })).toThrow(/drain margin/);
     expect(() => ConfigSchema.parse({ pam_grant_ttl_seconds: 120 })).toThrow(/drain margin/);
@@ -387,6 +445,41 @@ describe("GateConfigSchema", () => {
     expect(config.socket_path).toBe(getDefaultSocketPath());
   });
 
+  test("requires gate, admin, and operator sockets to be pairwise distinct", () => {
+    const base = {
+      project_id: "my-proj",
+      service_account: "sa@proj.iam.gserviceaccount.com",
+    };
+
+    expect(() =>
+      GateConfigSchema.parse({
+        ...base,
+        socket_path: "/tmp/gate.sock",
+        admin_socket_path: "/tmp/gate.sock",
+      }),
+    ).toThrow(/same path/);
+
+    expect(() =>
+      GateConfigSchema.parse({
+        ...base,
+        socket_path: "/tmp/gate.sock",
+        admin_socket_path: "/tmp/admin.sock",
+        operator_socket_path: "/tmp/runtime/../gate.sock",
+        agent_uid: 1001,
+      }),
+    ).toThrow(/same path/);
+
+    expect(() =>
+      GateConfigSchema.parse({
+        ...base,
+        socket_path: "/tmp/gate.sock",
+        admin_socket_path: "/tmp/admin.sock",
+        operator_socket_path: "/tmp/operator/../admin.sock",
+        agent_uid: 1001,
+      }),
+    ).toThrow(/same path/);
+  });
+
   // The drain-margin floor must also cover the fallback: when pam_policy is set
   // and pam_grant_ttl_seconds is unset, token_ttl_seconds becomes the grant
   // lifetime, so a sub-margin token TTL must be rejected too — otherwise the
@@ -399,6 +492,23 @@ describe("GateConfigSchema", () => {
         token_ttl_seconds: 120,
       }),
     ).toThrow(/drain margin/);
+  });
+
+  test("applies the 300s drain floor to the inherited PAM grant TTL", () => {
+    expect(() =>
+      GateConfigSchema.parse({
+        project_id: "my-proj",
+        pam_policy: "prod-admin",
+        token_ttl_seconds: 300,
+      }),
+    ).toThrow(/drain margin/);
+
+    const config = GateConfigSchema.parse({
+      project_id: "my-proj",
+      pam_policy: "prod-admin",
+      token_ttl_seconds: 301,
+    });
+    expect(config.token_ttl_seconds).toBe(301);
   });
 
   test("allows a sub-margin token_ttl_seconds when no pam_policy is configured", () => {
@@ -764,6 +874,14 @@ describe("loadConfig", () => {
     expect(config.project_id).toBe("toml-project");
     expect(config.socket_path).toBe("/custom/path.sock");
     expect(config.port).toBe(8173);
+  });
+
+  test("rejects unknown keys from TOML instead of silently discarding typos", () => {
+    const dir = mkdtempSync(join(tmpdir(), "config-test-"));
+    const filePath = join(dir, "config.toml");
+    writeFileSync(filePath, `project_id = "toml-project"\nporrt = 4000\n`);
+
+    expect(() => loadConfig({}, filePath)).toThrow(z.ZodError);
   });
 
   test("expands tilde in socket_path from TOML", () => {

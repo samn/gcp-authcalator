@@ -7,9 +7,25 @@
  * Revert by re-running `gcloud container clusters get-credentials`.
  */
 
-import { readFileSync, writeFileSync, copyFileSync, realpathSync } from "node:fs";
+import {
+  accessSync,
+  chmodSync,
+  chownSync,
+  closeSync,
+  constants,
+  copyFileSync,
+  fsyncSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 const GKE_PLUGIN_COMMAND = "gke-gcloud-auth-plugin";
 const AUTHCALATOR_ARGS = ["kube-token"];
@@ -69,6 +85,76 @@ function resolveKubeconfigPath(override?: string): string {
     if (first) return first;
   }
   return join(homedir(), ".kube", "config");
+}
+
+function temporarySiblingPath(targetPath: string): string {
+  return join(
+    dirname(targetPath),
+    `.${basename(targetPath)}.gcp-authcalator-${process.pid}-${randomUUID()}.tmp`,
+  );
+}
+
+function syncFile(path: string): void {
+  const fd = openSync(path, "r");
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Replace a file only after its complete new contents have reached disk. */
+function writeFileAtomically(targetPath: string, contents: string): void {
+  const targetStat = statSync(targetPath);
+
+  // rename(2) checks the directory rather than the replaced file, so preserve
+  // the existing direct-write behavior for an intentionally read-only config.
+  if ((targetStat.mode & 0o222) === 0) {
+    throw new Error(`kubeconfig is read-only: ${targetPath}`);
+  }
+  accessSync(targetPath, constants.W_OK);
+
+  const temporaryPath = temporarySiblingPath(targetPath);
+  try {
+    writeFileSync(temporaryPath, contents, {
+      encoding: "utf-8",
+      flag: "wx",
+      mode: targetStat.mode & 0o777,
+    });
+    // File-creation modes are filtered through the process umask. Restore the
+    // exact original permissions before rename so the patch is metadata-neutral.
+    chmodSync(temporaryPath, targetStat.mode & 0o777);
+    chownSync(temporaryPath, targetStat.uid, targetStat.gid);
+    syncFile(temporaryPath);
+    renameSync(temporaryPath, targetPath);
+  } catch (err) {
+    try {
+      unlinkSync(temporaryPath);
+    } catch {
+      // The file may not have been created, or rename may already have moved it.
+    }
+    throw err;
+  }
+}
+
+/** Copy through a same-directory temporary file so a prior backup stays valid. */
+function copyFileAtomically(sourcePath: string, targetPath: string): void {
+  const sourceStat = statSync(sourcePath);
+  const temporaryPath = temporarySiblingPath(targetPath);
+  try {
+    copyFileSync(sourcePath, temporaryPath, constants.COPYFILE_EXCL);
+    chmodSync(temporaryPath, sourceStat.mode & 0o777);
+    chownSync(temporaryPath, sourceStat.uid, sourceStat.gid);
+    syncFile(temporaryPath);
+    renameSync(temporaryPath, targetPath);
+  } catch (err) {
+    try {
+      unlinkSync(temporaryPath);
+    } catch {
+      // The file may not have been created, or rename may already have moved it.
+    }
+    throw err;
+  }
 }
 
 export function patchKubeconfig(
@@ -158,16 +244,19 @@ export async function runKubeSetup(options: KubeSetupOptions = {}): Promise<void
   // Back up the original kubeconfig
   const backupPath = `${kubeconfigPath}.bak`;
   try {
-    copyFileSync(kubeconfigPath, backupPath);
-  } catch {
-    // Non-fatal: warn but continue
-    console.warn(`kube-setup: could not create backup at ${backupPath}`);
+    copyFileAtomically(kubeconfigPath, backupPath);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`kube-setup: failed to create backup at ${backupPath}: ${msg}`);
+    console.error("kube-setup: kubeconfig was not modified");
+    process.exit(1);
   }
 
   const output = Bun.YAML.stringify(patched, null, 2);
 
   try {
-    writeFileSync(kubeconfigPath, output, "utf-8");
+    // Follow a kubeconfig symlink instead of replacing the symlink itself.
+    writeFileAtomically(realpathSync(kubeconfigPath), output);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`kube-setup: failed to write kubeconfig: ${msg}`);

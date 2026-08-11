@@ -29,4 +29,9 @@ describe("stripControlChars", () => {
     // U+00A0 (non-breaking space) is the first code point above the C1 range.
     expect(stripControlChars(`a${ch(0xa0)}b`)).toBe(`a${ch(0xa0)}b`);
   });
+
+  test("replaces Unicode bidirectional formatting controls", () => {
+    expect(stripControlChars("safe\u202Ehs.rr\u202C tail")).toBe("safe hs.rr  tail");
+    expect(stripControlChars("a\u2066b\u2069c\u061cd")).toBe("a b c d");
+  });
 });

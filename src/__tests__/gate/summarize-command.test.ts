@@ -150,12 +150,26 @@ describe("summarizeCommand", () => {
     expect(result).not.toContain("abcdef");
   });
 
-  test("does not redact secret key without equals sign", () => {
-    // SECRET_KEY_RE requires = or : at the end; bare --password is just a flag
-    const result = summarizeCommand(["tool", "--password"]);
+  test("redacts a separate value following a sensitive option", () => {
+    const result = summarizeCommand(["tool", "--password", "short!", "--project", "prod"]);
 
     expect(result).toBeDefined();
-    expect(result).toBe("tool --password");
+    expect(result).toBe("tool --password *** --project prod");
+    expect(result).not.toContain("short!");
+  });
+
+  test("does not treat positional arguments after -- as sensitive options", () => {
+    expect(summarizeCommand(["tool", "--", "--password", "visible-command-argument"])).toBe(
+      "tool -- --password visible-command-argument",
+    );
+  });
+
+  test("redacts JWT-shaped values containing dots", () => {
+    const jwt = `${"a".repeat(20)}.${"b".repeat(24)}.${"c".repeat(32)}`;
+    const result = summarizeCommand(["tool", jwt]);
+
+    expect(result).toBe("tool ***");
+    expect(result).not.toContain(jwt);
   });
 
   test("does not redact values just below the 40-char threshold", () => {
@@ -281,6 +295,19 @@ describe("describeCommand", () => {
     expect(result.lines.join("\n")).not.toContain("hunter2");
   });
 
+  test("redacts separate sensitive option values in the full description", () => {
+    const result = describeCommand([
+      "tool",
+      "--client-secret",
+      "punctuation.secret!",
+      "--project",
+      "prod",
+    ])!;
+
+    expect(result.argv).toEqual(["tool", "--client-secret", "***", "--project", "prod"]);
+    expect(result.lines.join("\n")).not.toContain("punctuation.secret!");
+  });
+
   test("strips control characters per element so a newline cannot forge a line", () => {
     const result = describeCommand(["gcloud", "safe\n  9  rm -rf /"])!;
 
@@ -384,6 +411,15 @@ describe("encodeCommandHeader", () => {
 
     expect(parsed[0]).toContain("gcloud");
     expect(parsed.at(-1)).toContain("omitted by the client");
+  });
+
+  test("states when an oversized argv[0] itself was truncated", () => {
+    const hugeBinary = `tool-${"z".repeat(MAX_COMMAND_HEADER_BYTES * 2)}`;
+    const parsed = parseCommandHeader(encodeCommandHeader([hugeBinary])!)!;
+
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]).toContain("chars omitted by the client from argv[0]");
+    expect(parsed[0]).not.toContain("0 further argument");
   });
 
   test("produces a header the gate can always parse back", () => {

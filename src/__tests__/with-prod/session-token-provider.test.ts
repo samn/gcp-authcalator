@@ -58,10 +58,10 @@ describe("createSessionTokenProvider", () => {
       });
     }) as unknown as typeof globalThis.fetch;
 
-    // Near-expiry initial token forces a refresh on the first getToken().
+    // An expired initial token forces a refresh on the first getToken().
     const nearExpiry: CachedToken = {
       access_token: "old",
-      expires_at: new Date(Date.now() + 60_000),
+      expires_at: new Date(Date.now() - 1_000),
     };
     const provider = createSessionTokenProvider(unixConn, "session-id", nearExpiry, { fetchFn });
 
@@ -82,10 +82,10 @@ describe("createSessionTokenProvider", () => {
     expect(callCount()).toBe(0);
   });
 
-  test("re-fetches when token is near expiry (within 5-min margin)", async () => {
+  test("re-fetches when the token is expired", async () => {
     const nearExpiry: CachedToken = {
       access_token: "old-token",
-      expires_at: new Date(Date.now() + 2 * 60 * 1000), // 2 minutes left
+      expires_at: new Date(Date.now() - 1_000),
     };
 
     const { fetchFn } = mockFetch([
@@ -100,7 +100,7 @@ describe("createSessionTokenProvider", () => {
   test("calls onRefresh callback after successful refresh", async () => {
     const nearExpiry: CachedToken = {
       access_token: "old-token",
-      expires_at: new Date(Date.now() + 60_000), // 1 minute left
+      expires_at: new Date(Date.now() - 1_000),
     };
 
     let refreshedToken: CachedToken | undefined;
@@ -191,7 +191,7 @@ describe("createSessionTokenProvider", () => {
   test("caches the refreshed token for subsequent calls", async () => {
     const nearExpiry: CachedToken = {
       access_token: "old-token",
-      expires_at: new Date(Date.now() + 60_000),
+      expires_at: new Date(Date.now() - 1_000),
     };
 
     const { fetchFn, callCount } = mockFetch([
@@ -249,24 +249,16 @@ describe("createSessionTokenProvider", () => {
     expect(capturedUrls[0]).toContain("https://localhost:8174/token?session=sess-1");
   });
 
-  test("handles 401 when res.text() rejects (covers catch fallback)", async () => {
+  test("handles a 401 with an empty body", async () => {
     const expired: CachedToken = {
       access_token: "old",
       expires_at: new Date(Date.now() - 1000),
     };
 
-    // Create a mock that returns a 401 with a body that fails to read
-    const fetchFn = (async () => {
-      return {
-        status: 401,
-        ok: false,
-        text: () => Promise.reject(new Error("body already consumed")),
-      } as unknown as Response;
-    }) as unknown as typeof globalThis.fetch;
+    const fetchFn = (async () => new Response(null, { status: 401 })) as unknown as typeof fetch;
 
     const provider = createSessionTokenProvider(unixConn, "session-id", expired, { fetchFn });
 
-    // Should still throw a descriptive error, with empty text fallback
     await expect(provider.getToken()).rejects.toThrow("Prod session expired or revoked");
   });
 
@@ -288,21 +280,18 @@ describe("createSessionTokenProvider", () => {
     expect(callCount()).toBe(1);
   });
 
-  test("re-fetches when initial token expires exactly at cache margin boundary", async () => {
-    // Token expires in exactly 5 minutes (the margin) — should trigger refresh
+  test("caches a newly observed five-minute token", async () => {
     const atMargin: CachedToken = {
       access_token: "at-margin",
       expires_at: new Date(Date.now() + 5 * 60 * 1000),
     };
 
-    const { fetchFn, callCount } = mockFetch([
-      { status: 200, body: { access_token: "refreshed", expires_in: 3600 } },
-    ]);
+    const { fetchFn, callCount } = mockFetch([]);
     const provider = createSessionTokenProvider(unixConn, "session-id", atMargin, { fetchFn });
 
     const token = await provider.getToken();
-    expect(token.access_token).toBe("refreshed");
-    expect(callCount()).toBe(1);
+    expect(token.access_token).toBe("at-margin");
+    expect(callCount()).toBe(0);
   });
 
   test("throws CredentialsExpiredError when gate returns code: credentials_expired", async () => {

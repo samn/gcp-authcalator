@@ -278,6 +278,42 @@ describe("init-tls subcommand", () => {
     const decoded = Buffer.from(stdout.trim(), "base64").toString("utf-8");
     expect(decoded).toContain("-----BEGIN CERTIFICATE-----");
   });
+
+  test("uses tls_dir from --config and lets --tls-dir override it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cli-init-tls-config-"));
+    const configuredDir = join(dir, "configured-tls");
+    const overrideDir = join(dir, "override-tls");
+    const configFile = join(dir, "config.toml");
+    writeFileSync(configFile, `tls_dir = "${configuredDir}"\n`);
+
+    const configured = await runCLI(["init-tls", "--show-path", "--config", configFile]);
+    expect(configured.exitCode).toBe(0);
+    expect(configured.stdout.trim()).toBe(configuredDir);
+
+    const overridden = await runCLI([
+      "init-tls",
+      "--show-path",
+      "--config",
+      configFile,
+      "--tls-dir",
+      overrideDir,
+    ]);
+    expect(overridden.exitCode).toBe(0);
+    expect(overridden.stdout.trim()).toBe(overrideDir);
+  });
+
+  test("reports invalid configuration without an uncaught stack trace", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cli-init-tls-invalid-"));
+    const configFile = join(dir, "config.toml");
+    writeFileSync(configFile, 'unknown_option = "nope"\n');
+
+    const { stderr, exitCode } = await runCLI(["init-tls", "--config", configFile]);
+
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("invalid configuration for 'init-tls'");
+    expect(stderr).toContain("Unrecognized key");
+    expect(stderr).not.toContain("ZodError:");
+  });
 });
 
 describe("with-prod subcommand", () => {

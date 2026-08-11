@@ -4,6 +4,7 @@ import {
   createProdSession,
   revokeProdSession,
 } from "../../with-prod/fetch-prod-token.ts";
+import { GateTimeoutError } from "../../gate/connection.ts";
 
 /**
  * Creates a URL-aware mock fetch that returns different responses for
@@ -78,10 +79,14 @@ describe("acquisition-path fetch timeouts", () => {
     expect(capturedInit?.signal).toBeInstanceOf(AbortSignal);
   });
 
-  test("surfaces an actionable, URL-bearing error (not a bare DOMException) when a request aborts", async () => {
-    // Simulate the backstop timer firing: fetch rejects with an AbortError.
+  test("surfaces an actionable, URL-bearing gate timeout error", async () => {
+    const url = "http://localhost/session";
     const fetchFn = (async () => {
-      throw new DOMException("The operation was aborted", "AbortError");
+      throw new GateTimeoutError(
+        720_000,
+        url,
+        new DOMException("The operation was aborted", "AbortError"),
+      );
     }) as unknown as typeof globalThis.fetch;
 
     await expect(
@@ -101,6 +106,26 @@ describe("acquisition-path fetch timeouts", () => {
 });
 
 describe("fetchProdToken", () => {
+  test("uses the identity returned with the prod token without a second request", async () => {
+    const capturedUrls: string[] = [];
+    const fetchFn = (async (url: string) => {
+      capturedUrls.push(url);
+      return Response.json({
+        access_token: "prod-tok-123",
+        expires_in: 1800,
+        email: "alice@corp.com",
+      });
+    }) as unknown as typeof globalThis.fetch;
+
+    const result = await fetchProdToken(
+      { mode: "unix" as const, socketPath: "/tmp/gate.sock" },
+      { fetchFn },
+    );
+
+    expect(capturedUrls).toEqual(["http://localhost/token?level=prod"]);
+    expect(result.email).toBe("alice@corp.com");
+  });
+
   test("fetches token and identity with correct URLs", async () => {
     const capturedUrls: string[] = [];
 

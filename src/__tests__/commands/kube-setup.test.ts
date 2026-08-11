@@ -1,5 +1,15 @@
 import { describe, expect, test, beforeEach, afterEach, spyOn } from "bun:test";
-import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
+import {
+  chmodSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { runKubeSetup, patchKubeconfig } from "../../commands/kube-setup.ts";
@@ -186,12 +196,67 @@ describe("runKubeSetup", () => {
     // Verify backup was created
     const backup = readFileSync(`${kubeconfigPath}.bak`, "utf-8");
     expect(backup).toBe(SAMPLE_KUBECONFIG);
+    expect(
+      readdirSync(dir).some((name) => name.includes(".gcp-authcalator-") && name.endsWith(".tmp")),
+    ).toBe(false);
 
     // Verify log output
     const logOutput = logSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
     expect(logOutput).toContain("patched 1 user(s)");
     expect(logOutput).toContain("gke_my-project_us-central1_my-cluster");
     expect(logOutput).toContain("revert");
+  });
+
+  test("fails closed when the backup cannot be created", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kube-setup-"));
+    const kubeconfigPath = join(dir, "config");
+    writeFileSync(kubeconfigPath, SAMPLE_KUBECONFIG);
+    mkdirSync(`${kubeconfigPath}.bak`);
+
+    await expect(runKubeSetup({ kubeconfigPath })).rejects.toThrow("process.exit called");
+
+    expect(readFileSync(kubeconfigPath, "utf-8")).toBe(SAMPLE_KUBECONFIG);
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
+    expect(errorOutput).toContain("failed to create backup");
+    expect(errorOutput).toContain("kubeconfig was not modified");
+    const logOutput = logSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
+    expect(logOutput).not.toContain("backup saved");
+    expect(
+      readdirSync(dir).some((name) => name.includes(".gcp-authcalator-") && name.endsWith(".tmp")),
+    ).toBe(false);
+  });
+
+  test("atomically updates the target of a kubeconfig symlink", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kube-setup-"));
+    const realKubeconfigPath = join(dir, "real-config");
+    const kubeconfigPath = join(dir, "config");
+    writeFileSync(realKubeconfigPath, SAMPLE_KUBECONFIG);
+    symlinkSync(realKubeconfigPath, kubeconfigPath);
+
+    await runKubeSetup({ kubeconfigPath });
+
+    expect(lstatSync(kubeconfigPath).isSymbolicLink()).toBe(true);
+    const patched = parseYAML(readFileSync(realKubeconfigPath, "utf-8"));
+    expect(patched.users[0].user.exec.args).toEqual(["kube-token"]);
+    expect(readFileSync(`${kubeconfigPath}.bak`, "utf-8")).toBe(SAMPLE_KUBECONFIG);
+  });
+
+  test("preserves kubeconfig and backup permissions despite a restrictive umask", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kube-setup-"));
+    const kubeconfigPath = join(dir, "config");
+    writeFileSync(kubeconfigPath, SAMPLE_KUBECONFIG);
+    chmodSync(kubeconfigPath, 0o664);
+    const previousUmask = process.umask(0o077);
+
+    try {
+      await runKubeSetup({ kubeconfigPath });
+    } finally {
+      process.umask(previousUmask);
+    }
+
+    expect(statSync(kubeconfigPath).mode & 0o777).toBe(0o664);
+    expect(statSync(`${kubeconfigPath}.bak`).mode & 0o777).toBe(0o664);
   });
 
   test("warns when no gke-gcloud-auth-plugin entries found", async () => {
@@ -318,13 +383,7 @@ describe("runKubeSetup", () => {
     }
   });
 
-  test("exits 1 when kubeconfig is not writable", async () => {
-    // Skip when running as root since root bypasses file permission checks
-    if (process.getuid?.() === 0) {
-      console.log("skipping: root bypasses file permission checks");
-      return;
-    }
-    const { chmodSync } = await import("node:fs");
+  test("leaves a read-only kubeconfig unchanged when writing fails", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kube-setup-"));
     const kubeconfigPath = join(dir, "config");
     writeFileSync(kubeconfigPath, SAMPLE_KUBECONFIG);
@@ -337,10 +396,27 @@ describe("runKubeSetup", () => {
       expect(exitSpy).toHaveBeenCalledWith(1);
       const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
       expect(errorOutput).toContain("failed to write kubeconfig");
+      expect(readFileSync(kubeconfigPath, "utf-8")).toBe(SAMPLE_KUBECONFIG);
+      expect(readFileSync(`${kubeconfigPath}.bak`, "utf-8")).toBe(SAMPLE_KUBECONFIG);
+      expect(
+        readdirSync(dir).some(
+          (name) => name.includes(".gcp-authcalator-") && name.endsWith(".tmp"),
+        ),
+      ).toBe(false);
     } finally {
       // Restore write permission for cleanup
       chmodSync(kubeconfigPath, 0o644);
     }
+  });
+
+  test("preserves kubeconfig permissions across atomic replacement", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kube-setup-"));
+    const kubeconfigPath = join(dir, "config");
+    writeFileSync(kubeconfigPath, SAMPLE_KUBECONFIG, { mode: 0o600 });
+
+    await runKubeSetup({ kubeconfigPath });
+
+    expect(statSync(kubeconfigPath).mode & 0o777).toBe(0o600);
   });
 
   test("dryRun mode does not write to disk", async () => {

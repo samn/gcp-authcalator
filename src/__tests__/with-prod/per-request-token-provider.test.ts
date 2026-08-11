@@ -45,7 +45,7 @@ describe("createPerRequestTokenProvider", () => {
   test("re-fetches via fetchProdToken when cache expires", async () => {
     const expiringToken: CachedToken = {
       access_token: "old-token",
-      expires_at: new Date(Date.now() + 60_000), // inside 5-min margin
+      expires_at: new Date(Date.now() - 1_000),
     };
     const { fetchFn, capturedUrls } = mockFetch([
       { status: 200, body: { access_token: "fresh-token", expires_in: 3600 } },
@@ -65,7 +65,7 @@ describe("createPerRequestTokenProvider", () => {
   test("invokes onRefresh after a successful re-fetch", async () => {
     const expiringToken: CachedToken = {
       access_token: "old-token",
-      expires_at: new Date(Date.now() + 60_000),
+      expires_at: new Date(Date.now() - 1_000),
     };
     const { fetchFn } = mockFetch([
       { status: 200, body: { access_token: "fresh-token", expires_in: 3600 } },
@@ -97,7 +97,7 @@ describe("createPerRequestTokenProvider", () => {
   test("forwards command, scopes, and pamPolicy on refresh", async () => {
     const expiringToken: CachedToken = {
       access_token: "old-token",
-      expires_at: new Date(Date.now() + 60_000),
+      expires_at: new Date(Date.now() - 1_000),
     };
     const { fetchFn, capturedUrls } = mockFetch([
       { status: 200, body: { access_token: "fresh", expires_in: 3600 } },

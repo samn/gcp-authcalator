@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createAuthModule } from "../../gate/auth.ts";
+import { AuthTimeoutError, createAuthModule } from "../../gate/auth.ts";
 import { CredentialsExpiredError } from "../../gate/credentials-error.ts";
 import type { GateConfig } from "../../config.ts";
 import type { AuthClient } from "google-auth-library";
@@ -85,6 +85,55 @@ describe("createAuthModule", () => {
       expect(callCount).toBe(1);
     });
 
+    test("coalesces concurrent development-token refreshes", async () => {
+      let callCount = 0;
+      let release: ((value: { token: string; res: null }) => void) | undefined;
+      const token = new Promise<{ token: string; res: null }>((resolve) => {
+        release = resolve;
+      });
+      const client = {
+        credentials: { expiry_date: Date.now() + 3600_000 },
+        getAccessToken: () => {
+          callCount++;
+          return token;
+        },
+      } as unknown as AuthClient;
+      const { mintDevToken } = createAuthModule(TEST_CONFIG, {
+        sourceClient: mockClient("source"),
+        impersonatedClient: client,
+      });
+
+      const first = mintDevToken();
+      const second = mintDevToken();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(callCount).toBe(1);
+      release!({ token: "shared", res: null });
+
+      expect((await first).access_token).toBe("shared");
+      expect((await second).access_token).toBe("shared");
+      expect(callCount).toBe(1);
+    });
+
+    test("clears a failed development-token refresh so a retry can recover", async () => {
+      let callCount = 0;
+      const client = {
+        credentials: { expiry_date: Date.now() + 3600_000 },
+        getAccessToken: async () => {
+          callCount++;
+          if (callCount === 1) throw new Error("temporary token service failure");
+          return { token: "recovered", res: null };
+        },
+      } as unknown as AuthClient;
+      const { mintDevToken } = createAuthModule(TEST_CONFIG, {
+        sourceClient: mockClient("source"),
+        impersonatedClient: client,
+      });
+
+      await expect(mintDevToken()).rejects.toThrow("temporary token service failure");
+      expect((await mintDevToken()).access_token).toBe("recovered");
+      expect(callCount).toBe(2);
+    });
+
     test("uses expiry_date from client credentials", async () => {
       const expectedExpiry = Date.now() + 1800_000; // 30 minutes from now
       const { mintDevToken } = createAuthModule(TEST_CONFIG, {
@@ -144,10 +193,9 @@ describe("createAuthModule", () => {
       await expect(mintDevToken()).rejects.toThrow("Failed to mint dev token");
     });
 
-    test("re-mints token when cache expires within 5-minute margin", async () => {
+    test("re-mints an expired token", async () => {
       let callCount = 0;
-      // Token that expires in 4 minutes (within the 5-minute CACHE_MARGIN_MS)
-      const nearExpiryMs = Date.now() + 4 * 60 * 1000;
+      const nearExpiryMs = Date.now() - 1000;
       const client = {
         credentials: { expiry_date: nearExpiryMs },
         getAccessToken: async () => {
@@ -164,10 +212,31 @@ describe("createAuthModule", () => {
       const first = await mintDevToken();
       expect(first.access_token).toBe("token-1");
 
-      // Second call should re-mint because remaining lifetime < 5 minutes
+      // Second call also re-mints because the mock keeps reporting the same
+      // already-expired credential expiry.
       const second = await mintDevToken();
       expect(second.access_token).toBe("token-2");
       expect(callCount).toBe(2);
+    });
+
+    test("caches a supported 60-second token instead of reminting immediately", async () => {
+      let callCount = 0;
+      const client = {
+        credentials: {},
+        getAccessToken: async () => {
+          callCount++;
+          return { token: `token-${callCount}`, res: null };
+        },
+      } as unknown as AuthClient;
+      const config: GateConfig = { ...TEST_CONFIG, token_ttl_seconds: 60 };
+      const { mintDevToken } = createAuthModule(config, {
+        sourceClient: mockClient("source"),
+        impersonatedClient: client,
+      });
+
+      expect((await mintDevToken()).access_token).toBe("token-1");
+      expect((await mintDevToken()).access_token).toBe("token-1");
+      expect(callCount).toBe(1);
     });
   });
 
@@ -467,6 +536,156 @@ describe("createAuthModule", () => {
       });
 
       await expect(getProjectNumber()).rejects.toThrow("no access token available");
+    });
+  });
+
+  describe("getSourceClient", () => {
+    test("coalesces concurrent ADC discovery", async () => {
+      const client = mockClient("source-token");
+      let factoryCalls = 0;
+      let discoveryCalls = 0;
+      let release: ((value: AuthClient) => void) | undefined;
+      const discovery = new Promise<AuthClient>((resolve) => {
+        release = resolve;
+      });
+      const { getSourceClient } = createAuthModule(TEST_CONFIG, {
+        googleAuthFactory: () => {
+          factoryCalls++;
+          return {
+            getClient: () => {
+              discoveryCalls++;
+              return discovery;
+            },
+          };
+        },
+      });
+
+      const first = getSourceClient();
+      const second = getSourceClient();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(factoryCalls).toBe(1);
+      expect(discoveryCalls).toBe(1);
+      release!(client);
+      expect(await first).toBe(client);
+      expect(await second).toBe(client);
+      expect(await getSourceClient()).toBe(client);
+      expect(factoryCalls).toBe(1);
+    });
+
+    test("clears a failed ADC discovery so a later call can recover", async () => {
+      const client = mockClient("recovered-source-token");
+      let factoryCalls = 0;
+      const { getSourceClient } = createAuthModule(TEST_CONFIG, {
+        googleAuthFactory: () => {
+          factoryCalls++;
+          return {
+            getClient: async () => {
+              if (factoryCalls === 1) {
+                throw new Error("temporary ADC discovery failure");
+              }
+              return client;
+            },
+          };
+        },
+      });
+
+      const attempts = await Promise.allSettled([getSourceClient(), getSourceClient()]);
+      expect(attempts).toHaveLength(2);
+      for (const attempt of attempts) {
+        expect(attempt.status).toBe("rejected");
+        if (attempt.status === "rejected") {
+          expect(attempt.reason).toBeInstanceOf(Error);
+          expect((attempt.reason as Error).message).toBe("temporary ADC discovery failure");
+        }
+      }
+
+      expect(await getSourceClient()).toBe(client);
+      expect(factoryCalls).toBe(2);
+    });
+  });
+
+  describe("authentication deadlines", () => {
+    test("bounds GoogleAuth ADC discovery", async () => {
+      const { getSourceClient } = createAuthModule(TEST_CONFIG, {
+        googleAuthFactory: () => ({
+          getClient: () => new Promise<AuthClient>(() => {}),
+        }),
+        operationTimeoutMs: 20,
+      });
+
+      const err = await getSourceClient().catch((error: unknown) => error);
+      expect(err).toBeInstanceOf(AuthTimeoutError);
+      expect((err as Error).message).toContain("loading Application Default Credentials");
+      expect((err as Error).message).toContain("Check network connectivity from the gate host");
+    });
+
+    test("bounds a stalled getAccessToken call", async () => {
+      const stalledClient = {
+        credentials: {},
+        getAccessToken: () => new Promise<never>(() => {}),
+      } as unknown as AuthClient;
+      const { mintProdToken } = createAuthModule(TEST_CONFIG, {
+        sourceClient: stalledClient,
+        operationTimeoutMs: 20,
+      });
+
+      const err = await mintProdToken().catch((error: unknown) => error);
+      expect(err).toBeInstanceOf(AuthTimeoutError);
+      expect((err as Error).message).toContain("minting a production access token");
+    });
+
+    test("keeps a stalled tokeninfo response body under the fetch deadline", async () => {
+      let requestSignal: AbortSignal | null | undefined;
+      const fetchFn = (async (_input: string | URL | Request, init?: RequestInit) => {
+        requestSignal = init?.signal;
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{"email":'));
+            // Headers and a partial body arrived, but the upstream never
+            // finishes the response.
+          },
+        });
+        return new Response(body, {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }) as typeof globalThis.fetch;
+      const { getIdentityEmail } = createAuthModule(TEST_CONFIG, {
+        sourceClient: mockClient("source"),
+        fetchFn,
+        operationTimeoutMs: 20,
+      });
+
+      const err = await getIdentityEmail().catch((error: unknown) => error);
+      expect(err).toBeInstanceOf(AuthTimeoutError);
+      expect((err as Error).message).toContain("OAuth tokeninfo endpoint");
+      expect(requestSignal?.aborted).toBe(true);
+    });
+
+    test("keeps a stalled CRM response body under the fetch deadline", async () => {
+      let requestSignal: AbortSignal | null | undefined;
+      const fetchFn = (async (_input: string | URL | Request, init?: RequestInit) => {
+        requestSignal = init?.signal;
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode('{"name":'));
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }) as typeof globalThis.fetch;
+      const { getProjectNumber } = createAuthModule(TEST_CONFIG, {
+        sourceClient: mockClient("source"),
+        fetchFn,
+        operationTimeoutMs: 20,
+      });
+
+      const err = await getProjectNumber().catch((error: unknown) => error);
+      expect(err).toBeInstanceOf(AuthTimeoutError);
+      expect((err as Error).message).toContain("Cloud Resource Manager API");
+      expect(requestSignal?.aborted).toBe(true);
     });
   });
 

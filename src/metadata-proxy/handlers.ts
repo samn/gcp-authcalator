@@ -6,6 +6,15 @@ const METADATA_FLAVOR_VALUE = "Google";
 
 const METADATA_HEADERS = { [METADATA_FLAVOR_HEADER]: METADATA_FLAVOR_VALUE };
 
+function isEmailServiceAccountIdentifier(identifier: string): boolean {
+  try {
+    const decoded = decodeURIComponent(identifier);
+    return /^[^/@\s]+@[^/@\s]+$/.test(decoded);
+  } catch {
+    return false;
+  }
+}
+
 function textResponse(body: string, status = 200): Response {
   return new Response(body, {
     status,
@@ -71,20 +80,22 @@ export async function handleRequest(req: Request, deps: MetadataProxyDeps): Prom
     // Normalize trailing slashes for path matching
     let pathname = url.pathname.replace(/\/+$/, "") || "/";
 
-    // Alias any email-based service account path to "default".
+    // Alias email-based service account paths to "default".
     //
     // This proxy serves a single set of credentials, so all service-account
     // paths are equivalent.  gcloud (and Python google-auth) resolve accounts
     // by email, not by the "default" alias.  The email they use may come from
     // the proxy's own listing, a cached value from a prior metadata-server
     // interaction, or internal library state.  Rather than requiring an exact
-    // match, we rewrite any non-"default" identifier to "default" so the
-    // request always reaches the right handler.
+    // match, we rewrite email-shaped identifiers to "default" so the request
+    // reaches the right handler. Other identifiers remain unknown paths: only
+    // the exact first segment "default" is the metadata alias.
     const saBase = "/computeMetadata/v1/instance/service-accounts/";
     if (pathname.startsWith(saBase)) {
       const rest = pathname.slice(saBase.length);
-      if (rest && !rest.startsWith("default")) {
-        const slashIdx = rest.indexOf("/");
+      const slashIdx = rest.indexOf("/");
+      const identifier = slashIdx >= 0 ? rest.slice(0, slashIdx) : rest;
+      if (identifier !== "default" && isEmailServiceAccountIdentifier(identifier)) {
         pathname = slashIdx >= 0 ? saBase + "default" + rest.slice(slashIdx) : saBase + "default";
       }
     }

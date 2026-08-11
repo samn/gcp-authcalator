@@ -156,6 +156,10 @@ function createDialogRunner(spawnFn: SpawnFn, backstopMs: number): DialogRunner 
   return async (cmd, options = {}) => {
     const wantsStdin = options.stdinText !== undefined;
     const proc = spawnFn(cmd, wantsStdin ? { stdin: "pipe", stderr: "pipe" } : { stderr: "pipe" });
+    // Drain stderr from the moment the child starts. Waiting until after exit
+    // can deadlock a verbose child on a full pipe, and a descendant that keeps
+    // the pipe open must remain inside the same parent deadline.
+    const optionRejection = rejectedOurOptions(proc);
 
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<"timeout">((resolve) => {
@@ -185,13 +189,16 @@ function createDialogRunner(spawnFn: SpawnFn, backstopMs: number): DialogRunner 
         }
       }
 
-      const result = await Promise.race([proc.exited, deadline]);
+      const completion = Promise.all([proc.exited, optionRejection]).then(
+        ([code, unsupportedOption]) => ({ code, unsupportedOption }),
+      );
+      const result = await Promise.race([completion, deadline]);
       if (result === "timeout") {
         proc.kill();
         return { code: "timeout", unsupportedOption: false };
       }
 
-      return { code: result, unsupportedOption: await rejectedOurOptions(proc) };
+      return result;
     } finally {
       clearTimeout(timer);
     }
