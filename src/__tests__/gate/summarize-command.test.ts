@@ -164,6 +164,26 @@ describe("summarizeCommand", () => {
     );
   });
 
+  test("does not redact benign options that merely contain a sensitive word", () => {
+    // The operator must see these values to judge the request: only flags
+    // ENDING in a sensitive word (--token, --api-key) take secret values.
+    expect(
+      summarizeCommand(["mytool", "--token-ttl-seconds", "3600", "--auth-type", "oauth"]),
+    ).toBe("mytool --token-ttl-seconds 3600 --auth-type oauth");
+    expect(summarizeCommand(["mytool", "--token-ttl-seconds=3600"])).toBe(
+      "mytool --token-ttl-seconds=3600",
+    );
+  });
+
+  test("still redacts values of flags ending in a sensitive word", () => {
+    expect(summarizeCommand(["mytool", "--api-token", "abc123", "deploy"])).toBe(
+      "mytool --api-token *** deploy",
+    );
+    expect(summarizeCommand(["mytool", "--service-account-key=abc123"])).toBe(
+      "mytool --service-account-key=***",
+    );
+  });
+
   test("redacts JWT-shaped values containing dots", () => {
     const jwt = `${"a".repeat(20)}.${"b".repeat(24)}.${"c".repeat(32)}`;
     const result = summarizeCommand(["tool", jwt]);

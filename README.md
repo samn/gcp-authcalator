@@ -182,7 +182,7 @@ Precedence: CLI flags > environment variables > TOML file > defaults.
 -p, --port <port>          Metadata proxy port (default: 8173)
 --gate-tls-port <port>          Gate TCP+mTLS listener port (enables remote devcontainer support)
 --tls-dir <path>           TLS certificate directory (default: ~/.gcp-authcalator/tls/)
---gate-url <url>           Gate HTTPS origin for remote connections (no path, query, fragment, or credentials)
+--gate-url <url>           Gate HTTPS URL for remote connections (no credentials, query, or fragment)
 --tls-bundle <path>        Path to TLS client bundle file (PEM or base64-encoded)
 --scopes <scopes>          Comma-separated OAuth scopes (default: cloud-platform)
 --pam-policy <id|path>     PAM entitlement for just-in-time prod escalation
@@ -285,8 +285,9 @@ gcp-authcalator gate --config config.toml
 
 TOML files are parsed strictly: unknown keys are errors. Socket paths must be
 absolute and pairwise distinct, `scopes` must contain at least one entry, and
-`gate_url` must be a pure HTTPS origin. One trailing slash on `gate_url` is
-accepted and normalized.
+`gate_url` must be an HTTPS URL without credentials, a query, or a fragment (a
+path is allowed for gates behind a path-routing reverse proxy). Trailing
+slashes on `gate_url` are accepted and normalized.
 
 ## Commands
 
@@ -530,8 +531,8 @@ This command:
 1. Reads the kubeconfig (from `$KUBECONFIG` or `~/.kube/config`)
 2. Finds all users with `exec.command: gke-gcloud-auth-plugin` (including full paths)
 3. Replaces the exec section to point to `gcp-authcalator kube-token`
-4. Creates or replaces a mode-preserving backup at `<kubeconfig>.bak`
-5. Atomically writes the patched kubeconfig, preserving its mode and following a kubeconfig symlink to update its target
+4. Creates or replaces a mode-preserving backup at `<kubeconfig>.bak` (warns and continues if the backup cannot be created — the patch is revertible with `gcloud container clusters get-credentials` regardless)
+5. Atomically writes the patched kubeconfig, preserving its mode and following a kubeconfig symlink to update its target; a kubeconfig the user can write but not own, or one in a non-writable directory, is written in place instead
 
 After patching, kubeconfig user entries will look like:
 
@@ -713,7 +714,7 @@ gcp-authcalator is designed for environments where a coding agent (or other untr
 
 - **Credentials never enter the container.** The host daemon holds ADC; the container only receives short-lived, downscoped tokens. Even if the container is fully compromised, the attacker gets only a dev service account token — not the engineer's identity.
 - **Cross-user isolation.** The main Unix socket is set to `0660` (group-readable by the gate UID's primary group) in a `0750` directory; the privileged operator socket is `0600` (owner-only) in the same directory. On modern Linux distros (UPG), the gate UID's primary group contains only the gate UID itself, so this is _effectively_ `0600` end-to-end. To grant a different-UID agent access to the main socket (e.g. a `the-robot` user in a dev container), add that user to the gate UID's primary group; the kernel still blocks access to the operator socket because its file mode is `0600`. The `$XDG_RUNTIME_DIR` directory itself is left at the system-managed `0700` per the XDG spec — group access requires placing `socket_path` in a gate-managed directory like `~/.gcp-authcalator/`. All configured socket paths must be absolute and pairwise distinct; startup also resolves their existing parent directories and rejects paths that alias through symlinks. `with-prod`'s per-invocation sandbox dir (where ephemeral gcloud config and token files live, `0600` owned by the calling UID) is resolved separately from the gate's runtime dir (`$XDG_RUNTIME_DIR` → `$XDG_CACHE_HOME/gcp-authcalator` → `~/.cache/gcp-authcalator`), so the agent's sandbox stays in its own private, owned space even when the gate's `~/.gcp-authcalator/` is shared via symlink. **For strongest isolation, run coding agents as a separate OS user _not_ in the gate's primary group** — they will be unable to access the main socket at all.
-- **Mutual TLS for remote transport.** When using TCP for remote devcontainers, both gate and the client verify each other's identity via self-signed certificates. The gate only listens on localhost (port forwarding is required for remote access). `gate_url` must be a pure HTTPS origin, with no credentials, query, fragment, or non-root path. A single trailing slash is accepted and normalized before endpoint paths are appended; plaintext `http://` and ambiguous URLs are rejected at config parse time.
+- **Mutual TLS for remote transport.** When using TCP for remote devcontainers, both gate and the client verify each other's identity via self-signed certificates. The gate only listens on localhost (port forwarding is required for remote access). `gate_url` must be an HTTPS URL with no credentials, query, fragment, or dot-segments in its path (a plain path is allowed for gates behind a path-routing reverse proxy). Trailing slashes are accepted and normalized before endpoint paths are appended; plaintext `http://` and ambiguous URLs are rejected at config parse time.
 - **Human-in-the-loop for production access.** Prod tokens require explicit confirmation via a desktop dialog (`osascript` on macOS, `zenity` on Linux), terminal prompt, or CLI approval (`gcp-authcalator approve`) on the host. If no method resolves within 120 seconds, access is denied.
 - **Informed consent.** Every approval surface shows the reported command in full, one argument per line. Nothing is elided silently: the size caps that bound dialog growth each state what they withheld. The reported command is still caller-supplied and advisory — a compromised container can lie about what it intends to run — so this protects the honest-client case, where the risk is an operator approving a payload they were structurally unable to see.
 - **Rate limiting** prevents automated brute-forcing of the confirmation flow: one dialog at a time, a 1-second cooldown after denial, and a maximum of 20 attempts per minute.

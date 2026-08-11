@@ -1230,6 +1230,64 @@ describe("runWithProd", () => {
     expect(signals.listenerCount("SIGTERM")).toBe(0);
   });
 
+  test("honors a SIGINT that lands after acquisition has already resolved", async () => {
+    const signals = new EventEmitter();
+    let spawned = false;
+    let revoked = false;
+    const fetchFn = (async (url: string, init?: RequestInit) => {
+      const parsed = new URL(url);
+      const method = init?.method ?? "GET";
+      if (parsed.pathname === "/health") return Response.json({ status: "ok" });
+      if (parsed.pathname === "/session" && method === "POST") {
+        // The interrupt arrives as the response resolves: the abort has
+        // nothing left to cancel, so the acquisition catch never fires and
+        // only the post-acquisition re-check can honor the signal.
+        signals.emit("SIGINT");
+        return new Response(
+          JSON.stringify({
+            session_id: "test-session-id",
+            access_token: "prod-token-abc",
+            expires_in: 1800,
+            token_type: "Bearer",
+            email: "eng@example.com",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (parsed.pathname === "/session" && method === "DELETE") {
+        revoked = true;
+        return Response.json({ status: "revoked" });
+      }
+      return new Response("Not found", { status: 404 });
+    }) as unknown as typeof globalThis.fetch;
+
+    await expect(
+      runWithProd(
+        {
+          project_id: "my-proj",
+          socket_path: "/tmp/gate.sock",
+          port: 8173,
+          admin_socket_path: "/tmp/test-admin.sock",
+        },
+        ["echo", "hello"],
+        {
+          fetchOptions: { fetchFn },
+          signalSource: signals,
+          spawnFn: (() => {
+            spawned = true;
+            throw new Error("unexpected spawn");
+          }) as never,
+        },
+      ),
+    ).rejects.toThrow("process.exit called");
+
+    expect(exitSpy).toHaveBeenCalledWith(130);
+    expect(spawned).toBe(false);
+    expect(revoked).toBe(true);
+    expect(signals.listenerCount("SIGINT")).toBe(0);
+    expect(signals.listenerCount("SIGTERM")).toBe(0);
+  });
+
   test("propagates non-zero exit code from child process", async () => {
     const mockFetchFn = mockGateFetch();
 

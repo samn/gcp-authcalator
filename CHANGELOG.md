@@ -34,12 +34,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   values after password/token/key flags and JWT-shaped arguments are redacted,
   and Unicode bidirectional formatting controls are stripped with C0/C1
   terminal controls before commands reach a dialog, terminal, or audit line.
-- **Stored TLS identities are fully validated before use.** Gate and client
-  startup reject symlinked or non-regular material, unsafe ownership or modes,
+  Redaction fires only when a flag or key _ends_ in a sensitive word
+  (`--token`, `--api-key`), not when it merely contains one: hiding benign
+  values like `--token-ttl-seconds 3600` or `--auth-type oauth` would blind
+  the operator to exactly what they are approving.
+- **Stored TLS identities are fully validated before use.** Gate startup
+  rejects symlinked or non-regular material, unsafe ownership or modes,
   not-yet-valid certificates, invalid CA/key-usage and leaf EKU constraints,
-  unexpected subjects or server SANs, signature failures, and private keys
-  that do not match their certificate. Atomic TLS writes now use unpredictable,
-  exclusively-created staging files instead of a plantable fixed `.tmp` path.
+  unexpected subjects, missing `localhost`/`127.0.0.1` server SANs, signature
+  failures, and private keys that do not match their certificate. A server
+  certificate lacking only the `host.docker.internal` SAN (chains generated
+  before #72) is accepted with a warning so an upgrade cannot brick a working
+  gate. Client bundles are validated for content (certificate chain, expiry,
+  key match) but are read without the symlink/ownership/mode checks, because
+  distributed bundles legitimately live on Kubernetes secret mounts (symlinks)
+  and bind mounts with foreign ownership. Atomic TLS writes now use
+  unpredictable, exclusively-created staging files instead of a plantable
+  fixed `.tmp` path.
 
 ### Added
 
@@ -114,7 +125,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   The parent proxy now validates its exact gate session through a non-mutating
   health route before a nested command reuses it. A session that expired, was
   revoked, or disappeared when the gate restarted falls back to normal session
-  creation without probing `/token` or triggering PAM work.
+  creation without probing `/token` or triggering PAM work. A parent proxy
+  from a release predating `/session-health` (mixed-version rollout) is still
+  detected via the legacy token probe rather than being ignored and
+  double-acquired.
 - **Gate requests can no longer wait indefinitely after receiving HTTP
   headers.** Authentication, PAM, metadata, admin, and `with-prod` requests
   now keep their application deadline active until the complete small response
@@ -153,7 +167,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   cannot hold the wrapper open indefinitely.
 - **`with-prod` acquisition now responds to termination signals before a child
   exists.** `SIGINT`/`SIGTERM` cancels the gate request and exits 130/143 rather
-  than leaving the wrapper attached to a multi-minute acquisition. Refreshed
+  than leaving the wrapper attached to a multi-minute acquisition. A signal
+  that races the approval and lands after the gate response has resolved is
+  re-checked before the wrapped command is spawned, revoking the session and
+  exiting instead of launching the command the user just cancelled. Refreshed
   gcloud tokens are written through random exclusive staging files, and a
   failed file update is no longer committed to the proxy's in-memory cache.
 - **The per-request `with-prod` path no longer repeats identity discovery after
@@ -165,9 +182,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Gate listener startup is transactional.** If TLS validation or a later
   admin/operator socket step fails after another listener has started, all
   listeners and socket files created by that attempt are rolled back and the
-  previous umask is restored. On shutdown, listeners close before asynchronous
-  PAM cleanup so no new work enters a stopping daemon; both gate and metadata
-  proxy remove their signal listeners on stop.
+  previous umask is restored. On shutdown, listeners stop accepting new
+  connections first, queued approvals are denied and sessions revoked while
+  in-flight requests can still receive those responses as clean 403s (rather
+  than severed sockets), and only then are the remaining connections
+  force-closed before asynchronous PAM cleanup; both gate and metadata proxy
+  remove their signal listeners on stop.
 - **Socket paths that alias through symlinked parent directories are rejected
   before binding.** This closes the gap where lexically different main/admin/
   operator paths could resolve to one inode and a later stale-socket cleanup
@@ -178,7 +198,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   connection failures, old-daemon routes, malformed error bodies, and missing
   requests distinctly.
 - **Metadata service-account aliases no longer match arbitrary lookalikes.**
-  Only the exact `default` segment and email-shaped identifiers route to the
+  Only the exact `default` segment, email-shaped identifiers, and all-digit
+  unique IDs (both forms the real GCE metadata server serves) route to the
   proxy's single credential source; names such as `default-prod` now return 404.
 - **Remote gate URLs are canonicalized** so an accepted trailing slash cannot
   produce `//token`-style endpoint paths. Metadata clients no longer add a
@@ -187,16 +208,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Configuration rejects ambiguous or misspelled security settings.** TOML
   files now reject unknown keys, `scopes` cannot be empty, socket paths must be
   normalized absolute paths with no collisions between main/admin/operator
-  listeners, and `gate_url` must be a pure HTTPS origin without credentials,
-  query, fragment, or a non-root path.
+  listeners, and `gate_url` must be an HTTPS URL without credentials, a query,
+  a fragment, or dot-segments in its path. A plain path (a gate published
+  behind a path-routing reverse proxy) remains accepted.
 - **TLS repair no longer rotates a valid certificate chain just because the
   derived client bundle is missing.** `init-tls` reconstructs the bundle from
   the existing CA/client material, honors configured `tls_dir`, and reports
-  configuration errors without an uncaught stack trace.
-- **`kube-setup` updates and backs up kubeconfig transactionally.** Backup
-  creation is now fatal on failure; backup and target writes are atomic,
-  preserve file modes despite a restrictive umask, clean staging files, and
-  update the target of a kubeconfig symlink instead of replacing the link.
+  configuration errors without an uncaught stack trace. Material that merely
+  cannot be read safely — a permissions drift, ownership change, or symlink on
+  one file — now surfaces as an actionable error instead of silently rotating
+  the CA and invalidating every distributed client bundle.
+- **`kube-setup` updates and backs up kubeconfig transactionally.** Backup and
+  target writes are atomic, preserve file modes despite a restrictive umask,
+  clean staging files, and update the target of a kubeconfig symlink instead
+  of replacing the link. A kubeconfig the user can write but not own (shared
+  root:group file) or one in a non-writable directory keeps the historical
+  in-place write, and a failed backup warns and continues — the patch is
+  revertible with `gcloud container clusters get-credentials` regardless.
 - **Expired sessions are pruned as a set** whenever sessions are created or
   validated, preventing dead entries from accumulating for an 8-hour daemon.
 

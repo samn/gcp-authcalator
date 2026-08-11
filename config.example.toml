@@ -40,10 +40,11 @@ service_account = "dev-runner@my-gcp-project.iam.gserviceaccount.com"
 # port = 8173
 
 # Remote gate transport (optional). gate_tls_port enables the host listener;
-# gate_url selects it from metadata-proxy/with-prod. gate_url must be a pure
-# HTTPS origin (no credentials, query, fragment, or non-root path); one trailing
-# slash is accepted and normalized. Client credentials come from tls_bundle or
-# tls_dir, unless GCP_AUTHCALATOR_TLS_BUNDLE_B64 is set in the environment.
+# gate_url selects it from metadata-proxy/with-prod. gate_url must be an HTTPS
+# URL (no credentials, query, fragment, or dot-segment path; a plain path is
+# allowed for path-routing reverse proxies); trailing slashes are accepted and
+# normalized. Client credentials come from tls_bundle or tls_dir, unless
+# GCP_AUTHCALATOR_TLS_BUNDLE_B64 is set in the environment.
 # TLS directories/private material must be owned by the current UID, private,
 # regular files (never symlinks), and form a valid role-correct certificate
 # chain with matching keys. A missing derived client-bundle.pem is rebuilt from

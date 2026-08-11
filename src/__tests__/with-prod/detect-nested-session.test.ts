@@ -110,6 +110,32 @@ describe("detectNestedSession", () => {
     expect(result).toBeNull();
   });
 
+  test("falls back to the token probe when the parent proxy predates /session-health", async () => {
+    // A parent from an older release 404s /session-health; the live session
+    // must still be reused via the legacy token probe rather than starting a
+    // duplicate acquisition.
+    const result = await detectNestedSession(
+      { [PROD_SESSION_ENV_VAR]: "127.0.0.1:54321" },
+      mockProxyFetch({ sessionHealthStatus: 404 }),
+    );
+    expect(result).toEqual({
+      metadataHost: "127.0.0.1:54321",
+      email: "eng@example.com",
+      projectId: "my-project",
+    });
+  });
+
+  test("legacy token-probe fallback returns null when the parent token is expired", async () => {
+    const result = await detectNestedSession(
+      { [PROD_SESSION_ENV_VAR]: "127.0.0.1:54321" },
+      mockProxyFetch({
+        sessionHealthStatus: 404,
+        tokenBody: { access_token: "t", expires_in: 0 },
+      }),
+    );
+    expect(result).toBeNull();
+  });
+
   test("validates authority before reading stable metadata", async () => {
     const paths: string[] = [];
     const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {

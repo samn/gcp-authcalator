@@ -29,6 +29,11 @@ import { useApplicationDeadline } from "../request-timeout.ts";
 // legitimately exceed 255s.
 const SOCKET_IDLE_TIMEOUT_SECONDS = 255;
 
+// How long signal-triggered shutdown waits, after denying queued approvals and
+// revoking sessions, for those handlers to write their final responses before
+// the remaining connections are force-closed.
+const SHUTDOWN_DRAIN_MS = 250;
+
 export interface GateServerResult {
   server: ReturnType<typeof Bun.serve>;
   tcpServer?: ReturnType<typeof Bun.serve>;
@@ -470,11 +475,25 @@ export async function startGateServer(
     if (shutdownStarted) return;
     shutdownStarted = true;
     console.log("\ngate: shutting down...");
-    // Close and unlink every listener before asynchronous PAM cleanup so no
-    // new request can enter while shutdown is waiting on the control plane.
-    stop();
+    // Stop accepting new connections but leave in-flight requests alive:
+    // force-closing them first would sever a with-prod client blocked on the
+    // approval dialog before the denial below can reach it as a clean 403
+    // instead of an opaque transport error.
+    for (const listener of [mainServer, tcpServer, privilegedAdminServer, operatorServer]) {
+      try {
+        listener?.stop(false);
+      } catch {
+        // Already stopped
+      }
+    }
     pendingQueue.denyAll();
     sessionManager.revokeAll();
+    // Give the handlers released by denyAll/revokeAll a moment to write their
+    // responses before stop() force-closes whatever remains. Then close and
+    // unlink every listener before asynchronous PAM cleanup so no request is
+    // in flight while shutdown is waiting on the control plane.
+    await new Promise((resolve) => setTimeout(resolve, SHUTDOWN_DRAIN_MS));
+    stop();
     if (pam) {
       await pam.withdrawAll();
     }

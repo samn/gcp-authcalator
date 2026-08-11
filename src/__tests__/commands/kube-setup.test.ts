@@ -207,21 +207,48 @@ describe("runKubeSetup", () => {
     expect(logOutput).toContain("revert");
   });
 
-  test("fails closed when the backup cannot be created", async () => {
+  test("continues without a backup when the backup cannot be created", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kube-setup-"));
     const kubeconfigPath = join(dir, "config");
     writeFileSync(kubeconfigPath, SAMPLE_KUBECONFIG);
     mkdirSync(`${kubeconfigPath}.bak`);
 
-    await expect(runKubeSetup({ kubeconfigPath })).rejects.toThrow("process.exit called");
+    await runKubeSetup({ kubeconfigPath });
 
-    expect(readFileSync(kubeconfigPath, "utf-8")).toBe(SAMPLE_KUBECONFIG);
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
-    expect(errorOutput).toContain("failed to create backup");
-    expect(errorOutput).toContain("kubeconfig was not modified");
+    // The patch itself must still land — the change is revertible with
+    // `gcloud container clusters get-credentials` even without a .bak file.
+    const patched = parseYAML(readFileSync(kubeconfigPath, "utf-8"));
+    expect(patched.users[0].user.exec.args).toEqual(["kube-token"]);
+    expect(exitSpy).not.toHaveBeenCalled();
+    const warnOutput = warnSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
+    expect(warnOutput).toContain("could not create backup");
+    expect(warnOutput).toContain("continuing without a backup");
     const logOutput = logSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
     expect(logOutput).not.toContain("backup saved");
+    expect(
+      readdirSync(dir).some((name) => name.includes(".gcp-authcalator-") && name.endsWith(".tmp")),
+    ).toBe(false);
+  });
+
+  test("writes in place when the kubeconfig directory is not writable", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kube-setup-"));
+    const kubeconfigPath = join(dir, "config");
+    writeFileSync(kubeconfigPath, SAMPLE_KUBECONFIG, { mode: 0o644 });
+    chmodSync(dir, 0o500);
+
+    try {
+      await runKubeSetup({ kubeconfigPath });
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+
+    const patched = parseYAML(readFileSync(kubeconfigPath, "utf-8"));
+    expect(patched.users[0].user.exec.args).toEqual(["kube-token"]);
+    expect(exitSpy).not.toHaveBeenCalled();
+    // No backup could be created in a read-only directory, and no staging
+    // files may be left behind.
+    const warnOutput = warnSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
+    expect(warnOutput).toContain("could not create backup");
     expect(
       readdirSync(dir).some((name) => name.includes(".gcp-authcalator-") && name.endsWith(".tmp")),
     ).toBe(false);

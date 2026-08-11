@@ -44,10 +44,14 @@ export const MAX_TOTAL_DISPLAY_CHARS = 32_768;
  */
 const SECRET_VALUE_RE = /^[A-Za-z0-9+/=_-]{40,}$/;
 const JWT_VALUE_RE = /^[A-Za-z0-9_-]{2,}\.[A-Za-z0-9_-]{2,}\.[A-Za-z0-9_-]{2,}$/;
+// The sensitive word must be the LAST word of the key/flag name: `--api-key`
+// and `--token` take secret values, while `--token-ttl-seconds` or
+// `--auth-type` take benign ones. Redacting those would hide from the approval
+// dialog exactly the values the operator must see to judge the request.
 const SECRET_KEY_RE =
-  /^-*(?:.*(?:password|passwd|secret|token|key|credential|auth|api[_-]?key|private).*)[=:]/i;
+  /^-*[^=:]*?(?:^|[-_])(?:password|passwd|secret|token|credential|credentials|key|auth|authorization|private)[=:]/i;
 const SECRET_FLAG_WORD_RE =
-  /(?:^|[-_])(?:password|passwd|secret|token|credential|credentials|key|api[-_]?key|private[-_]?key|auth|authorization)(?:$|[-_])/i;
+  /(?:^|[-_])(?:password|passwd|secret|token|credential|credentials|key|auth|authorization)$/i;
 
 /** Redact an argument if it looks like a secret value. */
 function redactArg(arg: string): string {

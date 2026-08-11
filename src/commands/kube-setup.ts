@@ -103,6 +103,25 @@ function syncFile(path: string): void {
   }
 }
 
+/**
+ * Whether rename-based replacement can be metadata-neutral for this target.
+ *
+ * A kubeconfig the user can write but does not own (shared root:group file),
+ * or one whose directory is not writable, cannot be replaced by rename without
+ * changing its ownership (chown to a foreign uid needs CAP_CHOWN) or failing
+ * outright — those setups keep the historical in-place write instead.
+ */
+function canReplaceByRename(targetPath: string, targetUid: number): boolean {
+  const uid = process.getuid?.();
+  if (uid !== undefined && uid !== 0 && targetUid !== uid) return false;
+  try {
+    accessSync(dirname(targetPath), constants.W_OK);
+  } catch {
+    return false;
+  }
+  return true;
+}
+
 /** Replace a file only after its complete new contents have reached disk. */
 function writeFileAtomically(targetPath: string, contents: string): void {
   const targetStat = statSync(targetPath);
@@ -113,6 +132,12 @@ function writeFileAtomically(targetPath: string, contents: string): void {
     throw new Error(`kubeconfig is read-only: ${targetPath}`);
   }
   accessSync(targetPath, constants.W_OK);
+
+  if (!canReplaceByRename(targetPath, targetStat.uid)) {
+    writeFileSync(targetPath, contents, "utf-8");
+    syncFile(targetPath);
+    return;
+  }
 
   const temporaryPath = temporarySiblingPath(targetPath);
   try {
@@ -144,7 +169,12 @@ function copyFileAtomically(sourcePath: string, targetPath: string): void {
   try {
     copyFileSync(sourcePath, temporaryPath, constants.COPYFILE_EXCL);
     chmodSync(temporaryPath, sourceStat.mode & 0o777);
-    chownSync(temporaryPath, sourceStat.uid, sourceStat.gid);
+    try {
+      chownSync(temporaryPath, sourceStat.uid, sourceStat.gid);
+    } catch {
+      // Best-effort: a backup of a kubeconfig owned by another user keeps our
+      // ownership rather than failing the whole patch over .bak metadata.
+    }
     syncFile(temporaryPath);
     renameSync(temporaryPath, targetPath);
   } catch (err) {
@@ -241,15 +271,20 @@ export async function runKubeSetup(options: KubeSetupOptions = {}): Promise<void
     return;
   }
 
-  // Back up the original kubeconfig
+  // Back up the original kubeconfig. Backup failure (e.g. a non-writable
+  // directory) is not fatal: the patch is revertible with
+  // `gcloud container clusters get-credentials` regardless.
   const backupPath = `${kubeconfigPath}.bak`;
+  let backupCreated = false;
   try {
     copyFileAtomically(kubeconfigPath, backupPath);
+    backupCreated = true;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`kube-setup: failed to create backup at ${backupPath}: ${msg}`);
-    console.error("kube-setup: kubeconfig was not modified");
-    process.exit(1);
+    console.warn(`kube-setup: could not create backup at ${backupPath}: ${msg}`);
+    console.warn(
+      "kube-setup: continuing without a backup — revert with: gcloud container clusters get-credentials <cluster>",
+    );
   }
 
   const output = Bun.YAML.stringify(patched, null, 2);
@@ -267,6 +302,8 @@ export async function runKubeSetup(options: KubeSetupOptions = {}): Promise<void
   for (const name of patchedUsers) {
     console.log(`  - ${name}: exec.command → ${binaryPath} ${AUTHCALATOR_ARGS.join(" ")}`);
   }
-  console.log(`kube-setup: backup saved to ${backupPath}`);
+  if (backupCreated) {
+    console.log(`kube-setup: backup saved to ${backupPath}`);
+  }
   console.log("kube-setup: to revert, run: gcloud container clusters get-credentials <cluster>");
 }

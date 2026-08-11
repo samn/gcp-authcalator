@@ -497,6 +497,19 @@ export async function runWithProd(
     process.exit(1);
   }
   clearTimeout(hintTimer);
+  // A signal that lands after the acquisition fetch has already resolved
+  // aborts nothing and throws nothing, so the catch above never sees it.
+  // Re-check here — otherwise a Ctrl-C that races approval would launch the
+  // very production command the user tried to cancel.
+  if (acquisitionInterruptedBy) {
+    removeAcquisitionSignalHandlers();
+    if (sessionId) {
+      await revokeProdSession(conn, sessionId, {
+        fetchFn: options.fetchOptions?.fetchFn,
+      });
+    }
+    process.exit(acquisitionInterruptedBy === "SIGINT" ? 130 : 143);
+  }
   console.error(
     `with-prod: prod access acquired for ${initialEmail} on project ${effectiveProjectId}`,
   );

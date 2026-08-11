@@ -482,6 +482,17 @@ describe("GET /computeMetadata/v1/instance/service-accounts/default/scopes", () 
     expect(body).toBe("https://www.googleapis.com/auth/cloud-platform\n");
   });
 
+  test("works via numeric unique-ID path (a form the real GCE server accepts)", async () => {
+    const res = await handleRequest(
+      metadataRequest("/computeMetadata/v1/instance/service-accounts/103769337821234567890/scopes"),
+      makeDeps(),
+    );
+
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toBe("https://www.googleapis.com/auth/cloud-platform\n");
+  });
+
   test("returns custom scopes when configured", async () => {
     const customScopes = [
       "https://www.googleapis.com/auth/sqlservice.login",

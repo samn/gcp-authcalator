@@ -218,15 +218,23 @@ describe("ConfigSchema", () => {
     );
   });
 
-  test("rejects malformed gate_url values and non-root paths", () => {
+  test("accepts a gate_url with a path (path-routing reverse proxy)", () => {
+    expect(ConfigSchema.parse({ gate_url: "https://build-host.example/gate" }).gate_url).toBe(
+      "https://build-host.example/gate",
+    );
+    expect(ConfigSchema.parse({ gate_url: "https://localhost:8174/api" }).gate_url).toBe(
+      "https://localhost:8174/api",
+    );
+  });
+
+  test("rejects malformed gate_url values and dot-segment paths", () => {
     expect(() => ConfigSchema.parse({ gate_url: "not a URL" })).toThrow(z.ZodError);
     expect(() => ConfigSchema.parse({ gate_url: "https:///localhost" })).toThrow(z.ZodError);
     expect(() => ConfigSchema.parse({ gate_url: "https://[invalid-host" })).toThrow(z.ZodError);
-    expect(() => ConfigSchema.parse({ gate_url: "https://localhost:8174/api" })).toThrow(
+    expect(() => ConfigSchema.parse({ gate_url: "https://localhost:8174/api/.." })).toThrow(
       z.ZodError,
     );
-    expect(() => ConfigSchema.parse({ gate_url: "https://localhost:8174//" })).toThrow(z.ZodError);
-    expect(() => ConfigSchema.parse({ gate_url: "https://localhost:8174/api/.." })).toThrow(
+    expect(() => ConfigSchema.parse({ gate_url: "https://localhost:8174/./api" })).toThrow(
       z.ZodError,
     );
     expect(() => ConfigSchema.parse({ gate_url: "https:\\localhost:8174" })).toThrow(z.ZodError);

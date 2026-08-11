@@ -71,6 +71,15 @@ export async function ensureTlsFiles(tlsDir?: string, force?: boolean): Promise<
       writeClientBundle(paths.clientBundle, files.caCert, files.clientCert, files.clientKey);
       return files;
     } catch (err) {
+      // Only regenerate when the material itself is invalid. An environmental
+      // problem — a permissions drift, ownership change, or symlink on one
+      // file — means the chain may still be perfectly good, and regenerating
+      // would silently rotate the CA and invalidate every distributed client
+      // bundle when the actual fix is to repair the file.
+      const cause = err instanceof Error ? err.cause : undefined;
+      if (cause instanceof TlsMaterialError && cause.reason !== "missing") {
+        throw err;
+      }
       const detail = err instanceof Error ? err.message.split("\n", 1)[0] : String(err);
       console.warn(`tls: existing TLS material is invalid — regenerating it (${detail})`);
       console.warn("tls: Remote client bundles need updating!");
@@ -335,7 +344,13 @@ export function loadTlsFiles(tlsDir?: string): TlsFiles {
  * PEM file (as produced by `init-tls --bundle-b64`). Auto-detects the format.
  */
 export function loadClientBundle(bundlePath: string): ClientBundle {
-  const raw = readTlsMaterial(bundlePath, "client bundle", true).trim();
+  // Unlike the gate's own key material, the bundle is a distributed artifact
+  // read on machines we don't control: Kubernetes secret mounts are symlinks
+  // and bind mounts routinely carry foreign ownership or group-readable modes.
+  // The strict readTlsMaterial checks would reject those legitimate setups, so
+  // read the user-configured path plainly and let validateClientBundle judge
+  // the contents.
+  const raw = readFileSync(bundlePath, "utf-8").trim();
 
   // If the file contains PEM headers, parse directly.
   // Otherwise, assume base64-encoded PEM and decode first.
@@ -578,8 +593,18 @@ function validateLeafCertificate(
       (name) => name.type === "dns" && name.value === "host.docker.internal",
     );
     const hasLoopback = names.some((name) => name.type === "ip" && name.value === "127.0.0.1");
-    if (!hasLocalhost || !hasDockerHost || !hasLoopback) {
+    if (!hasLocalhost || !hasLoopback) {
       throw new Error(`${label} is missing the required local server identities${suffix}`);
+    }
+    // host.docker.internal was only added to generated certs in #72. Rejecting
+    // an older chain would brick a working gate on upgrade and force a CA
+    // rotation, so surface the gap without failing: only devcontainer clients
+    // that connect via that name are affected.
+    if (!hasDockerHost) {
+      console.warn(
+        `tls: ${label} lacks the host.docker.internal SAN — devcontainer clients connecting via that name will fail the TLS handshake.` +
+          `\n  Re-run 'gcp-authcalator init-tls' (and re-distribute client bundles) to add it.`,
+      );
     }
   }
 }

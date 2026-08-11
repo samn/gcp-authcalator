@@ -55,7 +55,7 @@ async function generateRoleCertificate(
   caKeyPem: string,
   role: "server" | "client",
   subject: string,
-  includeAllServerIdentities = true,
+  serverIdentities: "all" | "localhost-only" | "pre-docker-san" = "all",
 ): Promise<{ cert: string; key: string }> {
   const algorithm = { name: "ECDSA" as const, namedCurve: "P-256" as const };
   const keys = await crypto.subtle.generateKey(algorithm, true, ["sign", "verify"]);
@@ -79,17 +79,19 @@ async function generateRoleCertificate(
     ),
   ];
   if (role === "server") {
-    extensions.push(
-      new x509Lib.SubjectAlternativeNameExtension(
-        includeAllServerIdentities
-          ? [
-              { type: "dns", value: "localhost" },
-              { type: "dns", value: "host.docker.internal" },
-              { type: "ip", value: "127.0.0.1" },
-            ]
-          : [{ type: "dns", value: "localhost" }],
-      ),
-    );
+    const sanNames = {
+      all: [
+        { type: "dns" as const, value: "localhost" },
+        { type: "dns" as const, value: "host.docker.internal" },
+        { type: "ip" as const, value: "127.0.0.1" },
+      ],
+      "localhost-only": [{ type: "dns" as const, value: "localhost" }],
+      "pre-docker-san": [
+        { type: "dns" as const, value: "localhost" },
+        { type: "ip" as const, value: "127.0.0.1" },
+      ],
+    }[serverIdentities];
+    extensions.push(new x509Lib.SubjectAlternativeNameExtension(sanNames));
   }
   const cert = await x509Lib.X509CertificateGenerator.create({
     serialNumber: "02",
@@ -274,6 +276,22 @@ describe("ensureTlsFiles", () => {
 
     const leftovers = readdirSync(dir).filter((e) => e.endsWith(".tmp"));
     expect(leftovers).toEqual([]);
+  });
+
+  test("surfaces unsafe key material instead of silently rotating the CA", async () => {
+    const dir = join(makeTempDir(), "tls");
+    const first = await ensureTlsFiles(dir);
+
+    // A permissions drift is an environmental problem, not invalid material:
+    // regenerating here would rotate the CA and invalidate every distributed
+    // client bundle when the actual fix is a chmod.
+    chmodSync(join(dir, "ca-key.pem"), 0o640);
+    await expect(ensureTlsFiles(dir)).rejects.toThrow(/permissions 640/);
+
+    chmodSync(join(dir, "ca-key.pem"), 0o600);
+    const after = await ensureTlsFiles(dir);
+    expect(after.caCert).toBe(first.caCert);
+    expect(after.serverCert).toBe(first.serverCert);
   });
 
   test("rebuilds a missing derived client bundle without rotating the certificate chain", async () => {
@@ -681,12 +699,38 @@ describe("loadAndValidateTlsFiles", () => {
       files.caKey,
       "server",
       "CN=gcp-authcalator server",
-      false,
+      "localhost-only",
     );
     writeFileSync(join(dir, "server.pem"), replacement.cert);
     writeFileSync(join(dir, "server-key.pem"), replacement.key);
 
     await expect(loadAndValidateTlsFiles(dir)).rejects.toThrow(/required local server identities/);
+  });
+
+  test("accepts a server certificate lacking only the host.docker.internal SAN (pre-#72 chain)", async () => {
+    const dir = join(makeTempDir(), "tls");
+    const files = await ensureTlsFiles(dir);
+    const replacement = await generateRoleCertificate(
+      files.caCert,
+      files.caKey,
+      "server",
+      "CN=gcp-authcalator server",
+      "pre-docker-san",
+    );
+    writeFileSync(join(dir, "server.pem"), replacement.cert);
+    writeFileSync(join(dir, "server-key.pem"), replacement.key);
+
+    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      // Rejecting an older self-generated chain would brick a working gate on
+      // upgrade; the missing devcontainer SAN is surfaced as a warning instead.
+      const loaded = await loadAndValidateTlsFiles(dir);
+      expect(loaded.serverCert).toBe(replacement.cert);
+      const warnOutput = warnSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
+      expect(warnOutput).toContain("host.docker.internal");
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   test("throws when CA cert is malformed", async () => {
@@ -877,22 +921,26 @@ describe("loadClientBundle", () => {
     expect(bundle.clientKey).toBe(pemBundle.clientKey);
   });
 
-  test("rejects a symlinked bundle file", async () => {
+  test("reads a symlinked bundle file (Kubernetes secret mounts are symlinks)", async () => {
     const dir = join(makeTempDir(), "tls");
     await ensureTlsFiles(dir);
     const linkPath = join(dir, "bundle-link.pem");
     symlinkSync("client-bundle.pem", linkPath);
 
-    expect(() => loadClientBundle(linkPath)).toThrow(/symbolic link/);
+    const bundle = loadClientBundle(linkPath);
+    expect(bundle.caCert).toContain("-----BEGIN CERTIFICATE-----");
+    expect(bundle.clientKey).toContain("-----BEGIN PRIVATE KEY-----");
   });
 
-  test("rejects a bundle file accessible by group or other users", async () => {
+  test("reads a bundle file accessible by group or other users (bind mounts)", async () => {
     const dir = join(makeTempDir(), "tls");
     await ensureTlsFiles(dir);
     const bundlePath = join(dir, "client-bundle.pem");
     chmodSync(bundlePath, 0o640);
 
-    expect(() => loadClientBundle(bundlePath)).toThrow(/permissions 640/);
+    const bundle = loadClientBundle(bundlePath);
+    expect(bundle.caCert).toContain("-----BEGIN CERTIFICATE-----");
+    expect(bundle.clientKey).toContain("-----BEGIN PRIVATE KEY-----");
   });
 });
 

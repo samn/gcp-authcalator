@@ -15,6 +15,11 @@ function isEmailServiceAccountIdentifier(identifier: string): boolean {
   }
 }
 
+/** The all-digit unique-ID form GCE accepts alongside email and "default". */
+function isUniqueIdServiceAccountIdentifier(identifier: string): boolean {
+  return /^\d+$/.test(identifier);
+}
+
 function textResponse(body: string, status = 200): Response {
   return new Response(body, {
     status,
@@ -92,22 +97,27 @@ export async function handleRequest(req: Request, deps: MetadataProxyDeps): Prom
     // Normalize trailing slashes for path matching
     let pathname = url.pathname.replace(/\/+$/, "") || "/";
 
-    // Alias email-based service account paths to "default".
+    // Alias email- and unique-ID-based service account paths to "default".
     //
     // This proxy serves a single set of credentials, so all service-account
     // paths are equivalent.  gcloud (and Python google-auth) resolve accounts
-    // by email, not by the "default" alias.  The email they use may come from
-    // the proxy's own listing, a cached value from a prior metadata-server
-    // interaction, or internal library state.  Rather than requiring an exact
-    // match, we rewrite email-shaped identifiers to "default" so the request
-    // reaches the right handler. Other identifiers remain unknown paths: only
-    // the exact first segment "default" is the metadata alias.
+    // by email or by numeric unique ID, not by the "default" alias — both
+    // forms the real GCE metadata server serves.  The identifier they use may
+    // come from the proxy's own listing, a cached value from a prior
+    // metadata-server interaction, or internal library state.  Rather than
+    // requiring an exact match, we rewrite email-shaped and all-digit
+    // identifiers to "default" so the request reaches the right handler.
+    // Other identifiers remain unknown paths.
     const saBase = "/computeMetadata/v1/instance/service-accounts/";
     if (pathname.startsWith(saBase)) {
       const rest = pathname.slice(saBase.length);
       const slashIdx = rest.indexOf("/");
       const identifier = slashIdx >= 0 ? rest.slice(0, slashIdx) : rest;
-      if (identifier !== "default" && isEmailServiceAccountIdentifier(identifier)) {
+      if (
+        identifier !== "default" &&
+        (isEmailServiceAccountIdentifier(identifier) ||
+          isUniqueIdServiceAccountIdentifier(identifier))
+      ) {
         pathname = slashIdx >= 0 ? saBase + "default" + rest.slice(slashIdx) : saBase + "default";
       }
     }

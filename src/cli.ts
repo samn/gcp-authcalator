@@ -40,7 +40,7 @@ Options:
   -p, --port <port>        Metadata proxy port (default: 8173)
   --gate-tls-port <port>        Gate TCP+mTLS listener port (enables remote devcontainer support)
   --tls-dir <path>         TLS certificate directory (default: ~/.gcp-authcalator/tls/)
-  --gate-url <url>         Gate HTTPS origin for remote connections (no path, query, fragment, or credentials)
+  --gate-url <url>         Gate HTTPS URL for remote connections (no credentials, query, or fragment)
   --tls-bundle <path>      Path to TLS client bundle file (PEM or base64-encoded)
   --bundle-b64             Print base64-encoded client bundle (init-tls only)
   --show-path              Print TLS directory path (init-tls only)

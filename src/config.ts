@@ -115,7 +115,7 @@ const pamGrantTtlSecondsSchema = ttlSecondsSchema.refine(
   },
 );
 
-function isHttpsOrigin(value: string): boolean {
+function isValidGateUrl(value: string): boolean {
   if (value !== value.trim() || value.includes("?") || value.includes("#")) return false;
 
   const schemeSeparator = value.indexOf("://");
@@ -127,13 +127,19 @@ function isHttpsOrigin(value: string): boolean {
   const pathSeparator = afterScheme.indexOf("/");
   const authority = pathSeparator < 0 ? afterScheme : afterScheme.slice(0, pathSeparator);
   const rawPath = pathSeparator < 0 ? "" : afterScheme.slice(pathSeparator);
-  if (!authority || authority.includes("@") || authority.includes("\\")) return false;
-  if (rawPath !== "" && rawPath !== "/") return false;
+  // A path is allowed — gates published behind a path-routing reverse proxy
+  // are legitimate and gate clients append endpoint paths by concatenation —
+  // but credentials, query, fragment, and backslashes (which WHATWG URL
+  // silently normalizes to slashes) are not. Dot-segments are rejected too:
+  // fetch-time normalization would let them escape the configured prefix.
+  if (!authority || authority.includes("@") || value.includes("\\")) return false;
+  if (rawPath.split("/").some((segment) => segment === "." || segment === "..")) return false;
 
   try {
     const url = new URL(value);
-    if (url.protocol !== "https:" || url.pathname !== "/") return false;
+    if (url.protocol !== "https:") return false;
     if (url.username || url.password) return false;
+    if (url.search !== "" || url.hash !== "") return false;
     return true;
   } catch {
     return false;
@@ -152,8 +158,8 @@ export const ConfigSchema = z
     gate_url: z
       .string()
       .min(1)
-      .refine(isHttpsOrigin, {
-        message: "gate_url must be an HTTPS origin without credentials, a path, query, or fragment",
+      .refine(isValidGateUrl, {
+        message: "gate_url must be an HTTPS URL without credentials, a query, or a fragment",
       })
       .optional(),
     tls_bundle: z.string().min(1).transform(expandTilde).optional(),

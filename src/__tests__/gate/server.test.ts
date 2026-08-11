@@ -397,6 +397,11 @@ setInterval(() => {}, 1000);`;
       signalHandler!("SIGTERM");
       signalHandler!("SIGTERM");
 
+      // Shutdown now drains in-flight responses (so a queued denial reaches
+      // its client as a clean 403) before force-closing listeners and starting
+      // PAM cleanup; wait out the drain window before asserting.
+      await new Promise((resolve) => setTimeout(resolve, 400));
+
       expect(withdrawCalls).toBe(1);
       expect(existsSync(socketPath)).toBe(false);
       expect(process.listeners("SIGTERM")).not.toContain(signalHandler!);

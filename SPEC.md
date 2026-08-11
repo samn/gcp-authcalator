@@ -383,7 +383,7 @@ Generates and manages TLS certificates for remote devcontainer support:
 - `gcp-authcalator init-tls --bundle-b64` — Print base64-encoded client bundle to stdout
 - `gcp-authcalator init-tls --show-path` — Print TLS directory path
 
-Certificates are stored in `~/.gcp-authcalator/tls/` by default, or the configured `tls_dir`, with private material and bundles at `0600` in a `0700` directory. This is intentionally different from the socket directory — certificates must survive reboots (90-day lifetime), while the Unix socket is ephemeral runtime state. Startup opens authoritative files without following symlinks and verifies ownership, modes, validity dates, CA BasicConstraints/keyCertSign, leaf EKU/identity/SAN constraints, signatures, and key/certificate matches. A missing derived client bundle is reconstructed from a valid chain instead of rotating it. Writes use exclusive random staging files plus atomic rename.
+Certificates are stored in `~/.gcp-authcalator/tls/` by default, or the configured `tls_dir`, with private material and bundles at `0600` in a `0700` directory. This is intentionally different from the socket directory — certificates must survive reboots (90-day lifetime), while the Unix socket is ephemeral runtime state. Startup opens authoritative files without following symlinks and verifies ownership, modes, validity dates, CA BasicConstraints/keyCertSign, leaf EKU/identity/SAN constraints, signatures, and key/certificate matches. A server certificate lacking only the `host.docker.internal` SAN (generated before #72) is accepted with a warning rather than bricking a working gate on upgrade. A missing derived client bundle is reconstructed from a valid chain instead of rotating it; material that merely cannot be read safely (permissions drift, ownership change, symlink) surfaces as an error instead of triggering regeneration. Client bundles configured via `tls_bundle` are validated for content but read without symlink/ownership/mode checks — distributed bundles legitimately live on Kubernetes secret mounts and bind mounts. Writes use exclusive random staging files plus atomic rename.
 
 ### 7. Remote Transport Configuration
 
@@ -393,13 +393,13 @@ New config options and env vars for remote devcontainer support:
 | --------------- | ----------------- | -------------------------------- | ---------------------------------------- |
 | `gate_tls_port` | `--gate-tls-port` | `GCP_AUTHCALATOR_GATE_TLS_PORT`  | Gate TCP+mTLS listener port              |
 | `tls_dir`       | `--tls-dir`       | `GCP_AUTHCALATOR_TLS_DIR`        | TLS certificate directory                |
-| `gate_url`      | `--gate-url`      | `GCP_AUTHCALATOR_GATE_URL`       | Pure HTTPS gate origin                   |
+| `gate_url`      | `--gate-url`      | `GCP_AUTHCALATOR_GATE_URL`       | HTTPS gate base URL                      |
 | `tls_bundle`    | `--tls-bundle`    | `GCP_AUTHCALATOR_TLS_BUNDLE`     | Path to TLS client bundle file           |
 | —               | —                 | `GCP_AUTHCALATOR_TLS_BUNDLE_B64` | Base64-encoded client bundle (preferred) |
 
 Config precedence: CLI args > env vars > TOML file > schema defaults. (Until v0.10 this was `env > CLI > TOML`, which inverted universal CLI convention; the swap matches expectations and removes the silent override of explicit `--flag` invocations by inherited env vars.)
 
-`gate_url` must be a pure HTTPS origin: credentials, queries, fragments, and non-root paths are rejected along with plaintext `http://` URLs. One trailing slash is accepted and removed before endpoint paths are appended, preventing accidental `//token`-style request paths.
+`gate_url` must be an HTTPS URL: credentials, queries, fragments, and dot-segment paths are rejected along with plaintext `http://` URLs. A plain path is allowed (gates behind a path-routing reverse proxy). Trailing slashes are accepted and removed before endpoint paths are appended, preventing accidental `//token`-style request paths.
 
 TOML configuration is strict: unknown keys are errors instead of being silently discarded. `scopes` must contain at least one scope. The main, admin, and optional operator socket paths are expanded, normalized absolute paths and must be pairwise distinct, preventing a later listener from unlinking or replacing a socket that this gate instance already bound.
 
@@ -412,8 +412,11 @@ mode-preserving `<kubeconfig>.bak`, and replaces their exec block with the
 absolute `gcp-authcalator kube-token` command. Backup and target replacement
 both use exclusive temporary files followed by atomic rename; a symlinked
 kubeconfig updates its resolved target rather than replacing the symlink.
-Failure to create the backup is fatal, so the original is never modified
-without a recovery copy.
+A kubeconfig the user can write but does not own (a shared root:group file), or
+one whose directory is not writable, cannot be replaced by rename without
+changing its ownership or failing outright — those setups keep the historical
+in-place write. Failure to create the backup warns and continues, since the
+patch is revertible with `gcloud container clusters get-credentials`.
 
 `kube-token` fetches from the active metadata proxy and emits an
 `ExecCredential`. It reads `KUBERNETES_EXEC_INFO` and mirrors a requested
