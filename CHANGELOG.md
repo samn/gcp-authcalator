@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [0.14.0] - 2026-08-13
+
 ### Security
 
 - **The prod approval dialog now shows the reported command in full.**
