@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Changed
+
+- **Dependencies upgraded to latest.** `google-auth-library` 10.9.1 → 11.0.2,
+  `smol-toml` 1.7.1 → 1.8.0, `oxfmt` 0.61.0 → 0.63.0, `oxlint` 1.76.0 → 1.78.0,
+  and the `prek` toolchain pin 0.4.10 → 0.4.13. No source changes were needed:
+  the sole breaking change across the set is a minimum-Node bump, and nothing
+  here consumes Node directly.
+- **`google-auth-library` v11 requires Node >= 22** (was >= 18), as do the
+  `gcp-metadata` (8 → 9) and `google-logging-utils` (1 → 2) transitive majors
+  that came with it. All three majors are the same coordinated engine bump in
+  the googleapis monorepo with no API surface changes. This has no effect on
+  released artifacts — `gcp-authcalator` ships as a standalone Bun binary and a
+  distroless image, neither of which contains a Node runtime — and the pinned
+  Bun 1.3.14 toolchain already provides Node 22+ compatibility.
+
 ## [0.14.0] - 2026-08-13
 
 ### Security
