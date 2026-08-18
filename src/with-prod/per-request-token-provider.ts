@@ -1,4 +1,8 @@
-import type { GateConnection } from "../gate/connection.ts";
+import {
+  type GateConnection,
+  connectionFetchOpts,
+  fetchWithGateTimeout,
+} from "../gate/connection.ts";
 import type { CachedToken, TokenProvider } from "../metadata-proxy/types.ts";
 import { fetchProdAccessToken, type FetchProdTokenOptions } from "./fetch-prod-token.ts";
 import { createCachingTokenProvider } from "./caching-token-provider.ts";
@@ -20,11 +24,23 @@ export function createPerRequestTokenProvider(
   initialToken: CachedToken,
   options: PerRequestTokenProviderOptions = {},
 ): TokenProvider {
-  return createCachingTokenProvider(initialToken, options.onRefresh, async () => {
+  const provider = createCachingTokenProvider(initialToken, options.onRefresh, async () => {
     const result = await fetchProdAccessToken(conn, options);
     return {
       access_token: result.access_token,
       expires_at: new Date(Date.now() + result.expires_in * 1000),
     };
   });
+
+  const fetchFn = options.fetchFn ?? globalThis.fetch;
+  const { baseUrl, extraOpts } = connectionFetchOpts(conn);
+  return {
+    ...provider,
+    async checkHealth(): Promise<void> {
+      const res = await fetchWithGateTimeout(fetchFn, `${baseUrl}/health`, extraOpts, 3_000);
+      if (!res.ok) {
+        throw new Error(`gcp-gate health check returned ${res.status}`);
+      }
+    },
+  };
 }

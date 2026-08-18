@@ -53,10 +53,21 @@ export function createSessionManager(options: SessionManagerOptions = {}): Sessi
   const now = options.now ?? Date.now;
   const sessions = new Map<string, ProdSession>();
 
+  function pruneExpired(atMs: number): void {
+    for (const [id, session] of sessions) {
+      if (session.expiresAt.getTime() <= atMs) sessions.delete(id);
+    }
+  }
+
   function create(params: CreateSessionParams): ProdSession {
+    const createdAtMs = now();
+    // Expired sessions are otherwise retained forever when clients exit
+    // without revoking them. Sweep at creation so a long-lived daemon's map is
+    // bounded by sessions that can still authorize a request.
+    pruneExpired(createdAtMs);
     const id = randomBytes(32).toString("hex");
-    const createdAt = new Date(now());
-    const expiresAt = new Date(now() + params.sessionLifetimeSeconds * 1000);
+    const createdAt = new Date(createdAtMs);
+    const expiresAt = new Date(createdAtMs + params.sessionLifetimeSeconds * 1000);
 
     const session: ProdSession = {
       id,

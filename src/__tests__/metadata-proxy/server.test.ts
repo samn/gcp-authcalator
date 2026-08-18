@@ -315,6 +315,34 @@ describe("startMetadataProxyServer", () => {
     }
   });
 
+  test("stop() removes signal handlers and remains idempotent", () => {
+    const port = nextPort++;
+    const config = makeConfig(port);
+    const termListenersBefore = process.listenerCount("SIGTERM");
+    const intListenersBefore = process.listenerCount("SIGINT");
+
+    result = startMetadataProxyServer(config, {
+      tokenProvider: {
+        getToken: async () => ({
+          access_token: "tok",
+          expires_at: new Date(Date.now() + 3600_000),
+        }),
+      },
+      installSignalHandlers: true,
+      quiet: true,
+    });
+
+    expect(process.listenerCount("SIGTERM")).toBe(termListenersBefore + 1);
+    expect(process.listenerCount("SIGINT")).toBe(intListenersBefore + 1);
+
+    result.stop();
+    result.stop();
+    result = null;
+
+    expect(process.listenerCount("SIGTERM")).toBe(termListenersBefore);
+    expect(process.listenerCount("SIGINT")).toBe(intListenersBefore);
+  });
+
   test("uses custom tokenProvider instead of gate client", async () => {
     const port = nextPort++;
     const config = makeConfig(port);
@@ -336,6 +364,30 @@ describe("startMetadataProxyServer", () => {
 
     const body = (await res.json()) as { access_token: string };
     expect(body.access_token).toBe("custom-provider-token");
+  });
+
+  test("wires a custom provider's non-mutating authority check", async () => {
+    const port = nextPort++;
+    const config = makeConfig(port);
+    let checks = 0;
+
+    const customProvider: TokenProvider = {
+      getToken: async () => ({
+        access_token: "custom-provider-token",
+        expires_at: new Date(Date.now() + 3600_000),
+      }),
+      checkHealth: async () => {
+        checks++;
+      },
+    };
+
+    result = startMetadataProxyServer(config, { tokenProvider: customProvider });
+
+    const res = await fetch(`http://127.0.0.1:${port}/session-health`, {
+      headers: { "Metadata-Flavor": "Google" },
+    });
+    expect(res.status).toBe(200);
+    expect(checks).toBe(1);
   });
 
   test("port 0 assigns a random port", async () => {

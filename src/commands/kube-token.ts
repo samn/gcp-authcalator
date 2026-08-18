@@ -12,6 +12,11 @@
 
 const DEFAULT_METADATA_HOST = "127.0.0.1:8173";
 const TOKEN_PATH = "/computeMetadata/v1/instance/service-accounts/default/token";
+const DEFAULT_EXEC_CREDENTIAL_API_VERSION = "client.authentication.k8s.io/v1beta1";
+const SUPPORTED_EXEC_CREDENTIAL_API_VERSIONS = new Set([
+  "client.authentication.k8s.io/v1",
+  "client.authentication.k8s.io/v1beta1",
+]);
 
 export interface KubeTokenOptions {
   /** Override fetch for testing. */
@@ -20,6 +25,8 @@ export interface KubeTokenOptions {
   writeFn?: (data: string) => void;
   /** Override GCE_METADATA_HOST for testing. */
   metadataHost?: string;
+  /** Override KUBERNETES_EXEC_INFO for testing. */
+  execInfo?: string | null;
 }
 
 interface MetadataTokenResponse {
@@ -28,11 +35,40 @@ interface MetadataTokenResponse {
   token_type: string;
 }
 
+/**
+ * Kubernetes requires an exec plugin response to use the same API version as
+ * the ExecCredential request provided through KUBERNETES_EXEC_INFO. Keep the
+ * historical v1beta1 fallback for direct/manual invocations without that env.
+ */
+function resolveExecCredentialApiVersion(execInfo: string | undefined): string {
+  if (!execInfo) return DEFAULT_EXEC_CREDENTIAL_API_VERSION;
+
+  try {
+    const request = JSON.parse(execInfo) as { apiVersion?: unknown };
+    if (
+      typeof request.apiVersion === "string" &&
+      SUPPORTED_EXEC_CREDENTIAL_API_VERSIONS.has(request.apiVersion)
+    ) {
+      return request.apiVersion;
+    }
+  } catch {
+    // Fall through to the backwards-compatible default. Kubernetes itself
+    // validates the configured exec API version before invoking the plugin.
+  }
+
+  return DEFAULT_EXEC_CREDENTIAL_API_VERSION;
+}
+
 export async function runKubeToken(options: KubeTokenOptions = {}): Promise<void> {
   const fetchFn = options.fetchFn ?? globalThis.fetch;
   const writeFn = options.writeFn ?? ((data: string) => process.stdout.write(data));
   const metadataHost =
     options.metadataHost ?? process.env.GCE_METADATA_HOST ?? DEFAULT_METADATA_HOST;
+  const execInfo =
+    options.execInfo === undefined
+      ? process.env.KUBERNETES_EXEC_INFO
+      : (options.execInfo ?? undefined);
+  const apiVersion = resolveExecCredentialApiVersion(execInfo);
 
   const url = `http://${metadataHost}${TOKEN_PATH}`;
 
@@ -71,7 +107,7 @@ export async function runKubeToken(options: KubeTokenOptions = {}): Promise<void
   const expirationTimestamp = new Date(Date.now() + 1_000).toISOString();
 
   const execCredential = {
-    apiVersion: "client.authentication.k8s.io/v1beta1",
+    apiVersion,
     kind: "ExecCredential",
     status: {
       token: token.access_token,

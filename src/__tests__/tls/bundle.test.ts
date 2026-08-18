@@ -19,6 +19,8 @@ describe("resolveClientBundle", () => {
   }
 
   afterEach(() => {
+    _resetCapturedTlsBundleForTesting();
+    delete process.env.GCP_AUTHCALATOR_TLS_BUNDLE_B64;
     for (const dir of tempDirs) {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -105,14 +107,13 @@ describe("resolveClientBundle", () => {
     expect(result!.caCert).toContain("-----BEGIN CERTIFICATE-----");
   });
 
-  test("clears env var after reading", async () => {
+  test("clears only the supplied env object after reading", async () => {
     _resetCapturedTlsBundleForTesting();
     const dir = join(makeTempDir(), "tls");
     await ensureTlsFiles(dir);
     const b64 = getClientBundleBase64(dir);
 
-    // Set it on process.env directly
-    process.env.GCP_AUTHCALATOR_TLS_BUNDLE_B64 = b64;
+    process.env.GCP_AUTHCALATOR_TLS_BUNDLE_B64 = "process-env-must-survive";
 
     const env: Record<string, string | undefined> = {
       GCP_AUTHCALATOR_TLS_BUNDLE_B64: b64,
@@ -120,7 +121,8 @@ describe("resolveClientBundle", () => {
 
     resolveClientBundle({}, env);
 
-    expect(process.env.GCP_AUTHCALATOR_TLS_BUNDLE_B64).toBeUndefined();
+    expect(env.GCP_AUTHCALATOR_TLS_BUNDLE_B64).toBeUndefined();
+    expect(process.env.GCP_AUTHCALATOR_TLS_BUNDLE_B64).toBe("process-env-must-survive");
   });
 });
 

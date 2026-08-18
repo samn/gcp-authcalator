@@ -260,6 +260,7 @@ describe("GET /token?level=prod", () => {
     const body = (await res.json()) as Record<string, unknown>;
     expect(body.access_token).toBe("prod-access-token");
     expect(body.token_type).toBe("Bearer");
+    expect(body.email).toBe("user@example.com");
   });
 
   test("returns 403 when denied", async () => {
@@ -389,6 +390,131 @@ describe("GET /token?level=prod", () => {
 
     await handleRequest(makeRequest("/token?level=prod"), deps);
     expect(releases).toEqual(["granted"]);
+  });
+
+  test("releases the confirmation slot before PAM and token work begin", async () => {
+    const events: string[] = [];
+    const deps = makeDeps({
+      pamDefaultPolicy: "projects/p/locations/global/entitlements/e",
+      confirmProdAccess: async () => true,
+      prodRateLimiter: {
+        acquire: () => ({ allowed: true }),
+        release: (result) => events.push(`release:${result}`),
+      },
+      ensurePamGrant: async () => {
+        events.push("pam");
+        return {
+          name: "projects/p/locations/global/entitlements/e/grants/g",
+          state: "ACTIVE",
+          expiresAt: new Date(Date.now() + 3600_000),
+          cached: false,
+        };
+      },
+      mintProdToken: async () => {
+        events.push("mint");
+        return {
+          access_token: "token",
+          expires_at: new Date(Date.now() + 3600_000),
+        };
+      },
+    });
+
+    await handleRequest(makeRequest("/token?level=prod"), deps);
+
+    expect(events[0]).toBe("release:granted");
+    expect(new Set(events.slice(1))).toEqual(new Set(["pam", "mint"]));
+  });
+
+  test("a slow PAM rotation does not block the next confirmation", async () => {
+    let limiterHeld = false;
+    let confirmCalls = 0;
+    let pamCalls = 0;
+    let releaseFirstPam!: () => void;
+    let markFirstPamStarted!: () => void;
+    const firstPamBlocked = new Promise<void>((resolve) => {
+      releaseFirstPam = resolve;
+    });
+    const firstPamStarted = new Promise<void>((resolve) => {
+      markFirstPamStarted = resolve;
+    });
+
+    const deps = makeDeps({
+      pamDefaultPolicy: "projects/p/locations/global/entitlements/e",
+      confirmProdAccess: async () => {
+        confirmCalls += 1;
+        return true;
+      },
+      prodRateLimiter: {
+        acquire: () => {
+          if (limiterHeld) return { allowed: false, reason: "dialog pending" };
+          limiterHeld = true;
+          return { allowed: true };
+        },
+        release: () => {
+          limiterHeld = false;
+        },
+      },
+      ensurePamGrant: async () => {
+        pamCalls += 1;
+        if (pamCalls === 1) {
+          markFirstPamStarted();
+          await firstPamBlocked;
+        }
+        return {
+          name: "projects/p/locations/global/entitlements/e/grants/g",
+          state: "ACTIVE",
+          expiresAt: new Date(Date.now() + 3600_000),
+          cached: pamCalls > 1,
+        };
+      },
+    });
+
+    const first = handleRequest(makeRequest("/token?level=prod"), deps);
+    await firstPamStarted;
+    expect(pamCalls).toBe(1);
+
+    const second = await handleRequest(makeRequest("/token?level=prod"), deps);
+    expect(second.status).toBe(200);
+    expect(confirmCalls).toBe(2);
+
+    releaseFirstPam();
+    expect((await first).status).toBe(200);
+  });
+
+  test("does not start PAM or token work after the client aborts during confirmation", async () => {
+    const controller = new AbortController();
+    let pamCalled = false;
+    let mintCalled = false;
+    const releases: string[] = [];
+    const deps = makeDeps({
+      pamDefaultPolicy: "projects/p/locations/global/entitlements/e",
+      confirmProdAccess: async () => {
+        controller.abort();
+        return true;
+      },
+      prodRateLimiter: {
+        acquire: () => ({ allowed: true }),
+        release: (result) => releases.push(result),
+      },
+      ensurePamGrant: async () => {
+        pamCalled = true;
+        throw new Error("unexpected PAM call");
+      },
+      mintProdToken: async () => {
+        mintCalled = true;
+        throw new Error("unexpected mint call");
+      },
+    });
+    const req = new Request("http://localhost/token?level=prod", {
+      signal: controller.signal,
+    });
+
+    const res = await handleRequest(req, deps);
+
+    expect(res.status).toBe(500);
+    expect(pamCalled).toBe(false);
+    expect(mintCalled).toBe(false);
+    expect(releases).toEqual(["error"]);
   });
 
   test("releases rate limiter on denied", async () => {
@@ -1328,8 +1454,8 @@ describe("POST /session", () => {
     expect(logs[0]!.target_project).toBeUndefined();
   });
 
-  test("returns 405 for GET method", async () => {
-    const res = await handleRequest(makeRequest("/session", "GET"), makeDeps());
+  test("returns 405 for unsupported method", async () => {
+    const res = await handleRequest(makeRequest("/session", "PATCH"), makeDeps());
     expect(res.status).toBe(405);
   });
 
@@ -1430,6 +1556,70 @@ describe("POST /session", () => {
 
     expect(session).not.toBeNull();
     expect(session!.commandSummary).toBe("gcloud auth list");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /session?id=<id> (non-mutating session validation)
+// ---------------------------------------------------------------------------
+
+describe("GET /session", () => {
+  test("reports an existing session as active without minting a token", async () => {
+    const sessionManager = createSessionManager();
+    const session = sessionManager.create({
+      email: "eng@example.com",
+      ttlSeconds: 3600,
+      sessionLifetimeSeconds: 28800,
+    });
+    let mintCalls = 0;
+    const deps = makeDeps({
+      sessionManager,
+      mintProdToken: async () => {
+        mintCalls++;
+        return { access_token: "unused", expires_at: new Date(Date.now() + 3600_000) };
+      },
+    });
+
+    const res = await handleRequest(makeRequest(`/session?id=${session.id}`), deps);
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: "active" });
+    expect(mintCalls).toBe(0);
+  });
+
+  test("returns 401 for an expired or unknown session", async () => {
+    const res = await handleRequest(makeRequest(`/session?id=${"0".repeat(64)}`), makeDeps());
+    expect(res.status).toBe(401);
+  });
+
+  test("returns 401 after an existing session expires", async () => {
+    let now = 1_000_000;
+    const sessionManager = createSessionManager({ now: () => now });
+    const session = sessionManager.create({
+      email: "eng@example.com",
+      ttlSeconds: 3600,
+      sessionLifetimeSeconds: 300,
+    });
+    now += 300_000;
+
+    const res = await handleRequest(
+      makeRequest(`/session?id=${session.id}`),
+      makeDeps({ sessionManager }),
+    );
+    expect(res.status).toBe(401);
+  });
+
+  test("returns 400 when the session ID is missing", async () => {
+    const res = await handleRequest(makeRequest("/session"), makeDeps());
+    expect(res.status).toBe(400);
+  });
+
+  test("rejects validation on the operator socket", async () => {
+    const res = await handleRequest(makeRequest(`/session?id=${"0".repeat(64)}`), makeDeps(), {
+      trusted: true,
+      socket: "operator",
+    });
+    expect(res.status).toBe(403);
   });
 });
 

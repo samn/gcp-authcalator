@@ -35,12 +35,12 @@ Options:
   --project-id <id>        GCP project ID (default project for with-prod)
   --project <id>           with-prod only: per-invocation target project (overrides --project-id)
   --service-account <email> Service account email to impersonate
-  --socket-path <path>     Unix socket path (default: $XDG_RUNTIME_DIR/gcp-authcalator.sock)
-  --admin-socket-path <path>  Admin socket path for approve/deny (default: $XDG_RUNTIME_DIR/gcp-authcalator-admin/admin.sock)
+  --socket-path <path>     Absolute Unix socket path (default: $XDG_RUNTIME_DIR/gcp-authcalator.sock)
+  --admin-socket-path <path>  Absolute admin socket path for approve/deny (default: $XDG_RUNTIME_DIR/gcp-authcalator-admin/admin.sock)
   -p, --port <port>        Metadata proxy port (default: 8173)
   --gate-tls-port <port>        Gate TCP+mTLS listener port (enables remote devcontainer support)
   --tls-dir <path>         TLS certificate directory (default: ~/.gcp-authcalator/tls/)
-  --gate-url <url>         Gate URL for remote connections (must use https://)
+  --gate-url <url>         Gate HTTPS URL for remote connections (no credentials, query, or fragment)
   --tls-bundle <path>      Path to TLS client bundle file (PEM or base64-encoded)
   --bundle-b64             Print base64-encoded client bundle (init-tls only)
   --show-path              Print TLS directory path (init-tls only)
@@ -51,7 +51,7 @@ Options:
   --token-ttl-seconds <secs>  Token lifetime in seconds (default: 3600)
   --pam-grant-ttl-seconds <secs>  PAM grant lifetime in seconds (must exceed the 5-min drain margin; range 301–43200; default: token-ttl-seconds). A longer grant amortises PAM/IAM propagation latency across many token refreshes
   --session-ttl-seconds <secs>  Prod session lifetime in seconds (default: 28800 / 8h)
-  --operator-socket-path <path>      Operator socket path (auto-approve eligible — see docs)
+  --operator-socket-path <path>      Absolute operator socket path (auto-approve eligible — see docs)
   --operator-socket-group <name>     Optional: multi-operator mode. Sets mode 0660 with this group; without it, mode 0600 owned by gate UID
   --auto-approve-pam-policies <ids>  PAM entitlements that auto-approve on the operator socket (comma-separated; subset of --pam-allowed-policies)
   --agent-uid <uid|name>             Agent UID (or username) — required with --operator-socket-path; gate refuses to start if this UID equals the gate UID (or, in group mode, is in the operator group)
@@ -197,11 +197,24 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
   }
 
   if (subcommand === "init-tls") {
-    await runInitTls({
-      bundleB64: values["bundle-b64"],
-      showPath: values["show-path"],
-      tlsDir: values["tls-dir"],
-    });
+    try {
+      const initTlsConfig = loadConfig(mapCliArgs({ "tls-dir": values["tls-dir"] }), values.config);
+      await runInitTls({
+        bundleB64: values["bundle-b64"],
+        showPath: values["show-path"],
+        tlsDir: initTlsConfig.tls_dir,
+      });
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        console.error("error: invalid configuration for 'init-tls'");
+        for (const issue of err.issues) {
+          console.error(`  ${issue.path.join(".")}: ${issue.message}`);
+        }
+      } else {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      process.exit(1);
+    }
     return;
   }
 

@@ -2,7 +2,7 @@ import { z } from "zod";
 import { parse as parseTOML } from "smol-toml";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, normalize } from "node:path";
 import { DRAIN_MARGIN_MS } from "./gate/pam.ts";
 
 // ---------------------------------------------------------------------------
@@ -77,6 +77,18 @@ export const DEFAULT_SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
 // Schemas
 // ---------------------------------------------------------------------------
 
+/**
+ * Unix-domain socket paths must identify one unambiguous filesystem entry.
+ * Expand the supported home-directory shorthand before checking absoluteness,
+ * then canonicalize `.`/`..` components so equivalent paths compare equal.
+ */
+const unixSocketPathSchema = z
+  .string()
+  .min(1)
+  .transform(expandTilde)
+  .refine(isAbsolute, { message: "Unix socket paths must be absolute" })
+  .transform(normalize);
+
 /** Coerced, optional seconds field with shared bounds — keeps `token_ttl_seconds`
  *  and `pam_grant_ttl_seconds` (and any future TTL sharing this range) in lockstep. */
 const ttlSecondsSchema = z.coerce.number().int().min(60).max(43200).optional();
@@ -103,62 +115,97 @@ const pamGrantTtlSecondsSchema = ttlSecondsSchema.refine(
   },
 );
 
-export const ConfigSchema = z.object({
-  project_id: z.string().min(1).optional(),
-  service_account: z.email().optional(),
-  socket_path: z.string().min(1).default(getDefaultSocketPath).transform(expandTilde),
-  admin_socket_path: z.string().min(1).default(getDefaultAdminSocketPath).transform(expandTilde),
-  port: z.coerce.number().int().min(1).max(65535).default(8173),
-  gate_tls_port: z.coerce.number().int().min(1).max(65535).optional(),
-  tls_dir: z.string().min(1).transform(expandTilde).optional(),
-  gate_url: z
-    .string()
-    .min(1)
-    .refine((v) => v.startsWith("https://"), { message: "gate_url must use https://" })
-    .optional(),
-  tls_bundle: z.string().min(1).transform(expandTilde).optional(),
-  scopes: z.array(z.string().min(1)).optional(),
-  pam_policy: z.string().min(1).optional(),
-  pam_allowed_policies: z.array(z.string().min(1)).optional(),
-  pam_location: z.string().min(1).optional(),
-  token_ttl_seconds: ttlSecondsSchema,
-  // PAM grant lifetime. When unset, the PAM grant duration matches
-  // `token_ttl_seconds` (the historical behavior). Setting this longer than
-  // the token TTL lets cached grants serve many token refreshes before the
-  // gate rotates the grant — useful when PAM/IAM propagation latency makes
-  // per-rotation pauses visible. Minted tokens stay clamped to
-  // `grant_expiry - DRAIN_MARGIN_MS`, so a longer grant only changes how
-  // often the gate calls PAM, not how long any individual token is valid.
-  pam_grant_ttl_seconds: pamGrantTtlSecondsSchema,
-  session_ttl_seconds: z.coerce.number().int().min(300).max(86400).optional(),
-  // ---- Operator socket (auto-approve for human-initiated escalation) ----
-  operator_socket_path: z.string().min(1).transform(expandTilde).optional(),
-  // When set, the operator socket is created mode 0660 group-owned by this
-  // group (multi-operator deployments). When unset, the operator socket is
-  // mode 0600 owned by the gate UID (the paved single-operator path —
-  // operator and gate share a UID, agent has a different UID).
-  operator_socket_group: z.string().min(1).optional(),
-  auto_approve_pam_policies: z.array(z.string().min(1)).optional(),
-  // Numeric UID or username. Required when operator_socket_path is set, so the
-  // gate can verify at startup that the agent UID is not the gate UID (and,
-  // in group mode, not a member of the operator group). Accepts a number
-  // (TOML), a numeric string (env var/CLI), or a username.
-  agent_uid: z.union([z.number().int().nonnegative(), z.string().min(1)]).optional(),
-  // ---- with-prod quota project (GOOGLE_CLOUD_QUOTA_PROJECT) ----
-  // Static override for the quota/billing project of the wrapped command's
-  // end-user-credential API calls. When unset (and no_quota_project is not
-  // set), with-prod follows the selected target project. See with-prod.ts.
-  quota_project: z.string().min(1).optional(),
-  // Opt out of managing GOOGLE_CLOUD_QUOTA_PROJECT entirely. Takes precedence
-  // over quota_project. The preprocess accepts the literal strings "true"/
-  // "false" (env vars / CLI booleans always arrive as those or real booleans)
-  // and lets z.boolean() reject anything else loudly — plain z.coerce.boolean()
-  // would turn the string "false" into true (non-empty string is truthy).
-  no_quota_project: z
-    .preprocess((v) => (v === "true" ? true : v === "false" ? false : v), z.boolean())
-    .optional(),
-  env: z.record(z.string(), z.string()).optional(),
-});
+function isValidGateUrl(value: string): boolean {
+  if (value !== value.trim() || value.includes("?") || value.includes("#")) return false;
+
+  const schemeSeparator = value.indexOf("://");
+  if (schemeSeparator < 0 || value.slice(0, schemeSeparator).toLowerCase() !== "https") {
+    return false;
+  }
+
+  const afterScheme = value.slice(schemeSeparator + 3);
+  const pathSeparator = afterScheme.indexOf("/");
+  const authority = pathSeparator < 0 ? afterScheme : afterScheme.slice(0, pathSeparator);
+  const rawPath = pathSeparator < 0 ? "" : afterScheme.slice(pathSeparator);
+  // A path is allowed — gates published behind a path-routing reverse proxy
+  // are legitimate and gate clients append endpoint paths by concatenation —
+  // but credentials, query, fragment, and backslashes (which WHATWG URL
+  // silently normalizes to slashes) are not. Dot-segments are rejected too:
+  // fetch-time normalization would let them escape the configured prefix.
+  if (!authority || authority.includes("@") || value.includes("\\")) return false;
+  if (rawPath.split("/").some((segment) => segment === "." || segment === "..")) return false;
+
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:") return false;
+    if (url.username || url.password) return false;
+    if (url.search !== "" || url.hash !== "") return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export const ConfigSchema = z
+  .object({
+    project_id: z.string().min(1).optional(),
+    service_account: z.email().optional(),
+    socket_path: unixSocketPathSchema.prefault(getDefaultSocketPath),
+    admin_socket_path: unixSocketPathSchema.prefault(getDefaultAdminSocketPath),
+    port: z.coerce.number().int().min(1).max(65535).default(8173),
+    gate_tls_port: z.coerce.number().int().min(1).max(65535).optional(),
+    tls_dir: z.string().min(1).transform(expandTilde).optional(),
+    gate_url: z
+      .string()
+      .min(1)
+      .refine(isValidGateUrl, {
+        message: "gate_url must be an HTTPS URL without credentials, a query, or a fragment",
+      })
+      .optional(),
+    tls_bundle: z.string().min(1).transform(expandTilde).optional(),
+    scopes: z.array(z.string().min(1)).min(1).optional(),
+    pam_policy: z.string().min(1).optional(),
+    pam_allowed_policies: z.array(z.string().min(1)).optional(),
+    pam_location: z.string().min(1).optional(),
+    token_ttl_seconds: ttlSecondsSchema,
+    // PAM grant lifetime. When unset, the PAM grant duration matches
+    // `token_ttl_seconds` (the historical behavior). Setting this longer than
+    // the token TTL lets cached grants serve many token refreshes before the
+    // gate rotates the grant — useful when PAM/IAM propagation latency makes
+    // per-rotation pauses visible. Minted tokens stay clamped to
+    // `grant_expiry - DRAIN_MARGIN_MS`, so a longer grant only changes how
+    // often the gate calls PAM, not how long any individual token is valid.
+    pam_grant_ttl_seconds: pamGrantTtlSecondsSchema,
+    session_ttl_seconds: z.coerce.number().int().min(300).max(86400).optional(),
+    // ---- Operator socket (auto-approve for human-initiated escalation) ----
+    operator_socket_path: unixSocketPathSchema.optional(),
+    // When set, the operator socket is created mode 0660 group-owned by this
+    // group (multi-operator deployments). When unset, the operator socket is
+    // mode 0600 owned by the gate UID (the paved single-operator path —
+    // operator and gate share a UID, agent has a different UID).
+    operator_socket_group: z.string().min(1).optional(),
+    auto_approve_pam_policies: z.array(z.string().min(1)).optional(),
+    // Numeric UID or username. Required when operator_socket_path is set, so the
+    // gate can verify at startup that the agent UID is not the gate UID (and,
+    // in group mode, not a member of the operator group). Accepts a number
+    // (TOML), a numeric string (env var/CLI), or a username.
+    agent_uid: z.union([z.number().int().nonnegative(), z.string().min(1)]).optional(),
+    // ---- with-prod quota project (GOOGLE_CLOUD_QUOTA_PROJECT) ----
+    // Static override for the quota/billing project of the wrapped command's
+    // end-user-credential API calls. When unset (and no_quota_project is not
+    // set), with-prod follows the selected target project. See with-prod.ts.
+    quota_project: z.string().min(1).optional(),
+    // Opt out of managing GOOGLE_CLOUD_QUOTA_PROJECT entirely. Takes precedence
+    // over quota_project. The preprocess accepts the literal strings "true"/
+    // "false" (env vars / CLI booleans always arrive as those or real booleans)
+    // and lets z.boolean() reject anything else loudly — plain z.coerce.boolean()
+    // would turn the string "false" into true (non-empty string is truthy).
+    no_quota_project: z
+      .preprocess((v) => (v === "true" ? true : v === "false" ? false : v), z.boolean())
+      .optional(),
+    env: z.record(z.string(), z.string()).optional(),
+  })
+  .strict();
 
 export type Config = z.infer<typeof ConfigSchema>;
 
@@ -224,7 +271,29 @@ export const GateConfigSchema = ConfigSchema.required({
         `mints already-expired tokens). Set pam_grant_ttl_seconds explicitly above ${DRAIN_MARGIN_SECONDS}s.`,
       path: ["token_ttl_seconds"],
     },
-  );
+  )
+  .superRefine((config, ctx) => {
+    const socketPaths = [
+      ["socket_path", config.socket_path],
+      ["admin_socket_path", config.admin_socket_path],
+      ["operator_socket_path", config.operator_socket_path],
+    ] as const;
+    const firstKeyByPath = new Map<string, string>();
+
+    for (const [key, socketPath] of socketPaths) {
+      if (socketPath === undefined) continue;
+      const firstKey = firstKeyByPath.get(socketPath);
+      if (firstKey !== undefined) {
+        ctx.addIssue({
+          code: "custom",
+          message: `${key} must not resolve to the same path as ${firstKey}`,
+          path: [key],
+        });
+      } else {
+        firstKeyByPath.set(socketPath, key);
+      }
+    }
+  });
 
 export type GateConfig = z.infer<typeof GateConfigSchema>;
 

@@ -47,7 +47,7 @@ export function resolveClientBundle(
   const b64 = env[TLS_BUNDLE_B64_ENV];
   if (b64) {
     const bundle = loadClientBundleFromBase64(b64);
-    delete process.env[TLS_BUNDLE_B64_ENV];
+    delete env[TLS_BUNDLE_B64_ENV];
     return bundle;
   }
 

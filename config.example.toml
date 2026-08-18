@@ -2,6 +2,7 @@
 #
 # Pass this file with: gcp-authcalator <command> --config config.toml
 # CLI flags take precedence over values in this file.
+# Unknown keys are rejected so misspelled security settings cannot be ignored.
 
 # GCP project ID (required for `gate` and `metadata-proxy`).
 # For `with-prod` this is the *default* target project; pass `--project <id>`
@@ -25,6 +26,8 @@ service_account = "dev-runner@my-gcp-project.iam.gserviceaccount.com"
 # in a dev container) access to the main socket, place socket_path in a
 # directory the gate manages (e.g. ~/.gcp-authcalator/) and add the agent
 # user to the gate UID's primary group.
+# Socket paths are expanded and normalized at load time. They must be absolute,
+# and the main, admin, and optional operator paths must all be different.
 # socket_path = "/run/user/1000/gcp-authcalator.sock"
 
 # Path to the admin socket for pending/approve/deny commands (not mounted into containers)
@@ -36,7 +39,22 @@ service_account = "dev-runner@my-gcp-project.iam.gserviceaccount.com"
 # Default: 8173
 # port = 8173
 
-# OAuth scopes for token requests
+# Remote gate transport (optional). gate_tls_port enables the host listener;
+# gate_url selects it from metadata-proxy/with-prod. gate_url must be an HTTPS
+# URL (no credentials, query, fragment, or dot-segment path; a plain path is
+# allowed for path-routing reverse proxies); trailing slashes are accepted and
+# normalized. Client credentials come from tls_bundle or tls_dir, unless
+# GCP_AUTHCALATOR_TLS_BUNDLE_B64 is set in the environment.
+# TLS directories/private material must be owned by the current UID, private,
+# regular files (never symlinks), and form a valid role-correct certificate
+# chain with matching keys. A missing derived client-bundle.pem is rebuilt from
+# otherwise-valid authoritative material without rotating the chain.
+# gate_tls_port = 8174
+# gate_url = "https://localhost:8174"
+# tls_dir = "~/.gcp-authcalator/tls"
+# tls_bundle = "~/.gcp-authcalator/tls/client-bundle.pem"
+
+# OAuth scopes for token requests (must contain at least one scope)
 # Default: ["https://www.googleapis.com/auth/cloud-platform"]
 # scopes = ["https://www.googleapis.com/auth/cloud-platform", "https://www.googleapis.com/auth/sqlservice.login"]
 
@@ -72,14 +90,15 @@ service_account = "dev-runner@my-gcp-project.iam.gserviceaccount.com"
 # token_ttl_seconds = 3600
 
 # PAM grant lifetime in seconds (default: token_ttl_seconds, range: 301–43200 —
-# must exceed the 5-minute drain margin, otherwise every minted token is clamped
-# to 0s and the client refresh-storms).
+# must exceed the 5-minute drain margin; otherwise minted tokens are born
+# expired and refresh continuously).
 # Configure independently of token_ttl_seconds when PAM/IAM propagation latency
 # makes per-rotation pauses visible to callers: a longer grant means one cached
 # grant serves many short-lived tokens before the gate calls PAM again. Minted
 # prod tokens are still clamped to (grant_expiry - 5 min drain margin), so this
-# does not extend the lifetime of any individual token — it only changes how
-# often the gate creates/rotates PAM grants.
+# does not extend the lifetime of any individual token. The adaptive client
+# refresh margin keeps short remaining token lifetimes cacheable without
+# withdrawing a grant while a previously minted token can still be valid.
 #
 # Example: 4-hour grant covering four 1-hour token refreshes:
 # token_ttl_seconds = 3600
@@ -125,6 +144,7 @@ service_account = "dev-runner@my-gcp-project.iam.gserviceaccount.com"
 #     auto-approve; they take the standard prompt path.
 #
 # Single-operator (paved path):
+# Must be an absolute path distinct from socket_path and admin_socket_path.
 # operator_socket_path = "/run/user/1000/gcp-authcalator-operator.sock"
 # auto_approve_pam_policies = ["prod-readonly"]
 #

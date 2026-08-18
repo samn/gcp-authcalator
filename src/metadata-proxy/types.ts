@@ -9,6 +9,12 @@ export type { CachedToken };
 /** Provides access tokens by fetching from the gcp-gate daemon. */
 export interface TokenProvider {
   getToken: () => Promise<CachedToken>;
+  /**
+   * Verify that the authority backing this provider is still usable without
+   * minting a token. Session providers validate their exact gate session;
+   * per-request providers verify that the gate is reachable.
+   */
+  checkHealth?: () => Promise<void>;
 }
 
 /** Provides both tokens and project metadata from the gcp-gate daemon. */
@@ -25,6 +31,8 @@ export interface GateClient extends TokenProvider {
  */
 export interface MetadataProxyDeps {
   getToken: () => Promise<CachedToken>;
+  /** Non-mutating authority check used only for nested with-prod reuse. */
+  checkHealth?: () => Promise<void>;
   getNumericProjectId?: () => Promise<string>;
   getUniverseDomain?: () => Promise<string>;
   /**

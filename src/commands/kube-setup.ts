@@ -7,9 +7,25 @@
  * Revert by re-running `gcloud container clusters get-credentials`.
  */
 
-import { readFileSync, writeFileSync, copyFileSync, realpathSync } from "node:fs";
+import {
+  accessSync,
+  chmodSync,
+  chownSync,
+  closeSync,
+  constants,
+  copyFileSync,
+  fsyncSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 const GKE_PLUGIN_COMMAND = "gke-gcloud-auth-plugin";
 const AUTHCALATOR_ARGS = ["kube-token"];
@@ -69,6 +85,106 @@ function resolveKubeconfigPath(override?: string): string {
     if (first) return first;
   }
   return join(homedir(), ".kube", "config");
+}
+
+function temporarySiblingPath(targetPath: string): string {
+  return join(
+    dirname(targetPath),
+    `.${basename(targetPath)}.gcp-authcalator-${process.pid}-${randomUUID()}.tmp`,
+  );
+}
+
+function syncFile(path: string): void {
+  const fd = openSync(path, "r");
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Whether rename-based replacement can be metadata-neutral for this target.
+ *
+ * A kubeconfig the user can write but does not own (shared root:group file),
+ * or one whose directory is not writable, cannot be replaced by rename without
+ * changing its ownership (chown to a foreign uid needs CAP_CHOWN) or failing
+ * outright — those setups keep the historical in-place write instead.
+ */
+function canReplaceByRename(targetPath: string, targetUid: number): boolean {
+  const uid = process.getuid?.();
+  if (uid !== undefined && uid !== 0 && targetUid !== uid) return false;
+  try {
+    accessSync(dirname(targetPath), constants.W_OK);
+  } catch {
+    return false;
+  }
+  return true;
+}
+
+/** Replace a file only after its complete new contents have reached disk. */
+function writeFileAtomically(targetPath: string, contents: string): void {
+  const targetStat = statSync(targetPath);
+
+  // rename(2) checks the directory rather than the replaced file, so preserve
+  // the existing direct-write behavior for an intentionally read-only config.
+  if ((targetStat.mode & 0o222) === 0) {
+    throw new Error(`kubeconfig is read-only: ${targetPath}`);
+  }
+  accessSync(targetPath, constants.W_OK);
+
+  if (!canReplaceByRename(targetPath, targetStat.uid)) {
+    writeFileSync(targetPath, contents, "utf-8");
+    syncFile(targetPath);
+    return;
+  }
+
+  const temporaryPath = temporarySiblingPath(targetPath);
+  try {
+    writeFileSync(temporaryPath, contents, {
+      encoding: "utf-8",
+      flag: "wx",
+      mode: targetStat.mode & 0o777,
+    });
+    // File-creation modes are filtered through the process umask. Restore the
+    // exact original permissions before rename so the patch is metadata-neutral.
+    chmodSync(temporaryPath, targetStat.mode & 0o777);
+    chownSync(temporaryPath, targetStat.uid, targetStat.gid);
+    syncFile(temporaryPath);
+    renameSync(temporaryPath, targetPath);
+  } catch (err) {
+    try {
+      unlinkSync(temporaryPath);
+    } catch {
+      // The file may not have been created, or rename may already have moved it.
+    }
+    throw err;
+  }
+}
+
+/** Copy through a same-directory temporary file so a prior backup stays valid. */
+function copyFileAtomically(sourcePath: string, targetPath: string): void {
+  const sourceStat = statSync(sourcePath);
+  const temporaryPath = temporarySiblingPath(targetPath);
+  try {
+    copyFileSync(sourcePath, temporaryPath, constants.COPYFILE_EXCL);
+    chmodSync(temporaryPath, sourceStat.mode & 0o777);
+    try {
+      chownSync(temporaryPath, sourceStat.uid, sourceStat.gid);
+    } catch {
+      // Best-effort: a backup of a kubeconfig owned by another user keeps our
+      // ownership rather than failing the whole patch over .bak metadata.
+    }
+    syncFile(temporaryPath);
+    renameSync(temporaryPath, targetPath);
+  } catch (err) {
+    try {
+      unlinkSync(temporaryPath);
+    } catch {
+      // The file may not have been created, or rename may already have moved it.
+    }
+    throw err;
+  }
 }
 
 export function patchKubeconfig(
@@ -155,19 +271,27 @@ export async function runKubeSetup(options: KubeSetupOptions = {}): Promise<void
     return;
   }
 
-  // Back up the original kubeconfig
+  // Back up the original kubeconfig. Backup failure (e.g. a non-writable
+  // directory) is not fatal: the patch is revertible with
+  // `gcloud container clusters get-credentials` regardless.
   const backupPath = `${kubeconfigPath}.bak`;
+  let backupCreated = false;
   try {
-    copyFileSync(kubeconfigPath, backupPath);
-  } catch {
-    // Non-fatal: warn but continue
-    console.warn(`kube-setup: could not create backup at ${backupPath}`);
+    copyFileAtomically(kubeconfigPath, backupPath);
+    backupCreated = true;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`kube-setup: could not create backup at ${backupPath}: ${msg}`);
+    console.warn(
+      "kube-setup: continuing without a backup — revert with: gcloud container clusters get-credentials <cluster>",
+    );
   }
 
   const output = Bun.YAML.stringify(patched, null, 2);
 
   try {
-    writeFileSync(kubeconfigPath, output, "utf-8");
+    // Follow a kubeconfig symlink instead of replacing the symlink itself.
+    writeFileAtomically(realpathSync(kubeconfigPath), output);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`kube-setup: failed to write kubeconfig: ${msg}`);
@@ -178,6 +302,8 @@ export async function runKubeSetup(options: KubeSetupOptions = {}): Promise<void
   for (const name of patchedUsers) {
     console.log(`  - ${name}: exec.command → ${binaryPath} ${AUTHCALATOR_ARGS.join(" ")}`);
   }
-  console.log(`kube-setup: backup saved to ${backupPath}`);
+  if (backupCreated) {
+    console.log(`kube-setup: backup saved to ${backupPath}`);
+  }
   console.log("kube-setup: to revert, run: gcloud container clusters get-credentials <cluster>");
 }

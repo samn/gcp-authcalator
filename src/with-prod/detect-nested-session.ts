@@ -36,8 +36,14 @@ function isLoopbackHost(metadataHost: string): boolean {
 /**
  * Check if we are already inside a with-prod session with a live proxy.
  *
- * Returns session info if the parent proxy is alive and serving valid tokens,
- * or `null` if we should fall through to the normal (new session) flow.
+ * Returns session info if the parent proxy is alive, its backing gate authority
+ * is still valid, and it is serving the expected identity/project metadata; or
+ * `null` if normal new-session flow is needed.
+ * Deliberately avoids the token endpoint when the parent supports
+ * /session-health: the token endpoint may start a minutes-long PAM refresh, so
+ * using it as a two-second health probe can both abandon live work and
+ * spuriously create a second session. Parents from releases without
+ * /session-health still get the legacy token probe.
  */
 export async function detectNestedSession(
   env: Record<string, string | undefined>,
@@ -64,16 +70,36 @@ export async function detectNestedSession(
 
     const headers = { "Metadata-Flavor": "Google" };
 
-    // Validate token is available and not expired (also validates PID ancestry)
-    const tokenRes = await fetchFn(
-      `http://${metadataHost}/computeMetadata/v1/instance/service-accounts/default/token`,
-      { headers, signal: AbortSignal.timeout(2000) },
-    );
-    if (!tokenRes.ok) return null;
-    const tokenBody = (await tokenRes.json()) as { expires_in?: number };
-    if (!tokenBody.expires_in || tokenBody.expires_in <= 0) return null;
+    // The root, email, and project responses are local proxy constants. They
+    // remain healthy if the gate restarts or a parent session expires, so they
+    // cannot authorize nested reuse on their own. This control route asks the
+    // provider to validate its exact session (or live per-request gate) without
+    // minting a token or triggering PAM work.
+    const authorityRes = await fetchFn(`http://${metadataHost}/session-health`, {
+      headers,
+      signal: AbortSignal.timeout(2000),
+    });
+    if (authorityRes.status === 404) {
+      // A parent proxy from a release before /session-health existed. Fall
+      // back to the old probe — fetch a token and require it to be unexpired.
+      // This can trigger the parent's token refresh (the hazard /session-health
+      // was added to avoid), but the alternative is ignoring a live parent
+      // session and double-acquiring: a second approval dialog and a duplicate
+      // PAM grant on every mixed-version nested invocation.
+      const tokenRes = await fetchFn(
+        `http://${metadataHost}/computeMetadata/v1/instance/service-accounts/default/token`,
+        { headers, signal: AbortSignal.timeout(2000) },
+      );
+      if (!tokenRes.ok) return null;
+      const tokenBody = (await tokenRes.json()) as { expires_in?: number };
+      if (!tokenBody.expires_in || tokenBody.expires_in <= 0) return null;
+    } else if (!authorityRes.ok) {
+      return null;
+    }
 
-    // Read email
+    // Read email. PID ancestry validation wraps this route just like the token
+    // route, so a successful response also proves this process may use the
+    // parent proxy without triggering a credential refresh.
     const emailRes = await fetchFn(
       `http://${metadataHost}/computeMetadata/v1/instance/service-accounts/default/email`,
       { headers, signal: AbortSignal.timeout(2000) },

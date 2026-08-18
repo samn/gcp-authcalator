@@ -155,11 +155,12 @@ A small HTTP server using the `google-auth-library` library. Runs on the host ma
 | Endpoint                | Behavior                                                                 |
 | ----------------------- | ------------------------------------------------------------------------ |
 | `GET /token`            | Impersonates the default SA, returns access token immediately            |
-| `GET /token?level=prod` | Shows host-side confirmation, then returns token for engineer's identity |
+| `GET /token?level=prod` | Shows host-side confirmation, then returns token + engineer email        |
 | `GET /identity`         | Returns the authenticated user's email                                   |
 | `GET /project-number`   | Returns the numeric project ID (resolved via Cloud Resource Manager API) |
 | `GET /universe-domain`  | Returns the GCP universe domain (resolved via GoogleAuth)                |
 | `POST /session`         | Create a prod session (confirmation + PAM), returns session ID + token   |
+| `GET /session?id=..`    | Validate a prod session without token minting or PAM work                |
 | `DELETE /session?id=..` | Revoke a prod session                                                    |
 | `GET /token?session=..` | Refresh token within a pre-approved session (no confirmation)            |
 | `GET /health`           | Health check                                                             |
@@ -232,11 +233,11 @@ budget trims the argv, a marker element states how many arguments were dropped,
 so the operator sees a claim about what is missing rather than a shorter
 command.
 
-**Rate limiting:** Single-flight lock (one dialog at a time), 1-second cooldown after denial, maximum 20 attempts per minute. This prevents automated brute-forcing of the confirmation flow.
+**Rate limiting:** Single-flight lock (one dialog at a time), 1-second cooldown after denial, maximum 20 attempts per minute. This prevents automated brute-forcing of the confirmation flow. The lock protects the consent decision only: it is released immediately after approval or denial, before PAM and OAuth work. PAM acquisition and token minting run concurrently after approval, and a slow rotation therefore neither serially adds the minting latency nor prevents another caller from opening its confirmation dialog.
 
-**PAM grant lifecycle and the drain margin:** When a `pam_policy` is in scope, the gate requests a PAM grant before minting prod tokens and caches it per-entitlement. The cache fast-path serves tokens directly until the cached grant's remaining lifetime drops below `DRAIN_MARGIN_MS` (5 minutes, defined in `src/gate/pam.ts`); below that threshold, `ensureGrant` rotates the grant. Minted prod tokens are clamped to `grant_expiry - DRAIN_MARGIN_MS`, not to `grant_expiry`: PAM enforces "one open Grant per (entitlement, requester)" so rotation has no overlap window, and clamping the token short of the grant's actual end keeps concurrent clients from holding still-valid tokens when the rotation withdraws the old grant. Rotation is single-flight per entitlement (in-process), so multiple simultaneous token requests coalesce onto one withdraw + create cycle. The gate ends its own grants with `grants:withdraw` (v1beta — the only surface that ships it), not `grants:revoke`: withdraw is the requester's own operation and works on any non-terminal grant, while revoke requires the approver/admin-level `privilegedaccessmanager.grants.revoke` permission that engineers don't hold. `grants.withdraw` returns a long-running Operation and the gate polls it to `done:true` (best-effort, 30-s deadline) before retrying create, eliminating the race where PAM would still see the old grant as open. When create conflicts with an existing open grant, the recovery scan considers only grants whose `requester` matches the gate's authenticated identity — `grants.list` returns every team member's grants on a shared entitlement, and only the gate's own grants may be reused or withdrawn. Both active-but-expired grants (PAM's state lags actual expiry) and still-pending grants (e.g. `APPROVAL_AWAITED` left behind by an interrupted run) are treated as withdrawable blockers, and a freshly created grant that fails to activate within the polling deadline is withdrawn rather than left holding the open-grant slot. **Every PAM API call carries a per-request timeout (`PAM_FETCH_TIMEOUT_MS`), and a whole rotation is bounded by an overall wall-clock budget (`ROTATION_BUDGET_MS`).** Without these, a half-open connection or a PAM backend stalled behind IAM-replication lag would wait on the OS TCP timeout (minutes); and because rotation is single-flight per entitlement, one wedged call would block every concurrent and subsequent prod-token request for that entitlement. The budget settles the in-flight rotation promise even if the underlying work is still wedged, so the single-flight slot is freed and a stalled rotation cannot pin later callers. See `src/gate/pam.ts` for the full API-quirks table.
+**PAM grant lifecycle and the drain margin:** When a `pam_policy` is in scope, PAM grant acquisition and prod-token minting start concurrently after approval; the gate caches the grant per entitlement and returns the token only after both operations succeed. Minted prod tokens are clamped to `grant_expiry - DRAIN_MARGIN_MS` (5 minutes), not to `grant_expiry`: PAM enforces "one open Grant per (entitlement, requester)" so rotation has no overlap window, and clamping the token short of the grant's actual end keeps concurrent clients from holding still-valid tokens when the rotation withdraws the old grant. The cache fast-path rotates at that same 5-minute boundary. Moving rotation earlier would withdraw authorization while a previously minted token could still be within its advertised lifetime; instead, adaptive client caching gives short remaining tokens a proportional refresh margin. Grant expiry is anchored to `auditTrail.accessGrantTime` (or the activated timeline event) plus `requestedDuration`; `createTime` is a conservative fallback, and a fresh response that omits usable timestamps gets an estimate anchored at request start using the full configured duration. This matters when approval is delayed: the access lifetime begins when PAM actually grants access, not when the request was created. Existing grants whose expiry cannot be bounded, or which PAM marks `externallyModified`, are never reused. Rotation is single-flight per entitlement (in-process), so multiple simultaneous token requests coalesce onto one withdraw + create cycle. Each attempt owns a generation; a replacement aborts the previous owner, and ownership is rechecked before cache changes and cleanup withdrawals so abandoned work cannot mutate the replacement's state. `grants.create` carries a nonzero UUID `requestId`; one ambiguous network, body-timeout, 429, or 5xx failure is retried with the same ID, while a conflict-recovery create gets a new ID. The gate ends its own grants with `grants:withdraw` (v1beta — the only surface that ships it), not `grants:revoke`: withdraw is the requester's own operation and works on any non-terminal grant, while revoke requires the approver/admin-level `privilegedaccessmanager.grants.revoke` permission that engineers don't hold. A grant name is marked locally as retiring immediately before the withdraw POST so a replacement scan cannot adopt access that is already being removed. `grants.withdraw` returns a long-running Operation and the gate polls it to `done:true` (best-effort, 30-s deadline) before retrying create, eliminating the race where PAM would still see the old grant as open. When create conflicts with an existing open grant, the recovery scan considers only grants whose `requester` matches the gate's authenticated identity — `grants.list` returns every team member's grants on a shared entitlement, and only the gate's own grants may be reused or withdrawn. Both active-but-expired grants (PAM's state lags actual expiry) and still-pending grants (e.g. `APPROVAL_AWAITED` left behind by an interrupted run) are treated as withdrawable blockers, and a freshly created grant that fails to activate within the polling deadline is withdrawn rather than left holding the open-grant slot. **Every PAM API call carries a per-request timeout (`PAM_FETCH_TIMEOUT_MS`), and a whole rotation is bounded by an overall wall-clock budget (`ROTATION_BUDGET_MS`).** Without these, a half-open connection or a PAM backend stalled behind IAM-replication lag would wait on the OS TCP timeout (minutes); and because rotation is single-flight per entitlement, one wedged call would block every concurrent and subsequent prod-token request for that entitlement. The budget aborts its PAM fetches, fences abandoned work from newer rotation state, and frees the single-flight slot. Shutdown is one-way: it rejects new rotations, aborts current owners, tracks grants discovered by late create responses, and spends at most 10 seconds dispatching withdrawals for grant names whose ownership was established. See `src/gate/pam.ts` for the full API-quirks table.
 
-**PAM grant duration is configured independently of the token TTL.** `pam_grant_ttl_seconds` (CLI: `--pam-grant-ttl-seconds`; env: `GCP_AUTHCALATOR_PAM_GRANT_TTL_SECONDS`; range 301–43200 s — it must exceed the `DRAIN_MARGIN_MS` drain margin, since a grant whose whole life is within the drain margin is never usable and would mint already-expired tokens; rejected at config-parse time) controls the lifetime requested when creating a PAM grant; `token_ttl_seconds` controls the lifetime of minted access tokens. When `pam_grant_ttl_seconds` is unset it falls back to `token_ttl_seconds` (the historical coupling) — and in that case, when `pam_policy` is set, `token_ttl_seconds` itself must clear the drain margin (validated at config-parse time), since it is then the effective grant lifetime. Setting the grant longer than the token TTL — e.g. a 4-hour grant covering several 1-hour token refreshes — amortises PAM/IAM propagation latency across multiple refreshes: only the first request in a grant's lifetime pays the create + propagation cost, and subsequent token requests are served from the cached grant. The grant-expiry clamp (minus the drain margin) still bounds every individual token, so a longer grant does not increase the lifetime of any token in flight; it only reduces how often the gate creates and withdraws grants.
+**PAM grant duration is configured independently of the token TTL.** `pam_grant_ttl_seconds` (CLI: `--pam-grant-ttl-seconds`; env: `GCP_AUTHCALATOR_PAM_GRANT_TTL_SECONDS`; range 301–43200 s — it must exceed `DRAIN_MARGIN_MS`; rejected at config-parse time) controls the lifetime requested when creating a PAM grant; `token_ttl_seconds` controls the lifetime of minted access tokens. When `pam_grant_ttl_seconds` is unset it falls back to `token_ttl_seconds` (the historical coupling) — and in that case, when `pam_policy` is set, `token_ttl_seconds` itself must clear the same margin (validated at config-parse time), since it is then the effective grant lifetime. Setting the grant longer than the token TTL — e.g. a 4-hour grant covering several 1-hour token refreshes — amortises PAM/IAM propagation latency across multiple refreshes: only the first request in a grant's lifetime pays the create + propagation cost, and subsequent token requests are served from the cached grant. The grant-expiry clamp (minus the 5-minute drain margin) still bounds every individual token, so a longer grant does not increase the lifetime of any token in flight; it only reduces how often the gate creates and withdraws grants.
 
 **Error responses** are JSON `{ "error": "...", "code"?: "..." }`. The optional `code` field is reserved for conditions clients want to handle programmatically. Currently defined codes:
 
@@ -245,7 +246,20 @@ command.
 | `credentials_expired`                      | 500  | The gate's gcloud Application Default Credentials need re-authentication. The `error` field contains the action-oriented recovery instruction, including the gate machine's hostname (from `os.hostname()`) so engineers in remote dev environments know which physical machine to run `gcloud auth application-default login` on. The gate clears its cached source client on this error so the next request after re-authentication succeeds without restarting the daemon. |
 | `session_not_permitted_on_operator_socket` | 403  | Sessions are disabled on the operator socket. `with-prod` falls back to per-request token mode automatically.                                                                                                                                                                                                                                                                                                                                                                 |
 
-**Socket security:** The main Unix socket is created with `0660` permissions in a `0750` directory; the privileged operator socket (when configured) is `0600` in the same directory. The gate UID's primary group owns the directory and main socket — on UPG distros this is effectively `0600` end-to-end, but the gate UID's primary group can be deliberately extended (e.g. add a `the-robot` user) to grant a different-UID agent access to the main socket while still kernel-blocking it from the operator socket. The `$XDG_RUNTIME_DIR` directory itself is left at the system-managed `0700` per the XDG spec — group access to the main socket therefore requires placing `socket_path` in a gate-managed directory like `~/.gcp-authcalator/`. Stale sockets are cleaned up only after verifying ownership, refusing to follow symlinks, and checking that no other instance is running.
+**Deadline composition:** Bun's server-level idle timeout is disabled for gate
+and metadata requests because healthy confirmation + PAM flows can exceed its
+10-second default (and Bun's 255-second configured maximum). Application-level
+deadlines provide the actual bounds: GoogleAuth discovery/token work is capped
+at 30 seconds per operation; each PAM HTTP exchange, including its response
+body, at 10 seconds; and a complete PAM rotation at 420 seconds. Client
+backstops sit outside those server budgets: 720 seconds for initial prod
+acquisition, 510 seconds for session refresh, route-specific 45–105 second
+metadata proxy→gate calls, 5 seconds for admin-socket operations, and a 3-second
+`with-prod` reachability preflight. This ordering lets legitimate inner work
+finish while ensuring a half-open connection, stalled response body, or wedged
+credential provider cannot fall through to an operating-system TCP timeout.
+
+**Socket security:** The main Unix socket is created with `0660` permissions in a `0750` directory; the privileged operator socket (when configured) is `0600` in the same directory. The gate UID's primary group owns the directory and main socket — on UPG distros this is effectively `0600` end-to-end, but the gate UID's primary group can be deliberately extended (e.g. add a `the-robot` user) to grant a different-UID agent access to the main socket while still kernel-blocking it from the operator socket. The `$XDG_RUNTIME_DIR` directory itself is left at the system-managed `0700` per the XDG spec — group access to the main socket therefore requires placing `socket_path` in a gate-managed directory like `~/.gcp-authcalator/`. Config parsing rejects lexical path collisions; startup creates the parent directories, resolves each real parent, and rejects aliases through symlinked ancestors before any listener can unlink another listener's path. Stale sockets are cleaned up only after verifying ownership, refusing to follow symlinks, and checking that no other instance is running. Listener startup is transactional: if TLS validation, admin binding, or operator-socket validation fails after the main listener binds, every listener and socket created by that attempt is rolled back before the error is returned.
 
 `with-prod` resolves its per-invocation sandbox parent directory **separately** from the gate's runtime dir (`$XDG_RUNTIME_DIR` → `$XDG_CACHE_HOME/gcp-authcalator` → `~/.cache/gcp-authcalator`). This decouples the caller-owned sandbox (where ephemeral gcloud config and token files live, `0600` owned by the calling UID) from the gate-owned config/socket dir (which may be shared between users via group perms or a symlink).
 
@@ -282,6 +296,9 @@ GET /computeMetadata/v1/universe/universe_domain
 GET /  (metadata server detection ping)
   → 200 OK with Metadata-Flavor: Google header
 
+GET /session-health  (nested with-prod authority validation)
+  → validates the backing gate session without minting a token or touching PAM
+
 GET /identity  (authenticated user identity, proxied from gcp-gate)
   → {"email": "engineer@example.com"}
     Non-GCE endpoint (the standard .../default/identity path is reserved for
@@ -293,7 +310,7 @@ GET /identity  (authenticated user identity, proxied from gcp-gate)
     client.
 ```
 
-Validates the `Metadata-Flavor: Google` request header (standard metadata server security) on all `/computeMetadata/` paths and on `/identity` (which returns PII); only the non-sensitive detection ping (`/`) is exempt, matching real metadata-server behavior for the root ping. Fetches dev-scoped tokens from `gcp-gate` via the socket, caches until 5 minutes before expiry.
+Validates the `Metadata-Flavor: Google` request header (standard metadata server security) on all `/computeMetadata/` paths, `/identity` (which returns PII), and the private `/session-health` control route; only the non-sensitive detection ping (`/`) is exempt, matching real metadata-server behavior for the root ping. The exact service-account segment `default` and email-shaped identifiers route to the single credential source; other identifiers, including `default-*` lookalikes, return 404. Fetches dev-scoped tokens from `gcp-gate` via the socket and caches them until an adaptive refresh point: 10% of the observed lifetime, capped at 5 minutes before expiry.
 
 **Started by** the devcontainer post start script as a background process.
 
@@ -305,7 +322,8 @@ The conceptual flow (simplified pseudocode):
 #!/bin/bash
 set -euo pipefail
 
-# 1. Create a prod session at the host daemon (triggers confirmation dialog)
+# 1. Give the gate transport a 3-second health preflight, then create a prod
+#    session at the host daemon (triggers confirmation dialog)
 #    Returns a session ID + initial token. The session allows subsequent
 #    token refreshes without re-confirmation for a bounded lifetime.
 RESPONSE=$(curl -sf -X POST --unix-socket "$XDG_RUNTIME_DIR/gcp-authcalator.sock" \
@@ -322,17 +340,22 @@ RESPONSE=$(curl -sf -X POST --unix-socket "$XDG_RUNTIME_DIR/gcp-authcalator.sock
 # 4. Strip credential env vars and spawn the command with GCE_METADATA_HOST
 #    pointing at the temporary proxy
 
-# 5. Forward signals, propagate exit code, revoke session, clean up temp files
+# 5. Forward the first termination signal, allow 5 seconds for child cleanup,
+#    then SIGKILL (a second signal kills immediately). Propagate the exit code,
+#    revoke the session, and clean up temp files.
 ```
 
 The actual implementation adds several security hardening measures beyond this pseudocode:
 
 - **PID-based process restriction** — the temporary proxy validates that each requesting process is a descendant of the `with-prod` wrapper (via `/proc` introspection)
-- **Token file instead of env var** — the access token is written to a `0600` file in a user-private directory, and gcloud is configured via `auth/access_token_file` rather than `CLOUDSDK_AUTH_ACCESS_TOKEN` (which leaks into `/proc/*/environ`)
+- **Token file instead of env var** — the access token is written to a `0600` file in a user-private directory, and gcloud is configured via `auth/access_token_file` rather than `CLOUDSDK_AUTH_ACCESS_TOKEN` (which leaks into `/proc/*/environ`). Refresh uses an unpredictable `O_EXCL` staging file plus atomic rename, and the in-memory cache commits only after that file update succeeds.
 - **Environment stripping** — all credential-related env vars (`GOOGLE_APPLICATION_CREDENTIALS`, `CLOUDSDK_AUTH_ACCESS_TOKEN`, `CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE`, etc.) are removed from the child's environment to prevent bypass
 - **Temp directory in user-private runtime dir** — not `/tmp`, preventing other users from observing or racing the temp directory
 - **Extra environment variables** — configurable via `[env]` TOML table or `--env` CLI flag. Values support `${VAR}` and `${VAR:-default}` substitution resolved after the elevated environment is built, allowing tools like GDAL to reference `GCE_METADATA_HOST` without tool-specific code in gcp-authcalator
 - **Quota project** — sets `GOOGLE_CLOUD_QUOTA_PROJECT` so end-user-credential (prod) API calls have a quota/billing project. Defaults to the selected target project (the same value as `CLOUDSDK_CORE_PROJECT` / `GOOGLE_CLOUD_PROJECT`); `quota_project` pins a static project, and `no_quota_project` opts out (leaving any inherited value untouched, and taking precedence over `quota_project`). The value is set on the base environment before the `[env]` extras are applied, so an explicit `[env] GOOGLE_CLOUD_QUOTA_PROJECT` still wins
+- **Non-mutating nested detection** — validates the parent proxy's exact gate session through `/session-health`, then checks its root, email, and project routes without calling `/token`; an expired or orphaned session falls back to normal acquisition, and a health check cannot trigger a long PAM refresh that it will abandon after its short probe deadline
+- **Transactional setup and cleanup** — once a prod session exists, every later setup failure restores the process umask, stops any temporary proxy, removes token-bearing files, and awaits best-effort session revocation before exiting
+- **Bounded signal handling** — before spawn, `SIGINT` or `SIGTERM` aborts the gate acquisition and exits with the conventional 130/143 status. After spawn, the first signal is forwarded to the wrapped child and escalates to `SIGKILL` after 5 seconds; a second signal escalates immediately. Handlers and pending escalation timers are removed when each phase ends.
 
 Usage: `with-prod -- python some/script.py`, `with-prod -- gcloud sql instances list`, `with-prod -- alembic upgrade head`
 
@@ -360,7 +383,7 @@ Generates and manages TLS certificates for remote devcontainer support:
 - `gcp-authcalator init-tls --bundle-b64` — Print base64-encoded client bundle to stdout
 - `gcp-authcalator init-tls --show-path` — Print TLS directory path
 
-Certificates are stored in `~/.gcp-authcalator/tls/` with `0600` permissions (directory `0700`). This is intentionally different from the socket directory — certificates must survive reboots (90-day lifetime), while the Unix socket is ephemeral runtime state.
+Certificates are stored in `~/.gcp-authcalator/tls/` by default, or the configured `tls_dir`, with private material and bundles at `0600` in a `0700` directory. This is intentionally different from the socket directory — certificates must survive reboots (90-day lifetime), while the Unix socket is ephemeral runtime state. Startup opens authoritative files without following symlinks and verifies ownership, modes, validity dates, CA BasicConstraints/keyCertSign, leaf EKU/identity/SAN constraints, signatures, and key/certificate matches. A server certificate lacking only the `host.docker.internal` SAN (generated before #72) is accepted with a warning rather than bricking a working gate on upgrade. A missing derived client bundle is reconstructed from a valid chain instead of rotating it; material that merely cannot be read safely (permissions drift, ownership change, symlink) surfaces as an error instead of triggering regeneration. Client bundles configured via `tls_bundle` are validated for content but read without symlink/ownership/mode checks — distributed bundles legitimately live on Kubernetes secret mounts and bind mounts. Writes use exclusive random staging files plus atomic rename.
 
 ### 7. Remote Transport Configuration
 
@@ -370,12 +393,35 @@ New config options and env vars for remote devcontainer support:
 | --------------- | ----------------- | -------------------------------- | ---------------------------------------- |
 | `gate_tls_port` | `--gate-tls-port` | `GCP_AUTHCALATOR_GATE_TLS_PORT`  | Gate TCP+mTLS listener port              |
 | `tls_dir`       | `--tls-dir`       | `GCP_AUTHCALATOR_TLS_DIR`        | TLS certificate directory                |
-| `gate_url`      | `--gate-url`      | `GCP_AUTHCALATOR_GATE_URL`       | Gate URL (must use `https://`)           |
+| `gate_url`      | `--gate-url`      | `GCP_AUTHCALATOR_GATE_URL`       | HTTPS gate base URL                      |
 | `tls_bundle`    | `--tls-bundle`    | `GCP_AUTHCALATOR_TLS_BUNDLE`     | Path to TLS client bundle file           |
 | —               | —                 | `GCP_AUTHCALATOR_TLS_BUNDLE_B64` | Base64-encoded client bundle (preferred) |
 
 Config precedence: CLI args > env vars > TOML file > schema defaults. (Until v0.10 this was `env > CLI > TOML`, which inverted universal CLI convention; the swap matches expectations and removes the silent override of explicit `--flag` invocations by inherited env vars.)
 
-`gate_url` is validated to require `https://` — `http://` URLs are rejected at config parse time, preventing accidental plaintext connections to gate.
+`gate_url` must be an HTTPS URL: credentials, queries, fragments, and dot-segment paths are rejected along with plaintext `http://` URLs. A plain path is allowed (gates behind a path-routing reverse proxy). Trailing slashes are accepted and removed before endpoint paths are appended, preventing accidental `//token`-style request paths.
+
+TOML configuration is strict: unknown keys are errors instead of being silently discarded. `scopes` must contain at least one scope. The main, admin, and optional operator socket paths are expanded, normalized absolute paths and must be pairwise distinct, preventing a later listener from unlinking or replacing a socket that this gate instance already bound.
 
 `GCP_AUTHCALATOR_TLS_BUNDLE_B64` is handled specially: after reading, it is deleted from `process.env` to prevent inheritance by child processes.
+
+### 8. Kubernetes exec credentials
+
+`kube-setup` finds kubeconfig users backed by `gke-gcloud-auth-plugin`, writes a
+mode-preserving `<kubeconfig>.bak`, and replaces their exec block with the
+absolute `gcp-authcalator kube-token` command. Backup and target replacement
+both use exclusive temporary files followed by atomic rename; a symlinked
+kubeconfig updates its resolved target rather than replacing the symlink.
+A kubeconfig the user can write but does not own (a shared root:group file), or
+one whose directory is not writable, cannot be replaced by rename without
+changing its ownership or failing outright — those setups keep the historical
+in-place write. Failure to create the backup warns and continues, since the
+patch is revertible with `gcloud container clusters get-credentials`.
+
+`kube-token` fetches from the active metadata proxy and emits an
+`ExecCredential`. It reads `KUBERNETES_EXEC_INFO` and mirrors a requested
+`client.authentication.k8s.io/v1` or `v1beta1` API version, defaulting to
+`v1beta1` when the variable is absent or unusable. The response advertises an
+expiration about one second in the future so kubectl does not reuse a dev token
+inside an unrelated `with-prod` process (or vice versa); token caching remains
+inside the PID-restricted metadata proxy.

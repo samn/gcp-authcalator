@@ -42,10 +42,26 @@ describe("createPerRequestTokenProvider", () => {
     expect(callCount()).toBe(0);
   });
 
+  test("health check verifies the gate without requesting a prod token", async () => {
+    const { fetchFn, capturedUrls } = mockFetch([{ status: 200, body: { status: "ok" } }]);
+    const provider = createPerRequestTokenProvider(unixConn, validInitialToken, { fetchFn });
+
+    await provider.checkHealth?.();
+
+    expect(capturedUrls).toEqual(["http://localhost/health"]);
+  });
+
+  test("health check rejects an unhealthy gate even while its token is cached", async () => {
+    const { fetchFn } = mockFetch([{ status: 503 }]);
+    const provider = createPerRequestTokenProvider(unixConn, validInitialToken, { fetchFn });
+
+    await expect(provider.checkHealth!()).rejects.toThrow("health check returned 503");
+  });
+
   test("re-fetches via fetchProdToken when cache expires", async () => {
     const expiringToken: CachedToken = {
       access_token: "old-token",
-      expires_at: new Date(Date.now() + 60_000), // inside 5-min margin
+      expires_at: new Date(Date.now() - 1_000),
     };
     const { fetchFn, capturedUrls } = mockFetch([
       { status: 200, body: { access_token: "fresh-token", expires_in: 3600 } },
@@ -65,7 +81,7 @@ describe("createPerRequestTokenProvider", () => {
   test("invokes onRefresh after a successful re-fetch", async () => {
     const expiringToken: CachedToken = {
       access_token: "old-token",
-      expires_at: new Date(Date.now() + 60_000),
+      expires_at: new Date(Date.now() - 1_000),
     };
     const { fetchFn } = mockFetch([
       { status: 200, body: { access_token: "fresh-token", expires_in: 3600 } },
@@ -97,7 +113,7 @@ describe("createPerRequestTokenProvider", () => {
   test("forwards command, scopes, and pamPolicy on refresh", async () => {
     const expiringToken: CachedToken = {
       access_token: "old-token",
-      expires_at: new Date(Date.now() + 60_000),
+      expires_at: new Date(Date.now() - 1_000),
     };
     const { fetchFn, capturedUrls } = mockFetch([
       { status: 200, body: { access_token: "fresh", expires_in: 3600 } },

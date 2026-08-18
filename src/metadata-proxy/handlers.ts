@@ -6,6 +6,20 @@ const METADATA_FLAVOR_VALUE = "Google";
 
 const METADATA_HEADERS = { [METADATA_FLAVOR_HEADER]: METADATA_FLAVOR_VALUE };
 
+function isEmailServiceAccountIdentifier(identifier: string): boolean {
+  try {
+    const decoded = decodeURIComponent(identifier);
+    return /^[^/@\s]+@[^/@\s]+$/.test(decoded);
+  } catch {
+    return false;
+  }
+}
+
+/** The all-digit unique-ID form GCE accepts alongside email and "default". */
+function isUniqueIdServiceAccountIdentifier(identifier: string): boolean {
+  return /^\d+$/.test(identifier);
+}
+
 function textResponse(body: string, status = 200): Response {
   return new Response(body, {
     status,
@@ -24,6 +38,7 @@ function jsonResponse(body: unknown, status = 200): Response {
  * Pure request handler for the GCE metadata server emulator.
  *
  * - `/` — detection ping (always 200, no header check)
+ * - `/session-health` — non-mutating check of the provider's gate authority
  * - `/identity` — authenticated engineer's email, proxied from the gate
  *   (requires the `Metadata-Flavor: Google` header, like the data endpoints)
  * - `/computeMetadata/v1/...` — requires `Metadata-Flavor: Google` header
@@ -62,6 +77,17 @@ export async function handleRequest(req: Request, deps: MetadataProxyDeps): Prom
     return handleUserIdentity(deps);
   }
 
+  // Private proxy-control route used by nested with-prod detection. Unlike the
+  // root ping and constant metadata fields, this reaches the provider's gate
+  // authority. For session providers it validates the exact session ID without
+  // minting a token or touching PAM.
+  if (url.pathname === "/session-health") {
+    if (req.headers.get(METADATA_FLAVOR_HEADER) !== METADATA_FLAVOR_VALUE) {
+      return textResponse("Missing Metadata-Flavor:Google header.", 403);
+    }
+    return handleSessionHealth(deps);
+  }
+
   // All /computeMetadata/* paths require the Metadata-Flavor header
   if (url.pathname.startsWith("/computeMetadata/")) {
     if (req.headers.get(METADATA_FLAVOR_HEADER) !== METADATA_FLAVOR_VALUE) {
@@ -71,20 +97,27 @@ export async function handleRequest(req: Request, deps: MetadataProxyDeps): Prom
     // Normalize trailing slashes for path matching
     let pathname = url.pathname.replace(/\/+$/, "") || "/";
 
-    // Alias any email-based service account path to "default".
+    // Alias email- and unique-ID-based service account paths to "default".
     //
     // This proxy serves a single set of credentials, so all service-account
     // paths are equivalent.  gcloud (and Python google-auth) resolve accounts
-    // by email, not by the "default" alias.  The email they use may come from
-    // the proxy's own listing, a cached value from a prior metadata-server
-    // interaction, or internal library state.  Rather than requiring an exact
-    // match, we rewrite any non-"default" identifier to "default" so the
-    // request always reaches the right handler.
+    // by email or by numeric unique ID, not by the "default" alias — both
+    // forms the real GCE metadata server serves.  The identifier they use may
+    // come from the proxy's own listing, a cached value from a prior
+    // metadata-server interaction, or internal library state.  Rather than
+    // requiring an exact match, we rewrite email-shaped and all-digit
+    // identifiers to "default" so the request reaches the right handler.
+    // Other identifiers remain unknown paths.
     const saBase = "/computeMetadata/v1/instance/service-accounts/";
     if (pathname.startsWith(saBase)) {
       const rest = pathname.slice(saBase.length);
-      if (rest && !rest.startsWith("default")) {
-        const slashIdx = rest.indexOf("/");
+      const slashIdx = rest.indexOf("/");
+      const identifier = slashIdx >= 0 ? rest.slice(0, slashIdx) : rest;
+      if (
+        identifier !== "default" &&
+        (isEmailServiceAccountIdentifier(identifier) ||
+          isUniqueIdServiceAccountIdentifier(identifier))
+      ) {
         pathname = slashIdx >= 0 ? saBase + "default" + rest.slice(slashIdx) : saBase + "default";
       }
     }
@@ -118,6 +151,20 @@ export async function handleRequest(req: Request, deps: MetadataProxyDeps): Prom
   }
 
   return textResponse("Not found", 404);
+}
+
+async function handleSessionHealth(deps: MetadataProxyDeps): Promise<Response> {
+  if (!deps.checkHealth) {
+    return textResponse("Not found", 404);
+  }
+
+  try {
+    await deps.checkHealth();
+    return jsonResponse({ status: "ok" });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    return jsonResponse({ error: message }, 503);
+  }
 }
 
 async function handleToken(deps: MetadataProxyDeps): Promise<Response> {

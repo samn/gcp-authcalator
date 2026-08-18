@@ -218,6 +218,51 @@ describe("GET /identity", () => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /session-health (non-mutating backing-authority check)
+// ---------------------------------------------------------------------------
+
+describe("GET /session-health", () => {
+  test("returns 200 when the provider authority is valid", async () => {
+    let checks = 0;
+    const res = await handleRequest(
+      metadataRequest("/session-health"),
+      makeDeps({
+        checkHealth: async () => {
+          checks++;
+        },
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(checks).toBe(1);
+  });
+
+  test("returns 503 when the provider session is invalid", async () => {
+    const res = await handleRequest(
+      metadataRequest("/session-health"),
+      makeDeps({
+        checkHealth: async () => {
+          throw new Error("Session expired or invalid");
+        },
+      }),
+    );
+    expect(res.status).toBe(503);
+  });
+
+  test("returns 404 when the provider cannot check authority", async () => {
+    const res = await handleRequest(metadataRequest("/session-health"), makeDeps());
+    expect(res.status).toBe(404);
+  });
+
+  test("requires the Metadata-Flavor header", async () => {
+    const res = await handleRequest(
+      makeRequest("/session-health"),
+      makeDeps({ checkHealth: async () => {} }),
+    );
+    expect(res.status).toBe(403);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // GET /computeMetadata/v1/project/project-id
 // ---------------------------------------------------------------------------
 
@@ -429,6 +474,17 @@ describe("GET /computeMetadata/v1/instance/service-accounts/default/scopes", () 
     const email = "sa@test-project.iam.gserviceaccount.com";
     const res = await handleRequest(
       metadataRequest(`/computeMetadata/v1/instance/service-accounts/${email}/scopes`),
+      makeDeps(),
+    );
+
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toBe("https://www.googleapis.com/auth/cloud-platform\n");
+  });
+
+  test("works via numeric unique-ID path (a form the real GCE server accepts)", async () => {
+    const res = await handleRequest(
+      metadataRequest("/computeMetadata/v1/instance/service-accounts/103769337821234567890/scopes"),
       makeDeps(),
     );
 
@@ -791,6 +847,35 @@ describe("email-based service account paths", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as Record<string, unknown>;
     expect(body.email).toBe("sa@test-project.iam.gserviceaccount.com");
+  });
+
+  test("aliases an email whose local part starts with default", async () => {
+    const res = await handleRequest(
+      metadataRequest(
+        "/computeMetadata/v1/instance/service-accounts/default-prod@test-project.iam.gserviceaccount.com/token",
+      ),
+      makeDeps(),
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.access_token).toBe("test-access-token");
+  });
+
+  test("does not alias a non-email identifier that starts with default", async () => {
+    let tokenCalls = 0;
+    const res = await handleRequest(
+      metadataRequest("/computeMetadata/v1/instance/service-accounts/default-prod/token"),
+      makeDeps({
+        getToken: async () => {
+          tokenCalls++;
+          throw new Error("must not fetch a token");
+        },
+      }),
+    );
+
+    expect(res.status).toBe(404);
+    expect(tokenCalls).toBe(0);
   });
 });
 

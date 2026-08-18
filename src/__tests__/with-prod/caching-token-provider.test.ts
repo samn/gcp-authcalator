@@ -2,9 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { createCachingTokenProvider } from "../../with-prod/caching-token-provider.ts";
 import type { CachedToken } from "../../metadata-proxy/types.ts";
 
-/** A token already inside the 5-minute refresh margin (needs refreshing). */
+/** An expired token that needs refreshing. */
 function staleToken(): CachedToken {
-  return { access_token: "stale", expires_at: new Date(Date.now() + 1000) };
+  return { access_token: "stale", expires_at: new Date(Date.now() - 1000) };
 }
 
 /** A token well within validity (served straight from cache). */
@@ -24,7 +24,7 @@ describe("createCachingTokenProvider", () => {
     expect(calls).toBe(0);
   });
 
-  test("refreshes when the cached token is within the expiry margin", async () => {
+  test("refreshes when the cached token is expired", async () => {
     let calls = 0;
     const provider = createCachingTokenProvider(staleToken(), undefined, async () => {
       calls++;
@@ -95,6 +95,44 @@ describe("createCachingTokenProvider", () => {
     expect(calls).toBe(2);
   });
 
+  test("does not immediately refresh a newly observed short-lived token", async () => {
+    let calls = 0;
+    const shortToken: CachedToken = {
+      access_token: "short",
+      expires_at: new Date(Date.now() + 60_000),
+    };
+    const provider = createCachingTokenProvider(shortToken, undefined, async () => {
+      calls++;
+      return freshToken("unexpected");
+    });
+
+    expect((await provider.getToken()).access_token).toBe("short");
+    expect((await provider.getToken()).access_token).toBe("short");
+    expect(calls).toBe(0);
+  });
+
+  test("refreshes a long-lived token at its capped five-minute margin", async () => {
+    let currentTime = 1_000;
+    let calls = 0;
+    const token: CachedToken = {
+      access_token: "old",
+      expires_at: new Date(currentTime + 60 * 60 * 1000),
+    };
+    const provider = createCachingTokenProvider(
+      token,
+      undefined,
+      async () => {
+        calls++;
+        return { access_token: "new", expires_at: new Date(currentTime + 60 * 60 * 1000) };
+      },
+      () => currentTime,
+    );
+
+    currentTime += 55 * 60 * 1000;
+    expect((await provider.getToken()).access_token).toBe("new");
+    expect(calls).toBe(1);
+  });
+
   test("propagates refresh errors to all concurrent callers and recovers", async () => {
     let calls = 0;
     const provider = createCachingTokenProvider(staleToken(), undefined, async () => {
@@ -107,5 +145,26 @@ describe("createCachingTokenProvider", () => {
     // A subsequent call should start a new refresh (in-flight slot released).
     expect((await provider.getToken()).access_token).toBe("recovered");
     expect(calls).toBe(2);
+  });
+
+  test("retries when the refresh side effect fails before cache commit", async () => {
+    let refreshCalls = 0;
+    let callbackCalls = 0;
+    const provider = createCachingTokenProvider(
+      staleToken(),
+      () => {
+        callbackCalls++;
+        if (callbackCalls === 1) throw new Error("token file write failed");
+      },
+      async () => {
+        refreshCalls++;
+        return freshToken(`new-${refreshCalls}`);
+      },
+    );
+
+    await expect(provider.getToken()).rejects.toThrow("token file write failed");
+    expect((await provider.getToken()).access_token).toBe("new-2");
+    expect(refreshCalls).toBe(2);
+    expect(callbackCalls).toBe(2);
   });
 });

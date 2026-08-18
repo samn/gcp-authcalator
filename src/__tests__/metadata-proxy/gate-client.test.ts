@@ -7,7 +7,7 @@ import {
   checkGateSocket,
   checkGateConnection,
 } from "../../metadata-proxy/gate-client.ts";
-import type { GateConnection } from "../../gate/connection.ts";
+import { GateTimeoutError, type GateConnection } from "../../gate/connection.ts";
 
 function unixConn(socketPath: string): GateConnection {
   return { mode: "unix", socketPath };
@@ -57,6 +57,48 @@ function mockProjectNumberFetch(projectNumber: string): {
 }
 
 describe("createGateClient", () => {
+  test("bounds every gate request with an abort signal", async () => {
+    const seenSignals: AbortSignal[] = [];
+    const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      seenSignals.push(init!.signal!);
+
+      const body = url.endsWith("/project-number")
+        ? { project_number: "123" }
+        : url.endsWith("/universe-domain")
+          ? { universe_domain: "googleapis.com" }
+          : url.endsWith("/identity")
+            ? { email: "engineer@example.com" }
+            : { access_token: "token", expires_in: 3600 };
+      return Response.json(body);
+    }) as unknown as typeof globalThis.fetch;
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
+
+    await client.getToken();
+    await client.getNumericProjectId();
+    await client.getUniverseDomain();
+    await client.getIdentity();
+
+    expect(seenSignals).toHaveLength(4);
+  });
+
+  test("surfaces an actionable gate timeout error", async () => {
+    const fetchFn = (async (_input: string | URL | Request, init?: RequestInit) => {
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      throw new GateTimeoutError(
+        75_000,
+        "http://localhost/token",
+        new DOMException("The operation was aborted", "AbortError"),
+      );
+    }) as unknown as typeof globalThis.fetch;
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
+
+    await expect(client.getToken()).rejects.toThrow(
+      "gcp-gate request timed out after 75000ms: http://localhost/token",
+    );
+  });
+
   test("fetches token from gate daemon", async () => {
     const { fetchFn } = mockFetch("test-token-abc");
     const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
@@ -79,12 +121,47 @@ describe("createGateClient", () => {
     expect(callCount()).toBe(1);
   });
 
-  test("re-fetches when token is about to expire", async () => {
+  test("coalesces concurrent token cache misses", async () => {
+    let callCount = 0;
+    let release: ((response: Response) => void) | undefined;
+    const response = new Promise<Response>((resolve) => {
+      release = resolve;
+    });
+    const fetchFn = (async () => {
+      callCount++;
+      return response;
+    }) as unknown as typeof globalThis.fetch;
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
+
+    const first = client.getToken();
+    const second = client.getToken();
+    expect(callCount).toBe(1);
+
+    release!(Response.json({ access_token: "shared", expires_in: 3600 }));
+    expect((await first).access_token).toBe("shared");
+    expect((await second).access_token).toBe("shared");
+    expect(callCount).toBe(1);
+  });
+
+  test("clears a failed in-flight refresh so the next request can recover", async () => {
+    let callCount = 0;
+    const fetchFn = (async () => {
+      callCount++;
+      if (callCount === 1) return new Response("temporary failure", { status: 503 });
+      return Response.json({ access_token: "recovered", expires_in: 3600 });
+    }) as unknown as typeof globalThis.fetch;
+    const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
+
+    await expect(client.getToken()).rejects.toThrow("gcp-gate returned 503");
+    expect((await client.getToken()).access_token).toBe("recovered");
+    expect(callCount).toBe(2);
+  });
+
+  test("caches a newly fetched two-minute token", async () => {
     let count = 0;
     const fetchFn = (async () => {
       count++;
-      // First call: token that expires in 2 minutes (below 5-min margin)
-      // Second call: fresh token
+      // A fixed five-minute margin used to make this token stale immediately.
       const expiresIn = count === 1 ? 120 : 3600;
       return new Response(
         JSON.stringify({
@@ -101,9 +178,26 @@ describe("createGateClient", () => {
     const first = await client.getToken();
     expect(first.access_token).toBe("token-1");
 
-    // Should re-fetch because expires_in of 120s < 300s margin
     const second = await client.getToken();
-    expect(second.access_token).toBe("token-2");
+    expect(second.access_token).toBe("token-1");
+    expect(count).toBe(1);
+  });
+
+  test("re-fetches a short token after its adaptive margin", async () => {
+    let currentTime = 1_000;
+    let count = 0;
+    const fetchFn = (async () => {
+      count++;
+      return Response.json({ access_token: `token-${count}`, expires_in: 120 });
+    }) as unknown as typeof globalThis.fetch;
+    const client = createGateClient(unixConn("/tmp/test.sock"), {
+      fetchFn,
+      now: () => currentTime,
+    });
+
+    expect((await client.getToken()).access_token).toBe("token-1");
+    currentTime += 108_000;
+    expect((await client.getToken()).access_token).toBe("token-2");
     expect(count).toBe(2);
   });
 
@@ -266,16 +360,20 @@ describe("createGateClient — getIdentity", () => {
     expect(result).toBe("engineer@example.com");
   });
 
-  test("caches identity email on subsequent calls", async () => {
-    const { fetchFn, callCount } = mockIdentityFetch("engineer@example.com");
+  test("re-reads identity so a gate-side ADC account change is visible", async () => {
+    let callCount = 0;
+    const fetchFn = (async () => {
+      callCount++;
+      return Response.json({ email: callCount === 1 ? "old@example.com" : "new@example.com" });
+    }) as unknown as typeof globalThis.fetch;
     const client = createGateClient(unixConn("/tmp/test.sock"), { fetchFn });
 
     const first = await client.getIdentity();
     const second = await client.getIdentity();
 
-    expect(first).toBe("engineer@example.com");
-    expect(second).toBe("engineer@example.com");
-    expect(callCount()).toBe(1);
+    expect(first).toBe("old@example.com");
+    expect(second).toBe("new@example.com");
+    expect(callCount).toBe(2);
   });
 
   test("throws on non-OK response", async () => {

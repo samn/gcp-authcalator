@@ -19,6 +19,8 @@ export interface TokenResponse {
   access_token: string;
   expires_in: number;
   token_type: "Bearer";
+  /** Included on confirmed prod-token responses; omitted for dev/session refresh. */
+  email?: string;
 }
 
 /** JSON response for identity requests. */

@@ -43,13 +43,26 @@ export const MAX_TOTAL_DISPLAY_CHARS = 32_768;
  *   - Key=value pairs where the key contains a sensitive word
  */
 const SECRET_VALUE_RE = /^[A-Za-z0-9+/=_-]{40,}$/;
+const JWT_VALUE_RE = /^[A-Za-z0-9_-]{2,}\.[A-Za-z0-9_-]{2,}\.[A-Za-z0-9_-]{2,}$/;
+// The sensitive word must be the LAST word of the key/flag name: `--api-key`
+// and `--token` take secret values, while `--token-ttl-seconds` or
+// `--auth-type` take benign ones. Redacting those would hide from the approval
+// dialog exactly the values the operator must see to judge the request.
 const SECRET_KEY_RE =
-  /^-*(?:.*(?:password|passwd|secret|token|key|credential|auth|api[_-]?key|private).*)[=:]/i;
+  /^-*[^=:]*?(?:^|[-_])(?:password|passwd|secret|token|credential|credentials|key|auth|authorization|private)[=:]/i;
+const SECRET_FLAG_WORD_RE =
+  /(?:^|[-_])(?:password|passwd|secret|token|credential|credentials|key|auth|authorization)$/i;
 
 /** Redact an argument if it looks like a secret value. */
 function redactArg(arg: string): string {
   // Redact long random-looking values (likely tokens/keys)
   if (SECRET_VALUE_RE.test(arg)) {
+    return "***";
+  }
+
+  // JWTs contain dots, so they do not match the base64-ish pattern above.
+  // Keep the length guard to avoid hiding ordinary dotted version numbers.
+  if (arg.length >= 40 && JWT_VALUE_RE.test(arg)) {
     return "***";
   }
 
@@ -67,6 +80,49 @@ function redactArg(arg: string): string {
 }
 
 /**
+ * Redact argv while preserving option/value relationships.
+ *
+ * Many CLIs accept both `--password=value` and `--password value`. Looking at
+ * each element independently leaks the second form whenever the value is short
+ * or contains punctuation, so a sensitive bare option also redacts the next
+ * element. A `--` separator clears that relationship because subsequent
+ * values are positional arguments.
+ */
+function redactArgs(args: string[]): string[] {
+  const result: string[] = [];
+  let redactNext = false;
+  let optionsEnded = false;
+
+  for (const arg of args) {
+    if (arg === "--") {
+      result.push(arg);
+      redactNext = false;
+      optionsEnded = true;
+      continue;
+    }
+
+    if (redactNext) {
+      result.push("***");
+      redactNext = false;
+      continue;
+    }
+
+    const redacted = redactArg(arg);
+    result.push(redacted);
+    if (
+      redacted === arg &&
+      !optionsEnded &&
+      /^--?[^=:]+$/.test(arg) &&
+      SECRET_FLAG_WORD_RE.test(arg.replace(/^-+/, ""))
+    ) {
+      redactNext = true;
+    }
+  }
+
+  return result;
+}
+
+/**
  * Summarize a command for safe display in a permission dialog.
  *
  * - Always includes the binary name (basename only, no path).
@@ -81,7 +137,7 @@ export function summarizeCommand(command: string[]): string | undefined {
 
   if (command.length === 1) return stripControlChars(binary);
 
-  const redactedArgs = command.slice(1).map(redactArg);
+  const redactedArgs = redactArgs(command.slice(1));
   const full = stripControlChars(`${binary} ${redactedArgs.join(" ")}`);
 
   if (full.length <= MAX_SUMMARY_LENGTH) return full;
@@ -135,8 +191,9 @@ export function describeCommand(command: string[]): CommandDisplay | undefined {
   let capped = false;
   let remaining = MAX_TOTAL_DISPLAY_CHARS;
   let stoppedOn: "args" | "chars" | undefined;
+  const redactedCommand = [command[0]!, ...redactArgs(command.slice(1))];
 
-  for (const [index, raw] of command.entries()) {
+  for (const [index, raw] of redactedCommand.entries()) {
     if (index >= MAX_COMMAND_ARGS) {
       stoppedOn = "args";
       break;
@@ -144,7 +201,7 @@ export function describeCommand(command: string[]): CommandDisplay | undefined {
 
     // Strip control characters per element, not on a joined string: an
     // embedded newline must not be able to forge a line in the numbered list.
-    const value = stripControlChars(index === 0 ? basename(raw) : redactArg(raw));
+    const value = stripControlChars(index === 0 ? basename(raw) : raw);
     const { text, clamped } = clampArg(value);
     if (clamped) capped = true;
 
@@ -219,11 +276,16 @@ export function encodeCommandHeader(command: string[]): string | undefined {
   // sending nothing but the marker; keep a clamped argv[0] so the operator at
   // least sees what binary is being run.
   if (kept.length === 0) {
-    kept.push(command[0]!.slice(0, 200));
+    const binary = command[0]!;
+    const prefix = binary.slice(0, 200);
+    const withheld = binary.length - prefix.length;
+    kept.push(`${prefix} …(+${withheld} chars omitted by the client from argv[0])`);
   }
 
   const omitted = command.length - kept.length;
-  kept.push(`… ${omitted} further argument(s) omitted by the client (header size limit)`);
+  if (omitted > 0) {
+    kept.push(`… ${omitted} further argument(s) omitted by the client (header size limit)`);
+  }
   return JSON.stringify(kept);
 }
 

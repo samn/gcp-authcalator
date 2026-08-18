@@ -4,6 +4,7 @@ import type { MetadataProxyDeps, TokenProvider } from "./types.ts";
 import { createGateClient, type GateClientOptions } from "./gate-client.ts";
 import { handleRequest } from "./handlers.ts";
 import { getOwnerPid, isDescendantOf } from "./pid-validator.ts";
+import { useApplicationDeadline } from "../request-timeout.ts";
 
 export interface MetadataProxyServerResult {
   server: ReturnType<typeof Bun.serve>;
@@ -50,6 +51,7 @@ export function startMetadataProxyServer(
 
   const deps: MetadataProxyDeps = {
     getToken: provider.getToken,
+    checkHealth: provider.checkHealth,
     getNumericProjectId: gateClient?.getNumericProjectId,
     getUniverseDomain: gateClient?.getUniverseDomain,
     getIdentity: gateClient?.getIdentity,
@@ -65,6 +67,9 @@ export function startMetadataProxyServer(
     hostname: "127.0.0.1",
     port: config.port,
     fetch(req, server) {
+      // Session refresh is bounded by the provider's 510s deadline, which is
+      // intentionally longer than Bun's 10s default and 255s global maximum.
+      useApplicationDeadline(req, server);
       if (ancestorPid !== undefined) {
         const addr = server.requestIP(req);
         // Use the actually-bound port (server.port), not config.port: with-prod
@@ -83,7 +88,28 @@ export function startMetadataProxyServer(
     },
   });
 
+  let signalHandlersInstalled = false;
+
+  function handleSigterm(): void {
+    onSignal();
+  }
+
+  function handleSigint(): void {
+    onSignal();
+  }
+
+  function onSignal(): void {
+    console.log("\nmetadata-proxy: shutting down...");
+    stop();
+    process.exit(0);
+  }
+
   function stop() {
+    if (signalHandlersInstalled) {
+      process.off("SIGTERM", handleSigterm);
+      process.off("SIGINT", handleSigint);
+      signalHandlersInstalled = false;
+    }
     try {
       server.stop(true);
     } catch {
@@ -93,13 +119,9 @@ export function startMetadataProxyServer(
 
   const installSignalHandlers = options.installSignalHandlers ?? true;
   if (installSignalHandlers) {
-    const onSignal = () => {
-      console.log("\nmetadata-proxy: shutting down...");
-      stop();
-      process.exit(0);
-    };
-    process.on("SIGTERM", onSignal);
-    process.on("SIGINT", onSignal);
+    process.on("SIGTERM", handleSigterm);
+    process.on("SIGINT", handleSigint);
+    signalHandlersInstalled = true;
   }
 
   const quiet = options.quiet ?? false;
@@ -118,6 +140,9 @@ export function startMetadataProxyServer(
     );
     console.log(
       "    GET /computeMetadata/v1/instance/service-accounts/default/token → access token",
+    );
+    console.log(
+      "    GET /session-health                                          → authority check",
     );
     console.log("    GET /computeMetadata/v1/project/project-id                    → project ID");
     console.log(

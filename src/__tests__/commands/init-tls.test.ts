@@ -80,4 +80,22 @@ describe("runInitTls", () => {
     expect(decoded).toContain("-----BEGIN CERTIFICATE-----");
     expect(decoded).toContain("-----BEGIN PRIVATE KEY-----");
   });
+
+  test("--bundle-b64 does not rotate an existing CA", async () => {
+    const tlsDir = join(makeTempDir(), "tls");
+    await runInitTls({ tlsDir });
+    const original = loadTlsFiles(tlsDir);
+    const origLog = console.log;
+    console.log = () => {};
+
+    try {
+      await runInitTls({ bundleB64: true, tlsDir });
+    } finally {
+      console.log = origLog;
+    }
+
+    const afterBundleRead = loadTlsFiles(tlsDir);
+    expect(afterBundleRead.caCert).toBe(original.caCert);
+    expect(afterBundleRead.clientCert).toBe(original.clientCert);
+  });
 });

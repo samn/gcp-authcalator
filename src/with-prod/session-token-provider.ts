@@ -8,12 +8,14 @@ import { fetchWithGateTimeout, throwTypedGateError } from "./fetch-prod-token.ts
 /**
  * Backstop timeout for a session token refresh. No confirmation happens on this
  * path (the session is pre-approved); the gate's work is a PAM grant renewal
- * (bounded by its rotation budget) plus a token mint. Sized above that — and
+ * (bounded at 420 s) in parallel with a token mint (up to two 30 s auth
+ * stages). Sized with response/transport margin above that — and
  * above the acquisition cap is unnecessary since there is no confirmation here
  * — so a wedged gate surfaces as an error instead of silently stalling the
  * wrapped command, while never aborting a legitimately slow PAM rotation.
  */
-const SESSION_REFRESH_TIMEOUT_MS = 480_000;
+const SESSION_REFRESH_TIMEOUT_MS = 510_000;
+const SESSION_HEALTH_TIMEOUT_MS = 3_000;
 
 export interface SessionTokenProviderOptions {
   /** Override fetch for testing. */
@@ -50,7 +52,7 @@ export function createSessionTokenProvider(
     ? { [TARGET_PROJECT_HEADER]: options.targetProject }
     : undefined;
 
-  return createCachingTokenProvider(initialToken, options.onRefresh, async () => {
+  const provider = createCachingTokenProvider(initialToken, options.onRefresh, async () => {
     const url = `${baseUrl}/token?session=${encodeURIComponent(sessionId)}`;
     const res = await fetchWithGateTimeout(
       fetchFn,
@@ -60,7 +62,9 @@ export function createSessionTokenProvider(
     );
 
     if (res.status === 401) {
-      const text = await res.text().catch(() => "");
+      // fetchWithGateTimeout already buffered the complete body, so this read
+      // is in-memory and cannot outlive the request deadline.
+      const text = await res.text();
       throw new Error(
         `Prod session expired or revoked${text ? `: ${text}` : ""}. ` +
           "The gcp-gate daemon may have restarted. Re-run with-prod to start a new session.",
@@ -92,4 +96,19 @@ export function createSessionTokenProvider(
       expires_at: new Date(Date.now() + (body.expires_in ?? 3600) * 1000),
     };
   });
+
+  return {
+    ...provider,
+    async checkHealth(): Promise<void> {
+      const res = await fetchWithGateTimeout(
+        fetchFn,
+        `${baseUrl}/session?id=${encodeURIComponent(sessionId)}`,
+        extraOpts,
+        SESSION_HEALTH_TIMEOUT_MS,
+      );
+      if (!res.ok) {
+        throw new Error(`gcp-gate session health check returned ${res.status}`);
+      }
+    },
+  };
 }

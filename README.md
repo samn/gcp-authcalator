@@ -177,12 +177,12 @@ Precedence: CLI flags > environment variables > TOML file > defaults.
 --project-id <id>          GCP project ID (default project for with-prod)
 --project <id>             with-prod only: per-invocation target project (overrides --project-id)
 --service-account <email>  Service account email to impersonate
---socket-path <path>       Unix socket path (default: $XDG_RUNTIME_DIR/gcp-authcalator.sock)
---admin-socket-path <path> Admin socket path for approve/deny (default: $XDG_RUNTIME_DIR/gcp-authcalator-admin/admin.sock)
+--socket-path <path>       Absolute Unix socket path (default: $XDG_RUNTIME_DIR/gcp-authcalator.sock)
+--admin-socket-path <path> Absolute admin socket path for approve/deny (default: $XDG_RUNTIME_DIR/gcp-authcalator-admin/admin.sock)
 -p, --port <port>          Metadata proxy port (default: 8173)
 --gate-tls-port <port>          Gate TCP+mTLS listener port (enables remote devcontainer support)
 --tls-dir <path>           TLS certificate directory (default: ~/.gcp-authcalator/tls/)
---gate-url <url>           Gate URL for remote connections (must use https://)
+--gate-url <url>           Gate HTTPS URL for remote connections (no credentials, query, or fragment)
 --tls-bundle <path>        Path to TLS client bundle file (PEM or base64-encoded)
 --scopes <scopes>          Comma-separated OAuth scopes (default: cloud-platform)
 --pam-policy <id|path>     PAM entitlement for just-in-time prod escalation
@@ -247,10 +247,9 @@ port = 8173
 # Setting this longer than the token TTL amortises PAM/IAM propagation
 # latency across multiple token refreshes — one cached grant serves many
 # minted tokens before the gate rotates it. Minted tokens are still clamped
-# to the grant's expiry minus the 5-minute drain margin, so this only
-# changes how often the gate calls PAM, not how long any individual token
-# is valid. Range: 301–43200 (must exceed the 5-minute drain margin, else
-# every minted token would be born expired). 12 h max.
+# to the grant's expiry minus the 5-minute drain margin, so this only changes
+# how often the gate calls PAM, not how long any individual token is valid.
+# Range: 301–43200 (must exceed the 5-minute drain margin). 12 h max.
 # pam_grant_ttl_seconds = 14400  # 4 h
 
 # Prod session lifetime — how long with-prod can refresh tokens without
@@ -284,6 +283,12 @@ Pass the file with `--config`:
 gcp-authcalator gate --config config.toml
 ```
 
+TOML files are parsed strictly: unknown keys are errors. Socket paths must be
+absolute and pairwise distinct, `scopes` must contain at least one entry, and
+`gate_url` must be an HTTPS URL without credentials, a query, or a fragment (a
+path is allowed for gates behind a path-routing reverse proxy). Trailing
+slashes on `gate_url` are accepted and normalized.
+
 ## Commands
 
 ### `gate` — Host-side token daemon
@@ -311,16 +316,19 @@ gcp-authcalator gate \
 
 **Optional:** `--gate-tls-port` enables a TCP listener with mutual TLS, allowing remote devcontainers to connect. TLS certificates must be generated first with `gcp-authcalator init-tls` and are stored in `~/.gcp-authcalator/tls/`.
 
-**PAM (Privileged Access Manager) integration:** When `--pam-policy` is configured, prod token requests trigger a temporary [PAM grant](https://cloud.google.com/iam/docs/pam-overview) before minting the token. This allows the engineer's ADC to be downscoped by default, with just-in-time escalation for production access. The `--pam-allowed-policies` flag defines additional entitlements that callers may request via `?pam_policy=<id>` query parameter. Grants are withdrawn (`grants:withdraw`, the requester's own operation) on a best-effort basis when they are rotated and when the gate shuts down — the engineer only needs PAM requester access on the entitlement, not the admin-level `grants.revoke` permission.
+**PAM (Privileged Access Manager) integration:** When `--pam-policy` is configured, an approved prod request starts temporary [PAM grant](https://cloud.google.com/iam/docs/pam-overview) acquisition and OAuth token minting concurrently, then returns the token only after both succeed. This allows the engineer's ADC to be downscoped by default, with just-in-time escalation for production access. The `--pam-allowed-policies` flag defines additional entitlements that callers may request via `?pam_policy=<id>` query parameter. Grants are withdrawn (`grants:withdraw`, the requester's own operation) on a best-effort basis when they are rotated and when the gate shuts down — the engineer only needs PAM requester access on the entitlement, not the admin-level `grants.revoke` permission.
+
+Cached grants rotate with 5 minutes remaining, at the same boundary used to clamp minted token expiry. This guarantees that rotation does not withdraw IAM access while a token minted under the old grant can still be valid. The adaptive client refresh margin keeps short remaining token lifetimes useful without moving that safety boundary earlier. Grant expiry is calculated from PAM's `auditTrail.accessGrantTime` (or activated timeline event) plus the requested duration, rather than assuming access began at request creation. `createTime`, then a request-start estimate for an incomplete fresh response, are conservative fallbacks. Existing grants with no bounded expiry or marked `externallyModified` are not reused. Concurrent rotations coalesce, and a timed-out rotation is generation-fenced so it cannot later overwrite or withdraw state adopted by its replacement. Create retries reuse PAM's `requestId` idempotency key, preventing an ambiguous timeout from creating duplicate grants. Shutdown rejects new rotations, aborts admitted work, and spends at most 10 seconds dispatching withdrawals for grants it can prove it owns. The configured grant lifetime must therefore be at least 301 seconds; a longer grant amortises PAM/IAM propagation latency across multiple token refreshes without extending any individual token past the 5-minute drain boundary.
 
 **API endpoints** (over Unix socket or TCP+mTLS):
 
 | Endpoint                  | Behavior                                                               |
 | ------------------------- | ---------------------------------------------------------------------- |
 | `GET /token`              | Returns a dev-scoped access token (impersonated service account)       |
-| `GET /token?level=prod`   | Prompts for confirmation, then returns the engineer's own token        |
+| `GET /token?level=prod`   | Prompts, then returns the engineer's token and email                   |
 | `GET /token?session=<id>` | Refreshes a token within a pre-approved prod session                   |
 | `POST /session`           | Creates a prod session (with confirmation), returns session ID + token |
+| `GET /session?id=<id>`    | Validates a prod session without minting a token                       |
 | `DELETE /session?id=<id>` | Revokes a prod session                                                 |
 | `GET /identity`           | Returns the authenticated user's email                                 |
 | `GET /project-number`     | Returns the numeric GCP project ID                                     |
@@ -337,7 +345,7 @@ gcp-authcalator gate \
 
 Both `/token` and `/token?level=prod` accept an optional `scopes` query parameter (comma-separated) to request tokens with specific OAuth scopes. For example: `/token?scopes=https://www.googleapis.com/auth/sqlservice.login`. When omitted, tokens are minted with the default `cloud-platform` scope.
 
-**Dev tokens** are minted by impersonating the configured service account. They are cached and re-minted when less than 5 minutes of lifetime remain.
+**Dev tokens** are minted by impersonating the configured service account. The refresh margin adapts to the observed token lifetime: 10% for short-lived tokens, capped at 5 minutes for ordinary hour-long tokens. This avoids treating every token with a lifetime of 5 minutes or less as immediately stale.
 
 **Prod tokens** use the engineer's own ADC credentials. Before issuing a prod token, the daemon:
 
@@ -346,7 +354,7 @@ Both `/token` and `/token?level=prod` accept an optional `scopes` query paramete
 3. Falls back to a pending approval queue for CLI-based approval (see `pending` / `approve`)
 4. Denies access if no interactive method is available and the request times out (120 seconds)
 
-Prod token requests are rate-limited: one confirmation dialog at a time, a 1-second cooldown after denial, and a maximum of 20 attempts per minute.
+Prod token requests are rate-limited: one confirmation dialog at a time, a 1-second cooldown after denial, and a maximum of 20 attempts per minute. The single-flight slot is released as soon as the operator decides; slow PAM propagation and token minting happen afterward and cannot block the next confirmation dialog. After approval, PAM acquisition and OAuth token minting run concurrently, and the response is returned only when both succeed.
 
 **The dialog shows the reported command in full.** When `with-prod` reports the
 command it is wrapping (via `X-Wrapped-Command`), every argument is listed on
@@ -358,7 +366,7 @@ it is an AppleScript list where **Allow** stays disabled until you select a
 line. Both dialogs receive the command over stdin rather than on the command
 line, so it is not visible in the host process table. The terminal prompt
 prints every argument and requires you to type `yes` in full (it re-prompts
-once if you answer something else). Arguments that look like secrets are still redacted to `***` first, and a
+once if you answer something else). Arguments that look like secrets are still redacted to `***` first, including secrets supplied as a separate flag value and JWT-shaped arguments. Terminal controls and Unicode bidirectional formatting controls are replaced before display so they cannot redraw or visually reorder the command. A
 handful of size caps apply (512 arguments, 2000 characters per argument, 32 KiB
 total) — when one fires, the dialog says so and how much it withheld.
 
@@ -381,6 +389,7 @@ Set `GCE_METADATA_HOST=127.0.0.1:8173 GCE_METADATA_IP=127.0.0.1:8173 GCE_METADAT
 | Path                                                               | Response                               | `Metadata-Flavor: Google` required? |
 | ------------------------------------------------------------------ | -------------------------------------- | ----------------------------------- |
 | `GET /`                                                            | `200 ok` (detection ping)              | No                                  |
+| `GET /session-health`                                              | `with-prod` backing-authority check    | Yes                                 |
 | `GET /identity`                                                    | Authenticated user email JSON          | Yes                                 |
 | `GET /computeMetadata/v1/instance`                                 | Directory listing for GCE detection    | Yes                                 |
 | `GET /computeMetadata/v1/instance/service-accounts/default/token`  | Token JSON                             | Yes                                 |
@@ -394,11 +403,17 @@ Set `GCE_METADATA_HOST=127.0.0.1:8173 GCE_METADATA_IP=127.0.0.1:8173 GCE_METADAT
 
 Endpoints returning "JSON or directory listing" respond with JSON when `?recursive=true` is passed, and a text directory listing otherwise. This matches real GCE metadata server behavior.
 
-Service account paths that use an email identifier (e.g., `.../service-accounts/sa@project.iam.gserviceaccount.com/token`) are automatically aliased to `default`, since the proxy serves a single set of credentials. This ensures compatibility with `gcloud` and other client libraries that resolve accounts by email.
+Service account paths that use an email identifier (e.g., `.../service-accounts/sa@project.iam.gserviceaccount.com/token`) are automatically aliased to `default`, since the proxy serves a single set of credentials. Only the exact `default` segment and email-shaped identifiers are accepted as aliases; lookalikes such as `default-prod` remain unknown paths. This ensures compatibility with `gcloud` and other client libraries that resolve accounts by email without accidentally routing arbitrary identifiers to the credential endpoint.
+
+`GET /session-health` is a private control route used by nested `with-prod`.
+For a session-backed proxy it validates the exact session at the gate without
+minting a token or renewing PAM; for operator-socket per-request mode it checks
+gate reachability. Providers without a non-mutating authority check return
+`404`.
 
 `GET /identity` proxies the gate's [`/identity`](#gate--host-side-token-daemon) route, returning the authenticated engineer's email as JSON (`{ "email": "..." }`). This lets container-side tooling — for example telemetry that must attribute activity to a real person — discover the human behind the downscoped service account. It is intentionally **not** the GCE `.../service-accounts/default/identity` path (which is reserved for OIDC identity tokens and is not supported); it lives at the top level, mirroring the gate. Because it returns the engineer's real email (PII), it requires the `Metadata-Flavor: Google` header like the other data-returning endpoints — the header blocks header-less "simple" requests (a browser or an SSRF-prone local service) from reading it. When the proxy is backed by a custom token provider rather than a gate client, the endpoint returns `404`.
 
-The proxy fetches tokens from the `gate` daemon via a Unix socket (local) or TCP+mTLS (remote) and caches them locally, re-fetching when less than 5 minutes of lifetime remain. The transport is determined automatically based on whether `--gate-url` or `GCP_AUTHCALATOR_GATE_URL` is configured.
+The proxy fetches tokens from the `gate` daemon via a Unix socket (local) or TCP+mTLS (remote) and caches them locally. Its refresh margin is 10% of the observed token lifetime, capped at 5 minutes, so both short-lived and ordinary hour-long tokens retain a useful cache window. The transport is determined automatically based on whether `--gate-url` or `GCP_AUTHCALATOR_GATE_URL` is configured.
 
 ### `with-prod` — Elevation wrapper
 
@@ -432,16 +447,30 @@ gcp-authcalator with-prod \
 
 This command:
 
-1. Creates a **prod session** at `gate` (triggers a host-side confirmation dialog). The session allows transparent token refresh without re-confirmation for a bounded lifetime (default 8 hours, configurable via `--session-ttl-seconds`).
-2. Starts a temporary metadata proxy on a random port that **auto-refreshes tokens** from the gate when they near expiry (within 5 minutes of the token TTL). This means long-running processes never lose access — individual tokens remain short-lived while the session stays active.
-3. Creates an isolated `CLOUDSDK_CONFIG` directory so `gcloud` doesn't reuse cached credentials. The access token file is atomically updated on each refresh.
+1. Gives the gate transport a 3-second health preflight, then creates a **prod session** at `gate` (triggers a host-side confirmation dialog). The session allows transparent token refresh without re-confirmation for a bounded lifetime (default 8 hours, configurable via `--session-ttl-seconds`).
+2. Starts a temporary metadata proxy on a random port that **auto-refreshes tokens** from the gate near expiry (at 10% of the observed lifetime, capped at 5 minutes). This means long-running processes never lose access — individual tokens remain short-lived while the session stays active.
+3. Creates an isolated `CLOUDSDK_CONFIG` directory so `gcloud` doesn't reuse cached credentials. The access token file is atomically updated through an exclusive, randomly named staging file on each refresh; a refresh-side write failure is not committed to the in-memory cache.
 4. Strips credential-related environment variables (`GOOGLE_APPLICATION_CREDENTIALS`, `CLOUDSDK_AUTH_ACCESS_TOKEN`, etc.) to force the child through the proxy
 5. Spawns the wrapped command with `GCE_METADATA_HOST`, `GCE_METADATA_IP`, and `GCE_METADATA_ROOT` pointing at the temporary proxy
 6. Applies any extra environment variables from `[env]` config or `--env` CLI flags, with `${VAR}` / `${VAR:-default}` substitution resolved against the elevated environment
-7. Forwards signals to the child process and propagates its exit code
+7. Cancels acquisition immediately if `SIGINT` or `SIGTERM` arrives before the child starts. Once running, it forwards the first signal to the child, gives it 5 seconds to exit cleanly, then sends `SIGKILL`; a second signal skips the remaining grace period. The wrapper propagates the child's exit code.
 8. Revokes the session on exit (best-effort cleanup)
 
 The temporary proxy uses PID-based process restriction — only the wrapped command and its descendants can request tokens from it. The session ID (which authorizes token refresh) stays in the `with-prod` process and never reaches the subprocess — an attacker inside the subprocess cannot refresh tokens independently.
+
+Before opening an approval request, `with-prod` gives the gate transport a
+3-second health preflight, so a missing daemon, stale socket, broken tunnel, or
+bad remote address fails promptly instead of consuming the full acquisition
+deadline. Every longer gate request is separately bounded and includes the
+complete response body, not only receipt of HTTP headers. Nested `with-prod`
+detection first asks the parent proxy to validate its backing gate session,
+then checks stable email and project metadata. The authority check does not
+probe the token endpoint, so it cannot start an unnecessary PAM rotation merely
+to decide whether the parent is healthy. An expired session or a gate restart
+therefore falls back to normal session creation. Once a session has
+been acquired, setup and teardown form one cleanup transaction: an error still
+restores the umask, stops any temporary proxy, removes token-bearing files, and
+awaits best-effort session revocation.
 
 ### `pending` / `approve` / `deny` — CLI approval of pending requests
 
@@ -487,7 +516,7 @@ gcp-authcalator init-tls --show-path
 
 The client bundle (CA cert + client cert + client key) is a single base64-encoded string that you distribute to remote environments via secrets or environment variables. It is **not** a GCP credential — it only authorizes communication with the gate daemon.
 
-Certificates are generated with ECDSA P-256 with a 90-day lifetime for all certificates (CA, server, and client). All certs are treated as ephemeral and regenerated together. Gate requires certs to exist and be valid — it will refuse to start with `--gate-tls-port` if certs are missing or expired, directing you to run `init-tls`.
+Certificates are generated with ECDSA P-256 with a 90-day lifetime for all certificates (CA, server, and client). All certs are treated as ephemeral and regenerated together. `init-tls` honors `tls_dir` from CLI, environment, or TOML configuration. Gate refuses to start if the TLS directory or key material is symlinked, has unsafe ownership or permissions, is not yet valid or is expired, has the wrong CA/key-usage/extended-key-usage constraints, has an unexpected subject or server SAN, or contains a key that does not match its certificate. A missing derived `client-bundle.pem` is rebuilt from a valid existing chain without rotating that chain; authoritative material is regenerated together when invalid.
 
 ### `kube-setup` — Patch kubeconfig for GKE
 
@@ -502,8 +531,8 @@ This command:
 1. Reads the kubeconfig (from `$KUBECONFIG` or `~/.kube/config`)
 2. Finds all users with `exec.command: gke-gcloud-auth-plugin` (including full paths)
 3. Replaces the exec section to point to `gcp-authcalator kube-token`
-4. Creates a backup at `<kubeconfig>.bak`
-5. Writes the patched kubeconfig back
+4. Creates or replaces a mode-preserving backup at `<kubeconfig>.bak` (warns and continues if the backup cannot be created — the patch is revertible with `gcloud container clusters get-credentials` regardless)
+5. Atomically writes the patched kubeconfig, preserving its mode and following a kubeconfig symlink to update its target; a kubeconfig the user can write but not own, or one in a non-writable directory, is written in place instead
 
 After patching, kubeconfig user entries will look like:
 
@@ -529,7 +558,7 @@ kubectl [exec credential plugin](https://kubernetes.io/docs/reference/access-aut
 gcp-authcalator kube-token
 ```
 
-The plugin reads `GCE_METADATA_HOST` from the environment (falls back to `127.0.0.1:8173`) and requests a token from that metadata proxy. This means it automatically picks up the correct token:
+The plugin reads `GCE_METADATA_HOST` from the environment (falls back to `127.0.0.1:8173`) and requests a token from that metadata proxy. It mirrors the supported `client.authentication.k8s.io/v1` or `v1beta1` requested in `KUBERNETES_EXEC_INFO`, so its response matches the exec-plugin contract used by the invoking kubectl. This means it automatically picks up the correct token:
 
 - **Normal usage:** fetches a dev token from the default metadata proxy
 - **Under `with-prod`:** `GCE_METADATA_HOST` points to the temporary prod proxy, so kubectl transparently gets the prod token
@@ -684,8 +713,8 @@ gcp-authcalator is designed for environments where a coding agent (or other untr
 **Hard security boundaries:**
 
 - **Credentials never enter the container.** The host daemon holds ADC; the container only receives short-lived, downscoped tokens. Even if the container is fully compromised, the attacker gets only a dev service account token — not the engineer's identity.
-- **Cross-user isolation.** The main Unix socket is set to `0660` (group-readable by the gate UID's primary group) in a `0750` directory; the privileged operator socket is `0600` (owner-only) in the same directory. On modern Linux distros (UPG), the gate UID's primary group contains only the gate UID itself, so this is _effectively_ `0600` end-to-end. To grant a different-UID agent access to the main socket (e.g. a `the-robot` user in a dev container), add that user to the gate UID's primary group; the kernel still blocks access to the operator socket because its file mode is `0600`. The `$XDG_RUNTIME_DIR` directory itself is left at the system-managed `0700` per the XDG spec — group access requires placing `socket_path` in a gate-managed directory like `~/.gcp-authcalator/`. `with-prod`'s per-invocation sandbox dir (where ephemeral gcloud config and token files live) is resolved separately from the gate's runtime dir (`$XDG_RUNTIME_DIR` → `$XDG_CACHE_HOME/gcp-authcalator` → `~/.cache/gcp-authcalator`), so the agent's sandbox stays in its own private, owned space even when the gate's `~/.gcp-authcalator/` is shared via symlink. **For strongest isolation, run coding agents as a separate OS user _not_ in the gate's primary group** — they will be unable to access the main socket at all.
-- **Mutual TLS for remote transport.** When using TCP for remote devcontainers, both gate and the client verify each other's identity via self-signed certificates. The gate only listens on localhost (port forwarding is required for remote access). The `gate_url` config option enforces `https://` — plaintext `http://` connections are rejected at config parse time.
+- **Cross-user isolation.** The main Unix socket is set to `0660` (group-readable by the gate UID's primary group) in a `0750` directory; the privileged operator socket is `0600` (owner-only) in the same directory. On modern Linux distros (UPG), the gate UID's primary group contains only the gate UID itself, so this is _effectively_ `0600` end-to-end. To grant a different-UID agent access to the main socket (e.g. a `the-robot` user in a dev container), add that user to the gate UID's primary group; the kernel still blocks access to the operator socket because its file mode is `0600`. The `$XDG_RUNTIME_DIR` directory itself is left at the system-managed `0700` per the XDG spec — group access requires placing `socket_path` in a gate-managed directory like `~/.gcp-authcalator/`. All configured socket paths must be absolute and pairwise distinct; startup also resolves their existing parent directories and rejects paths that alias through symlinks. `with-prod`'s per-invocation sandbox dir (where ephemeral gcloud config and token files live, `0600` owned by the calling UID) is resolved separately from the gate's runtime dir (`$XDG_RUNTIME_DIR` → `$XDG_CACHE_HOME/gcp-authcalator` → `~/.cache/gcp-authcalator`), so the agent's sandbox stays in its own private, owned space even when the gate's `~/.gcp-authcalator/` is shared via symlink. **For strongest isolation, run coding agents as a separate OS user _not_ in the gate's primary group** — they will be unable to access the main socket at all.
+- **Mutual TLS for remote transport.** When using TCP for remote devcontainers, both gate and the client verify each other's identity via self-signed certificates. The gate only listens on localhost (port forwarding is required for remote access). `gate_url` must be an HTTPS URL with no credentials, query, fragment, or dot-segments in its path (a plain path is allowed for gates behind a path-routing reverse proxy). Trailing slashes are accepted and normalized before endpoint paths are appended; plaintext `http://` and ambiguous URLs are rejected at config parse time.
 - **Human-in-the-loop for production access.** Prod tokens require explicit confirmation via a desktop dialog (`osascript` on macOS, `zenity` on Linux), terminal prompt, or CLI approval (`gcp-authcalator approve`) on the host. If no method resolves within 120 seconds, access is denied.
 - **Informed consent.** Every approval surface shows the reported command in full, one argument per line. Nothing is elided silently: the size caps that bound dialog growth each state what they withheld. The reported command is still caller-supplied and advisory — a compromised container can lie about what it intends to run — so this protects the honest-client case, where the risk is an operator approving a payload they were structurally unable to see.
 - **Rate limiting** prevents automated brute-forcing of the confirmation flow: one dialog at a time, a 1-second cooldown after denial, and a maximum of 20 attempts per minute.
@@ -694,9 +723,9 @@ gcp-authcalator is designed for environments where a coding agent (or other untr
 
 - **PID-based process restriction** on `with-prod` temporary proxies ensures only the intended process tree can request elevated tokens. This uses `/proc` introspection and is effective against casual abuse, but a sufficiently privileged same-user process could circumvent it.
 - **Environment isolation** in `with-prod` strips credential-related env vars (`GOOGLE_APPLICATION_CREDENTIALS`, `CLOUDSDK_AUTH_ACCESS_TOKEN`, etc.) and uses a temporary `CLOUDSDK_CONFIG` in the user-private runtime directory to prevent credential leakage around the proxy.
-- **Token files** are written with `0600` permissions in user-private directories, not passed via environment variables (which are readable via `/proc/*/environ`).
+- **Token files** are written with `0600` permissions in user-private directories, not passed via environment variables (which are readable via `/proc/*/environ`). Atomic refreshes use unpredictable, exclusively created staging names so a planted fixed-name symlink cannot redirect the write.
 - **Audit logging** records all token requests as JSON lines to the runtime directory, providing a trail for forensic review.
-- **Stale socket recovery** verifies socket ownership and refuses to follow symlinks, preventing TOCTOU races.
+- **Stale socket recovery** verifies socket ownership and refuses to follow symlinks, preventing TOCTOU races. Listener startup is transactional: if a later TLS, admin-socket, or operator-socket step fails, listeners and socket files created by that attempt are rolled back before startup returns the error.
 
 **Limitations:**
 
@@ -767,7 +796,7 @@ All other setup requirements from the single-operator section still apply.
 
 **What auto-approve does NOT do:**
 
-- It does **not** issue sessions. `POST /session` and `GET /token?session=…` return 403 on the operator socket. There is no 8-hour bearer-token refresh credential to steal.
+- It does **not** issue sessions. `POST /session`, `GET /session?id=…`, and `GET /token?session=…` return 403 on the operator socket. There is no 8-hour bearer-token refresh credential to steal.
 - It does **not** affect the main socket. Agent flows are unchanged: dev tokens are served immediately as before; prod requests still trigger the standard confirmation dialog.
 - It does **not** loosen the existing PAM allowlist. `auto_approve_pam_policies` is required to be a subset of `pam_allowed_policies`. Out-of-allowlist requests on the operator socket return a clean 403 — they do not fall through to a prompt.
 - It does **not** carve out a separate rate-limit budget. The operator socket shares the existing 20/minute prod limiter with the main socket, so a flooding agent surfaces as a real rate-limit signal.
